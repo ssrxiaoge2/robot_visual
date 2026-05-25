@@ -1,0 +1,145 @@
+# 代码修改记录
+
+> 每次提交或重要改动后，在此文件追加一条记录。
+> 格式：日期 · 版本标签 · 改动摘要 + 文件清单。
+
+---
+
+## 2026-05-25 | 会话 #3 — AgvController + 机器人真实 Modbus 时序
+
+### 背景
+前两轮会话完成了项目架构拆分（WorkflowEngine / DeviceManager / ThemeSwitch）和跨平台适配。
+本轮目标：把"纯定时器仿真"的工作流替换为真实 Modbus 硬件驱动，并新增 AGV 控制器。
+
+---
+
+### 新建文件
+
+#### `agvcontroller.h`
+- 声明 `AgvController : QObject`，镜像 `RobotController` 接口风格
+- 枚举 `AgvStatus`（Idle / Moving / Arrived / Fault），映射 AGV Input 寄存器状态字
+- Modbus 寄存器常量：
+  - `REG_TARGET_STATION = 1000`（Holding，上位机写入目标工位）
+  - `REG_STATUS = 1001`（Input，读取 AGV 当前状态）
+- 公开接口：`connectToHost()` / `disconnectFromHost()` / `isConnected()`
+- 控制接口：`sendToStation(int)` / `readStatusRegister()`
+- 信号：`connected()` / `disconnected()` / `errorOccurred(QString)` / `statusRead(AgvStatus)` / `arrived()`
+
+#### `agvcontroller.cpp`
+- 实现 QModbusTcpClient 连接管理，5s 自动重连定时器
+- `sendToStation()`：FC16 写 Holding 1000
+- `readStatusRegister()`：FC04 读 Input 1001，收到 Arrived 时额外 emit `arrived()`
+- `onStateChanged()`：连接成功停止重连计时；断线时若 IP 非空则重启重连
+
+---
+
+### 修改文件
+
+#### `robotcontroller.h` / `robotcontroller.cpp`
+新增两个 public 方法及一个新信号：
+
+| 新增项 | 说明 |
+|--------|------|
+| `writeRegisters(int startAddr, QList<quint16>)` | FC16 批量写 Holding（用于一次写坐标寄存器 901-906） |
+| `readInputRegisters(int startAddr, int count)` | FC04 读 Input Register（用于轮询机器人状态字 Input 1132） |
+| 信号 `inputRegistersRead(int, QList<quint16>)` | 与 `registersRead`（FC03）分开，避免地址冲突 |
+
+---
+
+#### `workflowengine.h`
+- 包含 `agvcontroller.h`（需要完整类型以使用 `AgvController::AgvStatus`）
+- 新增 Modbus 寄存器 / 命令常量（`constexpr`，改一处全部生效）：
+
+  ```
+  REG_CMD_ID=900, REG_COORD_START=901, REG_ROBOT_STATUS=1132
+  CMD_GRAB=8, CMD_FLIP=9, CMD_RESET=0
+  STATUS_IDLE=0, STATUS_REQ_PHOTO=1, STATUS_GRAB_DONE=2, STATUS_UNLOAD_DONE=3
+  ```
+
+- 新增公开接口：
+  - `setRobotController(RobotController*)` / `setAgvController(AgvController*)`
+  - slot `setCoordinates(QList<quint16>)` — 相机系统回调，注入 6 个坐标寄存器值
+  - signal `requestCameraCapture()` — 通知相机系统开始拍照
+  - signal `stepLog(QString)` / `engineError(QString)` — 引擎内部日志/错误
+
+- 内部新增私有枚举 `EngineState`（Idle / Step0_Camera / Step1_WriteCoords / Step1_Grabbing / Step2_AgvMoving / Step3_Unloading / Step4_Resetting）
+- 内部新增 `PendingCmd` 枚举，保护"先写坐标再写 CmdID"的写入顺序
+
+---
+
+#### `workflowengine.cpp`
+**完全重写**为真实硬件状态机，原定时器仿真逻辑保留为"无硬件"回退：
+
+| 步骤 | 真实模式（硬件已连接） | 仿真模式（硬件离线） |
+|------|------------------------|----------------------|
+| Step 0 相机拍照 | emit `requestCameraCapture()`，等待 `setCoordinates()` 回调 | `simIntervalMs` 后用零坐标自动推进 |
+| Step 1 机器人抓取 | 写 Holding901-906 → `writeCompleted` 回调后写 Holding900=8 → 轮询 Input1132 == GRAB_DONE | `simIntervalMs` 后自动推进 |
+| Step 2 AGV 行走 | 写 AGV Holding1000=工位号 → 轮询 AGV Input1001 == ARRIVED | `simIntervalMs` 后自动推进 |
+| Step 3 机器人放料 | 写 Holding900=9（翻转） → 轮询 Input1132 == UNLOAD_DONE | `simIntervalMs` 后自动推进 |
+| Step 4 复位等待 | 写 Holding900=0（复位） → 轮询 Input1132 == IDLE | `simIntervalMs` 后自动推进 |
+
+关键设计：
+- `m_pollTimer`（300ms）：定期向硬件发起状态轮询
+- `m_stepTimer`（单次，simIntervalMs）：仿真自动推进 / 无硬件超时
+- `m_timeoutTimer`（30s）：真实模式步骤保护，超时则 emit `engineError` 并 `stop()`
+- `onRobotWriteCompleted()`：通过 `PendingCmd` 枚举实现顺序写保护（坐标先于 CmdID）
+- `stop()`：停所有定时器，向机器人写 CmdID=0 复位
+
+---
+
+#### `devicemanager.h` / `devicemanager.cpp`
+- `Config` 结构体新增 `agvPort = 502` 字段
+- 新增 `agvController()` getter（返回 `AgvController*`）
+- `applyConfig()` 扩展：同时重连 AGV Modbus（原来只重连机械臂）
+- `testAgv()` 改用 `m_cfg.agvPort`（原来硬编码 502）
+- 新增透传信号：`agvModbusConnected()` / `agvModbusDisconnected()` / `agvModbusError(QString)`
+- 构造函数：创建 `AgvController`，连接其三个状态信号
+
+---
+
+#### `mainwindow.cpp`
+- 新增 `#include "agvcontroller.h"`
+- 构造函数注入控制器到引擎（在 `initUI()` 之前）：
+  ```cpp
+  m_engine->setRobotController(m_devMgr->robotController());
+  m_engine->setAgvController(m_devMgr->agvController());
+  ```
+- 新增引擎日志/错误信号连接：`stepLog` / `engineError` → 转发到 `log()`
+- 新增 AGV Modbus 信号连接：`agvModbusConnected/Disconnected/Error` → 更新 `m_indAGV` 指示灯 + 日志
+- `robotModbusConnected` 现在同时更新 `m_indRobotConn` 和 `m_indRobot`
+
+---
+
+#### `CMakeLists.txt`
+- `PROJECT_SOURCES` 列表新增 `agvcontroller.cpp` / `agvcontroller.h`
+
+---
+
+### 注意事项 / 待确认
+
+| 项目 | 说明 |
+|------|------|
+| `CMD_FLIP = 9` | 翻转卸料命令字，需对照华沿机器人操作手册确认实际值 |
+| AGV 寄存器 1000/1001 | 需对照仙工 AGV Modbus 接口手册验证地址 |
+| `setCoordinates()` 调用方 | 相机坐标→寄存器数据通路尚未实现，当前触发相机后会超时用零坐标继续 |
+| 单步模式硬件行为 | `singleStep()` 在硬件已连接时会触发真实 Modbus 指令并持续轮询（原为纯 UI 推进） |
+
+---
+
+## 模板（复制此块追加下一次记录）
+
+```
+## YYYY-MM-DD | 会话 #N — 标题
+
+### 背景
+
+
+### 新建文件
+
+
+### 修改文件
+
+
+### 注意事项 / 待确认
+
+```
