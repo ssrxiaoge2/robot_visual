@@ -5,6 +5,23 @@
 
 ---
 
+## 2026-05-26 | 目录结构整理 — 引入 src/ scripts/ tools/ 分层
+
+### 变更
+
+#### 目录结构
+- 所有 C++ 源文件（`.h` / `.cpp` / `.ui`）从根目录移入 `src/`
+- Python 调试脚本（`camera_stream.py`、`camera_test.py`）移入 `scripts/`
+- Linux GPIO 控制程序（`fill_light`）移入 `tools/`
+- 全部使用 `git mv` 操作，完整保留文件 git 历史
+
+#### `CMakeLists.txt`
+- `PROJECT_SOURCES` 中所有文件路径加 `src/` 前缀
+- 新增 `target_include_directories(wh-robot-visual PRIVATE src/)`，保证 `#include "xxx.h"` 无需修改路径
+- 按功能重新排序：入口 → UI → 业务核心 → 设备控制层
+
+---
+
 ## 2026-05-26 | 架构修复 — MainWindow 调试面板不再直接访问 RobotController
 
 ### 变更
