@@ -14,29 +14,29 @@ add_compile_definitions(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network SerialBus)
 
 set(PROJECT_SOURCES
-        main.cpp
-        mainwindow.cpp
-        mainwindow.h
-        mainwindow.ui
-        workflowengine.cpp
-        workflowengine.h
-        devicemanager.cpp
-        devicemanager.h
-        agvcontroller.cpp
-        agvcontroller.h
-        themeswitch.cpp
-        themeswitch.h
-        deviceindicator.cpp
-        deviceindicator.h
-        workflowwidget.cpp
-        workflowwidget.h
-        workflowstep.h
-        camerawindow.cpp
-        camerawindow.h
-        visionclient.cpp
-        visionclient.h
-        robotcontroller.cpp
-        robotcontroller.h
+        src/main.cpp
+        src/mainwindow.cpp
+        src/mainwindow.h
+        src/mainwindow.ui
+        src/workflowengine.cpp
+        src/workflowengine.h
+        src/workflowstep.h
+        src/devicemanager.cpp
+        src/devicemanager.h
+        src/robotcontroller.cpp
+        src/robotcontroller.h
+        src/agvcontroller.cpp
+        src/agvcontroller.h
+        src/visionclient.cpp
+        src/visionclient.h
+        src/camerawindow.cpp
+        src/camerawindow.h
+        src/deviceindicator.cpp
+        src/deviceindicator.h
+        src/workflowwidget.cpp
+        src/workflowwidget.h
+        src/themeswitch.cpp
+        src/themeswitch.h
 )
 
 qt_add_executable(wh-robot-visual
@@ -45,6 +45,7 @@ qt_add_executable(wh-robot-visual
 )
 
 target_link_libraries(wh-robot-visual PRIVATE Qt6::Widgets Qt6::Network Qt6::SerialBus)
+target_include_directories(wh-robot-visual PRIVATE src/)
 
 # ── 奥比中光 SDK（仅 Linux 部署时链接，Windows 开发环境跳过）──
 if(UNIX)
