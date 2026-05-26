@@ -6,6 +6,7 @@
 
 class RobotController;
 class AgvController;
+class VisionHttpClient;
 
 /*!
  * \brief 设备管理器
@@ -13,6 +14,12 @@ class AgvController;
  * 负责所有硬件设备的配置管理、连通性测试、补光灯控制，
  * 以及 Modbus TCP 机械臂/AGV 连接的生命周期管理。
  * 不依赖任何 UI 组件，仅通过信号向外通知状态变化和日志。
+ *
+ * 管理的设备：
+ *   ① RobotController  — 华沿机械臂 Modbus TCP
+ *   ② AgvController    — 仙工 AGV Modbus TCP
+ *   ③ VisionHttpClient — 视觉服务 HTTP API（Flask，端口 8080）
+ *   ④ 补光灯           — Linux GPIO（fill_light 程序）
  */
 class DeviceManager : public QObject
 {
@@ -20,20 +27,22 @@ class DeviceManager : public QObject
 public:
     /// 所有设备的 IP/端口配置
     struct Config {
-        QString robotIP   = QStringLiteral("192.168.10.10");
-        int     robotPort = 502;
-        QString agvIP     = QStringLiteral("192.168.192.5");
-        int     agvPort   = 502;
-        QString cameraIP  = QStringLiteral("192.168.1.10");
-        QString scannerIP = QStringLiteral("192.168.2.100");
+        QString robotIP    = QStringLiteral("192.168.10.10");
+        int     robotPort  = 502;
+        QString agvIP      = QStringLiteral("192.168.192.5");
+        int     agvPort    = 502;
+        QString cameraIP   = QStringLiteral("192.168.1.10");
+        int     cameraPort = 8080; ///< 视觉服务 Flask HTTP 端口（默认 8080）
+        QString scannerIP  = QStringLiteral("192.168.2.100");
     };
 
     explicit DeviceManager(QObject *parent = nullptr);
 
-    RobotController *robotController() const { return m_robotCtrl; }
-    AgvController   *agvController()   const { return m_agvCtrl;  }
-    bool             lightIsOn()        const { return m_lightOn;   }
-    const Config    &config()           const { return m_cfg;       }
+    RobotController  *robotController()  const { return m_robotCtrl;   }
+    AgvController    *agvController()    const { return m_agvCtrl;     }
+    VisionHttpClient *visionClient()     const { return m_visionClient; }
+    bool              lightIsOn()        const { return m_lightOn;      }
+    const Config     &config()           const { return m_cfg;          }
 
     /// 更新配置（不立即连接，需显式调用 applyConfig）
     void setConfig(const Config &cfg) { m_cfg = cfg; }
@@ -79,10 +88,11 @@ private:
     /// 同步 TCP 连通性探测，成功返回 true
     bool tcpPing(const QString &ip, int port, int timeoutMs = 2000);
 
-    RobotController *m_robotCtrl = nullptr;
-    AgvController   *m_agvCtrl  = nullptr;
-    Config           m_cfg;
-    bool             m_lightOn   = true;
+    RobotController  *m_robotCtrl    = nullptr;
+    AgvController    *m_agvCtrl     = nullptr;
+    VisionHttpClient *m_visionClient = nullptr;
+    Config            m_cfg;
+    bool              m_lightOn      = true;
 };
 
 #endif // DEVICEMANAGER_H

@@ -29,6 +29,7 @@
 #include "workflowengine.h"
 #include "robotcontroller.h"
 #include "agvcontroller.h"
+#include "visionclient.h"
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -57,6 +58,9 @@ MainWindow::MainWindow(QWidget *parent)
     // 注入后引擎从"纯仿真"模式升级为"有硬件时走 Modbus，无硬件时仿真"双模式
     m_engine->setRobotController(m_devMgr->robotController());
     m_engine->setAgvController(m_devMgr->agvController());
+    // 注入视觉客户端：Step0 将主动调用 fetchInference()，
+    // 返回坐标后自动调用 setCoordinates() 推进到 Step1
+    m_engine->setVisionClient(m_devMgr->visionClient());
 
     // ── 3. 构建所有 UI 控件 ─────────────────────────────────
     initUI();
@@ -631,8 +635,9 @@ void MainWindow::buildConfig(DeviceManager::Config &cfg) const
     cfg.robotIP   = m_editRobotIP->text().trimmed();
     cfg.robotPort = m_spinRobotPort->value();
     cfg.agvIP     = m_editAgvIP->text().trimmed();
-    cfg.cameraIP  = m_editCameraIP->text().trimmed();
-    cfg.scannerIP = m_editScannerIP->text().trimmed();
+    cfg.cameraIP   = m_editCameraIP->text().trimmed();
+    cfg.cameraPort = 8080; // 视觉服务固定端口（Flask HTTP）
+    cfg.scannerIP  = m_editScannerIP->text().trimmed();
     // agvPort 默认 502，无对应 UI 控件（Modbus 标准端口）
 }
 
@@ -713,10 +718,10 @@ void MainWindow::onTestCameraOpen()
     const QString ip = m_editCameraIP->text().trimmed();
     if (ip.isEmpty()) { log(QStringLiteral("[相机] IP 为空")); return; }
 
-    log(QString("[相机] 正在打开实时画面 %1 ...").arg(ip));
+    log(QString("[相机] 正在打开视觉标注画面 %1:8080 ...").arg(ip));
     m_indCameraDebug->setStatus(false, QStringLiteral("连接中..."));
 
-    auto *camWin = new CameraWindow(ip, this);
+    auto *camWin = new CameraWindow(ip, 8080, this);
     connect(camWin, &QDialog::finished, this, [this](int) {
         m_indCameraDebug->setStatus(true, QStringLiteral("待机"));
         log(QStringLiteral("[相机] 画面窗口已关闭"));
@@ -725,7 +730,7 @@ void MainWindow::onTestCameraOpen()
     camWin->show();
 
     m_indCameraDebug->setStatus(true, QStringLiteral("画面已打开"));
-    log(QStringLiteral("[相机] 实时画面窗口已开启"));
+    log(QStringLiteral("[相机] 视觉标注画面窗口已开启（HTTP /frame/annotated）"));
 }
 
 void MainWindow::onTestScanner()

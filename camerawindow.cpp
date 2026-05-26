@@ -1,157 +1,131 @@
 /**
  * @file camerawindow.cpp
- * @brief CameraWindow 奥比相机实时画面对话框实现
+ * @brief CameraWindow 奥比相机实时画面（HTTP 轮询版）
  *
- * 帧解析协议说明：
- *   Python 端（camera_stream.py）每帧发送：
- *     1. 文本行：帧的 JPEG 字节数 + '\n'（例："45123\n"）
- *     2. 二进制体：JPEG 数据，长度即为上行声明的字节数
- *   Qt 端通过 m_buffer 累积 stdout 数据，逐帧解析：
- *     - m_expectedSize == 0：在缓冲区中查找 '\n'，解析帧头，记录期望字节数
- *     - m_expectedSize > 0：等待缓冲区积累到足够字节后，截取并解码 JPEG
+ * 帧获取流程：
+ *   QTimer(150ms) → onTimerTick() → GET /frame/annotated
+ *                                         ↓
+ *   QNetworkReply::finished → onFrameReply() → QImage::loadFromData() → setPixmap()
+ *
+ * 防止请求堆积：
+ *   若上一帧的 HTTP 请求尚未完成，本次跳过（m_pending != nullptr 时 return）。
+ *   这样即使网络慢（>150ms/帧），也不会无限积压请求。
+ *
+ * 与旧版（Python 子进程）的区别：
+ *   旧版：启动 camera_stream.py 子进程，通过 stdout 接收自定义帧协议（字节数\nJPEG）
+ *   新版：直接 HTTP GET，更简单、更稳定、利用视觉服务已有的 Flask 路由
+ *         返回的图像已含 YOLO 检测框、质心和旋转角度标注
  */
 
 #include "camerawindow.h"
 
 #include <QVBoxLayout>
-#include <QImage>
-#include <QFile>
-
-// ── Python 路径检测 ───────────────────────────────────────────
-
-/**
- * @brief 运行时检测 Python 可执行文件路径
- * @return Python 解释器的路径或命令名
- *
- * 优先级：
- *   Linux: /home/agv/miniconda3/bin/python3 （AGV 专用 conda 环境）
- *          → 找不到则退回系统 python3
- *   Windows: PATH 中的 python（开发环境）
- */
-static QString findPython()
-{
-#ifdef Q_OS_WIN
-    return QStringLiteral("python");
-#else
-    // 优先使用 AGV 设备上的 conda 环境（已安装 pyorbbecsdk）
-    if (QFile::exists(QStringLiteral("/home/agv/miniconda3/bin/python3")))
-        return QStringLiteral("/home/agv/miniconda3/bin/python3");
-    return QStringLiteral("python3"); // 回退到系统 Python
-#endif
-}
-
-/// camera_stream.py 的绝对路径（由 CMake 在编译期注入 PROJECT_SOURCE_DIR 宏）
-static const QString kCameraScript = QStringLiteral(PROJECT_SOURCE_DIR "/camera_stream.py");
+#include <QStatusBar>
+#include <QNetworkRequest>
 
 // ── 构造 / 析构 ───────────────────────────────────────────────
 
-CameraWindow::CameraWindow(const QString &ip, QWidget *parent)
-    : QDialog(parent), m_ip(ip)
+CameraWindow::CameraWindow(const QString &ip, int port, QWidget *parent)
+    : QDialog(parent)
+    , m_url(QString("http://%1:%2/frame/annotated").arg(ip).arg(port))
 {
-    setWindowTitle(QStringLiteral("奥比相机 - %1").arg(ip));
+    setWindowTitle(QString("视觉标注画面 — %1:%2").arg(ip).arg(port));
     resize(960, 720);
     setMinimumSize(640, 480);
 
-    // 图像显示区：铺满对话框，内容缩放，深色背景
+    // ── 图像显示区（铺满对话框，保持宽高比，深色背景）───────
     auto *layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
 
     m_label = new QLabel(this);
     m_label->setAlignment(Qt::AlignCenter);
-    m_label->setScaledContents(true);
-    m_label->setStyleSheet("background:#1a1a1a;");
+    m_label->setScaledContents(false); // 使用 Qt::KeepAspectRatio 缩放
+    m_label->setStyleSheet("background:#1a1a1a; color:#888;");
     m_label->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Expanding);
-    m_label->setText(QStringLiteral("正在连接相机 %1 ...").arg(ip));
+    m_label->setText(QString("正在连接视觉服务 %1:%2 ...").arg(ip).arg(port));
     layout->addWidget(m_label);
 
-    startStream(); // 构造时立即启动相机子进程
+    // ── HTTP 客户端 ──────────────────────────────────────────
+    m_nam = new QNetworkAccessManager(this);
+    // 统一在 QNAM 的 finished 信号中处理响应（不在各 reply 上单独 connect）
+    connect(m_nam, &QNetworkAccessManager::finished,
+            this, &CameraWindow::onFrameReply);
+
+    // ── 轮询定时器（150ms = 约 7fps）─────────────────────────
+    // 视觉服务运行在约 15fps，Qt 侧取 7fps 足够流畅，同时降低带宽压力
+    m_timer = new QTimer(this);
+    m_timer->setInterval(150);
+    connect(m_timer, &QTimer::timeout, this, &CameraWindow::onTimerTick);
+    m_timer->start();
+
+    // 构造后立即发一帧（不等第一个 timer 周期）
+    onTimerTick();
 }
 
 CameraWindow::~CameraWindow()
 {
-    stopStream(); // 确保子进程在窗口销毁前退出
-}
+    m_timer->stop();
 
-// ── 子进程管理 ────────────────────────────────────────────────
-
-void CameraWindow::startStream()
-{
-    m_proc = new QProcess(this);
-    // 分离 stdout（图像数据）与 stderr（日志/报错），避免混淆
-    m_proc->setProcessChannelMode(QProcess::SeparateChannels);
-
-    // stdout 有新数据 → 解析帧
-    connect(m_proc, &QProcess::readyReadStandardOutput,
-            this, &CameraWindow::onReadyRead);
-    // 子进程启动失败（Python 未找到等）
-    connect(m_proc, &QProcess::errorOccurred,
-            this, &CameraWindow::onProcessError);
-    // 子进程正常退出（相机断连或脚本结束）
-    connect(m_proc, QOverload<int, QProcess::ExitStatus>::of(&QProcess::finished),
-            this, [this](int /*exitCode*/, QProcess::ExitStatus /*status*/) {
-        m_label->setText(QStringLiteral("相机流已断开"));
-    });
-
-    // 启动：python camera_stream.py <ip>
-    m_proc->start(findPython(), QStringList() << kCameraScript << m_ip);
-}
-
-void CameraWindow::stopStream()
-{
-    if (!m_proc) return;
-    m_proc->terminate();                       // 发送 SIGTERM（Windows 上等同于 kill）
-    if (!m_proc->waitForFinished(3000))        // 等待最多 3s
-        m_proc->kill();                        // 超时仍未退出则强制终止
-}
-
-// ── 帧数据解析（stdout 回调）─────────────────────────────────
-
-void CameraWindow::onReadyRead()
-{
-    // 将新到达的数据追加到缓冲区（数据可能跨多次 readyRead 到达）
-    m_buffer.append(m_proc->readAllStandardOutput());
-
-    // 循环处理缓冲区中已积累的完整帧
-    while (true) {
-
-        // ── 阶段 1：读帧头（等待换行符，解析帧字节数）────────
-        if (m_expectedSize == 0) {
-            const int nl = m_buffer.indexOf('\n');
-            if (nl < 0) break; // 换行符未到，等待更多数据
-
-            bool ok   = false;
-            int  size = m_buffer.left(nl).toInt(&ok);
-            m_buffer.remove(0, nl + 1); // 移除帧头（含换行符）
-
-            // 合法性检查：必须是正整数，且不超过 10MB（防止恶意/损坏数据）
-            if (ok && size > 0 && size < 10 * 1024 * 1024)
-                m_expectedSize = size;
-            // 非法帧头直接丢弃，继续尝试下一行
-        }
-
-        // ── 阶段 2：读帧体（等待完整 JPEG 字节到达）─────────
-        if (m_expectedSize > 0 && m_buffer.size() >= m_expectedSize) {
-            const QByteArray frameData = m_buffer.left(m_expectedSize);
-            m_buffer.remove(0, m_expectedSize); // 从缓冲区移除已消费的帧
-            m_expectedSize = 0;                 // 重置，准备接收下一帧帧头
-
-            // 解码 JPEG 并更新显示
-            QImage img;
-            if (img.loadFromData(frameData))
-                m_label->setPixmap(QPixmap::fromImage(img));
-            // 解码失败（损坏帧）则静默丢弃，不影响后续帧
-        } else {
-            break; // 帧体数据不足，等待更多 stdout 数据
-        }
+    // 若有正在进行的请求，中止并释放
+    if (m_pending) {
+        m_pending->abort();
+        m_pending->deleteLater();
+        m_pending = nullptr;
     }
 }
 
-// ── 错误处理 ─────────────────────────────────────────────────
+// ── 帧请求与响应 ─────────────────────────────────────────────
 
-void CameraWindow::onProcessError(QProcess::ProcessError err)
+/**
+ * @brief 定时器触发：发起一次 GET /frame/annotated 请求
+ *
+ * 防堆积机制：若上一帧请求尚未完成（m_pending != nullptr），
+ * 本次跳过，等待下一个定时器周期。这避免了慢网络下请求无限积压。
+ */
+void CameraWindow::onTimerTick()
 {
-    if (err == QProcess::FailedToStart) {
-        // 最常见的错误：Python 不在 PATH 中，或脚本文件不存在
-        m_label->setText(QStringLiteral("无法启动相机脚本（请检查 Python 环境）"));
+    if (m_pending) return; // 上一帧还未返回，跳过本次
+
+    QNetworkRequest req(m_url);
+    req.setTransferTimeout(3000); // 3s 超时，防止单帧卡住所有后续帧
+    m_pending = m_nam->get(req);
+}
+
+/**
+ * @brief HTTP 响应到达：解码 JPEG 并更新显示
+ * @param reply 已完成的 QNetworkReply（由 QNAM::finished 信号传入）
+ *
+ * 无论成功还是失败，都必须释放 reply 并清除 m_pending，
+ * 确保下次 onTimerTick() 能发起新请求。
+ */
+void CameraWindow::onFrameReply(QNetworkReply *reply)
+{
+    // 仅处理当前期待的那个 reply（防止窗口关闭后残留 reply 触发此槽）
+    if (reply != m_pending) {
+        reply->deleteLater();
+        return;
     }
+    m_pending = nullptr; // 清除标记，允许下次轮询
+
+    if (reply->error() == QNetworkReply::NoError) {
+        QImage img;
+        if (img.loadFromData(reply->readAll())) {
+            ++m_frameCount;
+            // 按窗口大小等比例缩放，不超出 label 边界
+            const QPixmap pm = QPixmap::fromImage(img).scaled(
+                m_label->size(), Qt::KeepAspectRatio, Qt::SmoothTransformation);
+            m_label->setPixmap(pm);
+            setWindowTitle(QString("视觉标注画面 — 帧 #%1").arg(m_frameCount));
+        }
+        // JPEG 解码失败（损坏帧）：静默丢弃，下次重新获取
+    } else {
+        // 网络错误：更新提示文字（不弹框，避免打断用户）
+        if (reply->error() != QNetworkReply::OperationCanceledError) {
+            // OperationCanceledError 是析构时主动 abort() 触发，不提示
+            m_label->setText(QString("连接失败: %1\n将在下次定时器周期重试…")
+                                 .arg(reply->errorString()));
+        }
+    }
+
+    reply->deleteLater();
 }

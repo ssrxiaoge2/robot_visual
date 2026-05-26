@@ -55,6 +55,7 @@
 #include "workflowengine.h"
 #include "robotcontroller.h"
 #include "agvcontroller.h"
+#include "visionclient.h"
 
 // ── 步骤元数据 ──────────────────────────────────────────────
 
@@ -136,6 +137,40 @@ void WorkflowEngine::setAgvController(AgvController *ctrl)
         // AGV 状态读取完成 → 检查是否已到位（Input 1001）
         connect(ctrl, &AgvController::statusRead,
                 this, &WorkflowEngine::onAgvStatusRead);
+    }
+}
+
+/**
+ * @brief 注入视觉 HTTP 客户端
+ *
+ * 连接两个核心信号：
+ *   coordinatesReady → setCoordinates()：有目标时注入坐标并推进 Step1
+ *   noObjectDetected → 用零坐标继续（记录警告日志，不停止工作流）
+ *
+ * 断开旧客户端连接，避免重复注入时信号堆叠。
+ */
+void WorkflowEngine::setVisionClient(VisionHttpClient *client)
+{
+    if (m_visionClient)
+        disconnect(m_visionClient, nullptr, this, nullptr);
+
+    m_visionClient = client;
+    if (client) {
+        // 视觉推理成功 → 注入坐标（触发 Step0→Step1 转换）
+        connect(client, &VisionHttpClient::coordinatesReady,
+                this, &WorkflowEngine::setCoordinates);
+
+        // 未检测到目标 → 警告日志 + 用零坐标继续
+        connect(client, &VisionHttpClient::noObjectDetected, this, [this]() {
+            emit stepLog(QStringLiteral("[Step0] ⚠ 未检测到目标，用零坐标继续"));
+            setCoordinates(QList<quint16>(6, 0));
+        });
+
+        // 视觉服务网络错误 → 记录错误日志 + 用零坐标继续（不停止工作流）
+        connect(client, &VisionHttpClient::errorOccurred, this, [this](const QString &msg) {
+            emit engineError(msg);
+            setCoordinates(QList<quint16>(6, 0));
+        });
     }
 }
 
@@ -228,10 +263,11 @@ void WorkflowEngine::setCoordinates(const QList<quint16> &coords)
     m_coords    = coords;
     m_hasCoords = true;
 
-    // 若正在等待相机数据，停止仿真超时定时器，立即推进
+    // 若正在等待视觉数据，停止所有定时器，立即推进
     if (m_state == EngineState::Step0_Camera) {
-        m_stepTimer->stop();
-        emit stepLog(QStringLiteral("[相机] 坐标数据已就绪，开始机器人抓取"));
+        m_stepTimer->stop();    // 停止仿真推进定时器
+        m_timeoutTimer->stop(); // 停止 30s 超时保护（视觉已响应，超时无需触发）
+        emit stepLog(QStringLiteral("[视觉] 坐标数据已就绪，开始机器人抓取"));
         enterStep1();
     }
     // 若在其他状态收到（例如相机延迟回调），存储坐标留下次循环使用
@@ -260,12 +296,16 @@ void WorkflowEngine::enterStep(int idx)
 // ── 各步骤逻辑 ────────────────────────────────────────────────
 
 /**
- * @brief Step 0 — 相机拍照
+ * @brief Step 0 — 视觉识别（触发 HTTP 推理或降级仿真）
  *
- * 发出 requestCameraCapture() 信号触发相机采集。
- * 相机系统处理完成后调用 setCoordinates() 将坐标注入引擎。
- * 若超过 simIntervalMs 未收到坐标（相机未连接或超时），
- * 仿真定时器触发，用全零坐标继续执行。
+ * 真实模式（VisionHttpClient 已注入且已配置）：
+ *   调用 fetchInference() → 视觉服务返回 JSON → setCoordinates() 被调用
+ *   → Step0_Camera 状态退出，进入 Step1
+ *   → 同时启动 30s 超时保护，防止视觉服务无响应时工作流卡死
+ *
+ * 仿真模式（无视觉服务或服务未配置）：
+ *   发出 requestCameraCapture() 信号（供外部扩展使用）
+ *   simIntervalMs 后定时器触发 onStepTimeout()，用零坐标自动推进
  */
 void WorkflowEngine::enterStep0()
 {
@@ -273,11 +313,20 @@ void WorkflowEngine::enterStep0()
     m_hasCoords = false;
     m_coords.clear();
 
-    emit stepLog(QString("[步骤0] 工位%1 触发相机拍照").arg(m_station));
-    emit requestCameraCapture();
+    emit stepLog(QString("[步骤0] 工位%1 触发视觉识别").arg(m_station));
 
-    // 启动仿真超时定时器（无相机时自动推进）
-    m_stepTimer->start(m_simIntervalMs);
+    if (m_visionClient && m_visionClient->isConfigured()) {
+        // ── 真实模式：向视觉服务发起 HTTP 推理请求 ───────────
+        m_visionClient->fetchInference();
+        // 启动超时保护（30s 内视觉服务必须响应，否则停止流程）
+        m_timeoutTimer->start();
+        emit stepLog(QStringLiteral("[步骤0] 已请求视觉推理，等待坐标..."));
+    } else {
+        // ── 仿真模式：定时器超时后自动推进 ──────────────────
+        emit requestCameraCapture(); // 保留，供外部扩展使用
+        m_stepTimer->start(m_simIntervalMs);
+        emit stepLog(QStringLiteral("[步骤0][仿真] 视觉服务未配置，等待超时推进"));
+    }
 }
 
 /**

@@ -8,6 +8,7 @@
 #include "agvcontroller.h"   // 需要完整定义以使用 AgvController::AgvStatus
 
 class RobotController;
+class VisionHttpClient;
 
 /*!
  * \brief 工作流状态机（五步循环，支持真实 Modbus 硬件与仿真回退）
@@ -59,6 +60,14 @@ public:
     // ── 硬件控制器注入（在 start() 前调用）──────────────────────
     void setRobotController(RobotController *ctrl);
     void setAgvController(AgvController *ctrl);
+    /**
+     * @brief 注入视觉 HTTP 客户端
+     *
+     * 注入后 Step0 将主动调用 fetchInference()，
+     * 不再依赖外部通过 requestCameraCapture() 信号触发。
+     * 未注入或服务未配置时，降级为 requestCameraCapture() + 仿真定时器。
+     */
+    void setVisionClient(VisionHttpClient *client);
 
     int  currentStep() const { return m_currentStep; }
     int  cycleCount()  const { return m_cycleCount;  }
@@ -124,8 +133,9 @@ private:
     void startPollAndTimeout();
 
     // ── 控制器（弱引用，生命周期由 DeviceManager 管理）──────────
-    RobotController *m_robotCtrl = nullptr;
-    AgvController   *m_agvCtrl  = nullptr;
+    RobotController  *m_robotCtrl    = nullptr;
+    AgvController    *m_agvCtrl     = nullptr;
+    VisionHttpClient *m_visionClient = nullptr;
 
     // ── 定时器 ────────────────────────────────────────────────
     QTimer *m_pollTimer    = nullptr;  ///< 300 ms，向硬件轮询状态

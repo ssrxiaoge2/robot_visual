@@ -3,21 +3,24 @@
  * @brief DeviceManager 设备管理器实现
  *
  * 职责划分：
- *   ① 生命周期管理：创建并持有 RobotController / AgvController，
- *      在 applyConfig() 时重新连接 Modbus
- *   ② 连通性测试：tcpPing() 同步探测各设备的 TCP 端口可达性
+ *   ① 生命周期管理：创建并持有 RobotController / AgvController / VisionHttpClient，
+ *      在 applyConfig() 时重新连接 Modbus 并更新视觉服务 URL
+ *   ② 连通性测试：tcpPing() 同步探测 Modbus 设备；
+ *                  VisionHttpClient::checkStatus() 异步检测视觉服务
  *   ③ 补光灯控制：Linux 环境调用外部 fill_light 程序控制 GPIO；
  *                  Windows 环境模拟切换（不访问硬件）
- *   ④ 信号透传：将 RobotController/AgvController 的连接状态信号
+ *   ④ 信号透传：将子控制器的连接状态/错误信号
  *               转发为 DeviceManager 自己的信号，供 MainWindow 订阅
  *
  * 注意：tcpPing() 是同步阻塞调用，会在当前线程等待最多 timeoutMs（默认2s）。
- * 若需要在高频场景使用，应改为异步实现。
+ * testCamera() 已改为异步方式（通过 VisionHttpClient::checkStatus()），
+ * 结果通过 cameraStatusChanged 信号异步通知 UI。
  */
 
 #include "devicemanager.h"
 #include "robotcontroller.h"
 #include "agvcontroller.h"
+#include "visionclient.h"
 
 #include <QTcpSocket>
 #ifdef Q_OS_LINUX
@@ -47,27 +50,37 @@ DeviceManager::DeviceManager(QObject *parent)
             this, &DeviceManager::agvModbusDisconnected);
     connect(m_agvCtrl, &AgvController::errorOccurred,
             this, &DeviceManager::agvModbusError);
+
+    // ── 视觉服务客户端（HTTP，Flask 8080）────────────────────
+    m_visionClient = new VisionHttpClient(this);
+    // 将视觉服务连通性结果透传为 cameraStatusChanged 信号
+    // testCamera() 调用 checkStatus()，结果由此链路异步回到 UI
+    connect(m_visionClient, &VisionHttpClient::statusChanged,
+            this, [this](bool ok, const QString &msg) {
+        emit logMessage(QString("[视觉] %1").arg(msg));
+        emit cameraStatusChanged(ok, msg);
+    });
 }
 
 // ── 配置应用 ─────────────────────────────────────────────────
 
 /**
- * @brief 应用当前配置并重新连接所有 Modbus 设备
+ * @brief 应用当前配置并重新连接所有设备
  *
- * 先断开现有连接再重建，避免多次 applyConfig() 导致连接叠加。
- * 调用后 RobotController / AgvController 会异步尝试连接，
- * 连接结果通过 robotModbusConnected / agvModbusConnected 信号通知。
+ * 先断开现有 Modbus 连接再重建，同时更新视觉服务地址。
+ * 调用后各设备会异步尝试连接，连接结果通过信号通知。
  */
 void DeviceManager::applyConfig()
 {
     if (m_cfg.robotIP.isEmpty() || m_cfg.agvIP.isEmpty()) {
-        emit logMessage(QStringLiteral("[配置] IP 不能为空"));
+        emit logMessage(QStringLiteral("[配置] 机器人/AGV IP 不能为空"));
         return;
     }
 
-    emit logMessage(QString("配置已更新 → 机器人 %1:%2  AGV %3:%4")
+    emit logMessage(QString("配置已更新 → 机器人 %1:%2  AGV %3:%4  视觉 %5:%6")
                         .arg(m_cfg.robotIP).arg(m_cfg.robotPort)
-                        .arg(m_cfg.agvIP).arg(m_cfg.agvPort));
+                        .arg(m_cfg.agvIP).arg(m_cfg.agvPort)
+                        .arg(m_cfg.cameraIP).arg(m_cfg.cameraPort));
     emit configApplied(m_cfg.robotIP, m_cfg.robotPort, m_cfg.agvIP);
 
     // 重连机械臂 Modbus（先断开，再用新参数连接）
@@ -77,6 +90,10 @@ void DeviceManager::applyConfig()
     // 重连 AGV Modbus
     m_agvCtrl->disconnectFromHost();
     m_agvCtrl->connectToHost(m_cfg.agvIP, m_cfg.agvPort);
+
+    // 更新视觉服务 URL（不需要重连，HTTP 是无状态协议）
+    if (!m_cfg.cameraIP.isEmpty())
+        m_visionClient->setServerUrl(m_cfg.cameraIP, m_cfg.cameraPort);
 }
 
 // ── TCP 连通性测试 ────────────────────────────────────────────
@@ -129,23 +146,26 @@ void DeviceManager::testAgv()
     }
 }
 
+/**
+ * @brief 检测视觉服务（Flask HTTP）连通性（异步）
+ *
+ * 替换原来的同步 tcpPing（奥比相机 8090 端口）。
+ * 改为调用 VisionHttpClient::checkStatus()（GET /status），
+ * 结果由构造函数中已连接的 statusChanged 信号异步传回 UI。
+ */
 void DeviceManager::testCamera()
 {
     if (m_cfg.cameraIP.isEmpty()) {
-        emit logMessage(QStringLiteral("[相机] IP 为空"));
+        emit logMessage(QStringLiteral("[视觉] 相机 IP 为空"));
         return;
     }
-    emit logMessage(QString("[相机] 正在连接网络 %1:8090 ...").arg(m_cfg.cameraIP));
-    emit cameraStatusChanged(false, QStringLiteral("连接中..."));
+    emit logMessage(QString("[视觉] 正在检测服务 %1:%2 ...")
+                        .arg(m_cfg.cameraIP).arg(m_cfg.cameraPort));
+    emit cameraStatusChanged(false, QStringLiteral("检测中..."));
 
-    // 奥比相机以 8090 端口提供网络服务
-    if (tcpPing(m_cfg.cameraIP, 8090)) {
-        emit logMessage(QString("[相机] %1:8090 端口可达 ✓").arg(m_cfg.cameraIP));
-        emit cameraStatusChanged(true, QString("网络可达 %1").arg(m_cfg.cameraIP));
-    } else {
-        emit logMessage(QString("[相机] %1:8090 连接失败 ✗").arg(m_cfg.cameraIP));
-        emit cameraStatusChanged(false, QStringLiteral("网络不可达"));
-    }
+    // 先更新 URL，再发起检测
+    m_visionClient->setServerUrl(m_cfg.cameraIP, m_cfg.cameraPort);
+    m_visionClient->checkStatus(); // 异步，结果通过 statusChanged → cameraStatusChanged
 }
 
 void DeviceManager::testScanner()
@@ -215,7 +235,8 @@ void DeviceManager::toggleLight()
  * @return true=TCP 握手成功（端口可达），false=连接失败或超时
  *
  * ⚠ 此函数会阻塞调用线程最多 timeoutMs 毫秒。
- * 仅用于用户手动点击"测试"按钮的场景。
+ * 仅用于用户手动点击"测试"按钮的场景（robot/AGV）。
+ * 视觉服务改用异步 HTTP 检测，不再使用此函数。
  */
 bool DeviceManager::tcpPing(const QString &ip, int port, int timeoutMs)
 {

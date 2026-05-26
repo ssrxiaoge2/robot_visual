@@ -33,6 +33,8 @@ set(PROJECT_SOURCES
         workflowstep.h
         camerawindow.cpp
         camerawindow.h
+        visionclient.cpp
+        visionclient.h
         robotcontroller.cpp
         robotcontroller.h
 )
