@@ -5,6 +5,27 @@
 
 ---
 
+## 2026-05-26 | 架构修复 — MainWindow 调试面板不再直接访问 RobotController
+
+### 变更
+
+#### `devicemanager.h`
+- 新增 `#include <QList>`
+- 新增 public slots：`debugReadRobotRegisters(int addr, int count)`、`debugWriteRobotRegister(int addr, quint16 value)`
+- 新增 signal：`debugRegistersRead(int startAddr, const QList<quint16> &values)`
+
+#### `devicemanager.cpp`
+- 构造函数中新增 `RobotController::registersRead` → `DeviceManager::debugRegistersRead` 转发连接
+- 新增 `debugReadRobotRegisters()` / `debugWriteRobotRegister()` 实现；写入操作同时 emit `logMessage`
+
+#### `mainwindow.cpp`
+- 移除 `#include "robotcontroller.h"`、`#include "agvcontroller.h"`、`#include "visionclient.h"`（三者均为 MainWindow 不应直接依赖的硬件层头文件）
+- 读取按钮 lambda 改为调用 `m_devMgr->debugReadRobotRegisters()`
+- 写入按钮 lambda 改为调用 `m_devMgr->debugWriteRobotRegister()`，并移除 lambda 中的 `log()` 调用（日志已在 DeviceManager 内 emit logMessage）
+- 构造函数信号连接改为 `m_devMgr, &DeviceManager::debugRegistersRead`，不再直接访问 `robotController()`
+
+---
+
 ## 2026-05-25 | 会话 #3 — AgvController + 机器人真实 Modbus 时序
 
 ### 背景

@@ -1,6 +1,7 @@
 #ifndef DEVICEMANAGER_H
 #define DEVICEMANAGER_H
 
+#include <QList>
 #include <QObject>
 #include <QString>
 
@@ -58,6 +59,10 @@ public slots:
     /// 切换补光灯开/关状态
     void toggleLight();
 
+    // ── 机械臂 Modbus 调试接口（供 MainWindow 调试面板使用）──
+    void debugReadRobotRegisters(int addr, int count);
+    void debugWriteRobotRegister(int addr, quint16 value);
+
 signals:
     // ── 设备连通状态（ok=true 可达，statusText 供指示灯显示）──
     void robotStatusChanged(bool ok, const QString &statusText);
@@ -80,6 +85,9 @@ signals:
     void agvModbusConnected();
     void agvModbusDisconnected();
     void agvModbusError(const QString &msg);
+
+    // ── 机械臂调试面板：寄存器读取结果（转发 RobotController::registersRead）──
+    void debugRegistersRead(int startAddr, const QList<quint16> &values);
 
     // ── 日志消息（供 MainWindow 转发到日志控件）──
     void logMessage(const QString &msg);

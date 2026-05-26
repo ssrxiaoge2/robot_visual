@@ -41,6 +41,8 @@ DeviceManager::DeviceManager(QObject *parent)
             this, &DeviceManager::robotModbusDisconnected);
     connect(m_robotCtrl, &RobotController::errorOccurred,
             this, &DeviceManager::robotModbusError);
+    connect(m_robotCtrl, &RobotController::registersRead,
+            this, &DeviceManager::debugRegistersRead);
 
     // ── AGV 控制器（Modbus TCP 主站，仙工 AGV）───────────────
     m_agvCtrl = new AgvController(this);
@@ -223,6 +225,19 @@ void DeviceManager::toggleLight()
                         .arg(m_lightOn ? "开启" : "关闭"));
     emit lightChanged(m_lightOn, true); // success=true 表示"切换"成功（虽然只是模拟）
 #endif
+}
+
+// ── 机械臂调试接口 ────────────────────────────────────────────
+
+void DeviceManager::debugReadRobotRegisters(int addr, int count)
+{
+    m_robotCtrl->readHoldingRegisters(addr, count);
+}
+
+void DeviceManager::debugWriteRobotRegister(int addr, quint16 value)
+{
+    emit logMessage(QString("[机械臂] 写入寄存器 %1 = %2").arg(addr).arg(value));
+    m_robotCtrl->writeRegister(addr, value);
 }
 
 // ── 内部工具 ─────────────────────────────────────────────────

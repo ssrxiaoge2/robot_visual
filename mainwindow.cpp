@@ -20,16 +20,13 @@
  *     3. 调用 initUI() 构建所有控件
  *     4. 连接 WorkflowEngine 信号
  *     5. 连接 DeviceManager 信号（含 Modbus 状态透传）
- *     6. 连接 RobotController::registersRead（调试面板显示寄存器值）
+ *     6. 连接 DeviceManager::debugRegistersRead（调试面板显示寄存器值）
  */
 
 #include "mainwindow.h"
 #include "./ui_mainwindow.h"
 #include "camerawindow.h"
 #include "workflowengine.h"
-#include "robotcontroller.h"
-#include "agvcontroller.h"
-#include "visionclient.h"
 
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -133,16 +130,14 @@ MainWindow::MainWindow(QWidget *parent)
     });
 
     // ── 8. 寄存器读取结果显示（调试面板专用）──────────────
-    // 注意：只显示 Holding Register (FC03) 读取结果
-    // Input Register (FC04) 的结果由 WorkflowEngine 内部处理，不显示到调试面板
-    connect(m_devMgr->robotController(), &RobotController::registersRead, this,
+    connect(m_devMgr, &DeviceManager::debugRegistersRead, this,
             [this](int startAddr, const QList<quint16> &values) {
         QString text;
         for (int i = 0; i < values.size(); ++i)
             text += QString("  寄存器 %1:  %2 (0x%3)\n")
-                        .arg(startAddr + i, 4)          // 地址（右对齐4位）
-                        .arg(values[i], 5)              // 十进制值（右对齐5位）
-                        .arg(values[i], 4, 16, QLatin1Char('0')); // 十六进制（4位补零）
+                        .arg(startAddr + i, 4)
+                        .arg(values[i], 5)
+                        .arg(values[i], 4, 16, QLatin1Char('0'));
         m_regView->setPlainText(text);
         log(QString("[机械臂] 读取 %1 个寄存器").arg(values.size()));
     });
@@ -445,8 +440,7 @@ void MainWindow::initScannerPanel(QVBoxLayout *leftPanel)
  * 包含：Modbus 连接状态指示灯、寄存器读取（地址+数量+读取按钮）、
  *       寄存器写入（地址+值+写入按钮）、寄存器显示文本框。
  *
- * 注：寄存器读写操作直接调用 m_devMgr->robotController()，
- *     绕过 DeviceManager 层（调试面板专用，不影响正常流程）。
+ * 注：寄存器读写通过 DeviceManager 调试接口转发，不直接访问 RobotController。
  */
 void MainWindow::initRobotPanel(QVBoxLayout *leftPanel)
 {
@@ -468,13 +462,11 @@ void MainWindow::initRobotPanel(QVBoxLayout *leftPanel)
     m_spinRegCount->setValue(4);
     m_btnReadReg = new QPushButton(QStringLiteral("读取"));
     m_btnReadReg->setFixedSize(56, 24);
-    // 读取按钮槽：直接调用 RobotController，结果通过 registersRead 信号显示到 m_regView
     connect(m_btnReadReg, &QPushButton::clicked, this, [this]() {
         bool ok;
         int addr = m_editRegAddr->text().toInt(&ok);
         if (!ok || addr < 0) return;
-        // 注意：这里调用的是 FC03 readHoldingRegisters，若要读 Input Register 需调用 readInputRegisters
-        m_devMgr->robotController()->readHoldingRegisters(addr, m_spinRegCount->value());
+        m_devMgr->debugReadRobotRegisters(addr, m_spinRegCount->value());
     });
     readRow->addWidget(new QLabel(QStringLiteral("地址:")));
     readRow->addWidget(m_editRegAddr);
@@ -495,8 +487,7 @@ void MainWindow::initRobotPanel(QVBoxLayout *leftPanel)
         int addr = m_editRegAddr->text().toInt(&okAddr);
         int val  = m_editRegValue->text().toInt(&okVal);
         if (!okAddr || !okVal || addr < 0) return;
-        m_devMgr->robotController()->writeRegister(addr, static_cast<quint16>(val));
-        log(QString("[机械臂] 写入寄存器 %1 = %2").arg(addr).arg(val));
+        m_devMgr->debugWriteRobotRegister(addr, static_cast<quint16>(val));
     });
     writeRow->addWidget(new QLabel(QStringLiteral("值:")));
     writeRow->addWidget(m_editRegValue);
