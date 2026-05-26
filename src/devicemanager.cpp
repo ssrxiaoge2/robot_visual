@@ -240,6 +240,15 @@ void DeviceManager::debugWriteRobotRegister(int addr, quint16 value)
     m_robotCtrl->writeRegister(addr, value);
 }
 
+// ── 手眼矩阵动态加载 ──────────────────────────────────────────
+
+void DeviceManager::applyHandEyeMatrix(const float m[16])
+{
+    m_visionClient->setHandEyeMatrix(m);
+    emit logMessage(QStringLiteral("[手眼] 手眼矩阵已更新，新矩阵将立即生效"));
+    emit handEyeMatrixApplied();
+}
+
 // ── 内部工具 ─────────────────────────────────────────────────
 
 /**

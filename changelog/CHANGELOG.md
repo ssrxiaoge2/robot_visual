@@ -201,6 +201,62 @@
 
 ---
 
+## 2026-05-26 | 会话 #5 — UI 网格布局 + 手眼矩阵动态加载
+
+### 背景
+会话 #4 完成了全文件中文注释增强。本轮目标：
+1. 将左侧状态栏设备状态从纵列改为 2×2 网格布局
+2. 新增手眼矩阵动态加载功能（向导式对话框）
+3. 修复补光灯初始状态与代码不一致问题（m_lightOn=false 但 UI 显示为"关闭补光灯"）
+
+---
+
+### 新建文件
+
+#### `src/handeyedialog.h` / `src/handeyedialog.cpp`
+- `HandEyeDialog : QDialog`，三步向导（QStackedWidget）：
+  - Page 0 说明页：介绍手眼矩阵用途、文件格式、操作流程
+  - Page 1 加载页：文件路径输入 + 浏览按钮 + 解析按钮 + 4×4 可编辑表格（支持手动填写）
+  - Page 2 确认页：只读 4×4 矩阵预览 + 警告文字 + "立即应用"按钮
+- 解析逻辑：跳过 `#` 注释行，读取 16 个浮点数填入行主序 4×4 矩阵
+- 信号：`matrixConfirmed(const float m[16])`
+
+---
+
+### 修改文件
+
+#### `src/devicemanager.h`
+- 新增 slot：`applyHandEyeMatrix(const float m[16])`
+- 新增 signal：`handEyeMatrixApplied()`
+
+#### `src/devicemanager.cpp`
+- 新增 `applyHandEyeMatrix()` 实现：调用 `m_visionClient->setHandEyeMatrix(m)`，emit 日志和 `handEyeMatrixApplied()`
+
+#### `src/mainwindow.h`
+- 新增前向声明：`class HandEyeDialog;`
+- 新增 slot：`onHandEyeCalib()`
+- 新增成员：`QPushButton *m_btnHandEye`
+
+#### `src/mainwindow.cpp`
+- 新增 include：`<QGridLayout>`、`"handeyedialog.h"`
+- 设备状态 GroupBox 布局从 `QVBoxLayout` 改为 `QGridLayout`（2×2：相机/机器人上行，AGV/补光灯下行）
+- 补光灯按钮初始状态修正：文字改为"○ 开启补光灯"，样式改为灰色（与 `m_lightOn=false` 一致），并同步设置 `m_indLight->setStatus(false, "已关闭")`
+- `initCameraPanel()` 新增"手眼标定矩阵"按钮（紫色），连接到 `onHandEyeCalib()`
+- 新增 `onHandEyeCalib()` 实现：创建 `HandEyeDialog`，连接 `matrixConfirmed` → `DeviceManager::applyHandEyeMatrix`
+
+#### `CMakeLists.txt`
+- `PROJECT_SOURCES` 新增 `src/handeyedialog.cpp` / `src/handeyedialog.h`
+
+---
+
+### 注意事项
+- `HandEyeDialog` 默认路径指向 `../hand-eye/calibration_output/handeye_matrix.txt`，
+  Linux 部署时需确认相对路径与可执行文件位置的关系
+- `matrixConfirmed` 信号传递裸指针 `const float m[16]`，Qt 跨线程传递时需注意；
+  当前 Dialog 和 DeviceManager 均在主线程，无线程安全问题
+
+---
+
 ## 模板（复制此块追加下一次记录）
 
 ```

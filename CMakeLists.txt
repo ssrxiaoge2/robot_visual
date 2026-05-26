@@ -31,6 +31,8 @@ set(PROJECT_SOURCES
         src/visionclient.h
         src/camerawindow.cpp
         src/camerawindow.h
+        src/handeyedialog.cpp
+        src/handeyedialog.h
         src/deviceindicator.cpp
         src/deviceindicator.h
         src/workflowwidget.cpp
