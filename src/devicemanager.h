@@ -100,7 +100,7 @@ private:
     AgvController    *m_agvCtrl     = nullptr;
     VisionHttpClient *m_visionClient = nullptr;
     Config            m_cfg;
-    bool              m_lightOn      = true;
+    bool              m_lightOn      = false;
 };
 
 #endif // DEVICEMANAGER_H
