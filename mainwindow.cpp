@@ -1,3 +1,28 @@
+/**
+ * @file mainwindow.cpp
+ * @brief MainWindow 主窗口实现（纯 UI 层）
+ *
+ * ── 架构职责 ─────────────────────────────────────────────────
+ *   MainWindow 只负责：
+ *     • 构建并布局所有 UI 控件
+ *     • 将用户操作转发给 WorkflowEngine / DeviceManager
+ *     • 订阅业务层信号，更新指示灯/日志/标签等 UI 元素
+ *
+ *   MainWindow 不包含：
+ *     • 任何 Modbus 读写逻辑
+ *     • 工作流状态管理
+ *     • 设备连接生命周期管理
+ *
+ * ── 信号连接顺序 ─────────────────────────────────────────────
+ *   构造函数中：
+ *     1. 创建业务层（WorkflowEngine + DeviceManager）
+ *     2. 注入硬件控制器（engine.setRobotController / setAgvController）
+ *     3. 调用 initUI() 构建所有控件
+ *     4. 连接 WorkflowEngine 信号
+ *     5. 连接 DeviceManager 信号（含 Modbus 状态透传）
+ *     6. 连接 RobotController::registersRead（调试面板显示寄存器值）
+ */
+
 #include "mainwindow.h"
 #include "./ui_mainwindow.h"
 #include "camerawindow.h"
@@ -14,7 +39,7 @@
 #include <QScrollArea>
 
 // ============================================================
-//  MainWindow
+//  构造 / 析构
 // ============================================================
 
 MainWindow::MainWindow(QWidget *parent)
@@ -22,37 +47,43 @@ MainWindow::MainWindow(QWidget *parent)
 {
     ui->setupUi(this);
 
-    // ── 1. 先构造业务层，UI 初始化时可引用 m_devMgr ──────────
+    // ── 1. 先构造业务层 ─────────────────────────────────────
+    // 注意：必须在 initUI() 之前构造，因为 initUI() 中的部分代码
+    // 可能通过 lambda 捕获 m_devMgr 指针（如 m_btnReadReg 槽函数）
     m_engine = new WorkflowEngine(this);
     m_devMgr = new DeviceManager(this);
 
-    // ── 注入硬件控制器，引擎从仿真模式升级为真实 Modbus 控制 ──
+    // ── 2. 注入硬件控制器到引擎 ─────────────────────────────
+    // 注入后引擎从"纯仿真"模式升级为"有硬件时走 Modbus，无硬件时仿真"双模式
     m_engine->setRobotController(m_devMgr->robotController());
     m_engine->setAgvController(m_devMgr->agvController());
 
-    // ── 2. 构建所有 UI 控件 ──────────────────────────────────
+    // ── 3. 构建所有 UI 控件 ─────────────────────────────────
     initUI();
 
-    // ── 3. 连接 WorkflowEngine 信号 ──────────────────────────
+    // ── 4. 连接 WorkflowEngine 信号 ─────────────────────────
     connect(m_engine, &WorkflowEngine::stepActivated,
             this, &MainWindow::onStepActivated);
     connect(m_engine, &WorkflowEngine::started,
             this, &MainWindow::onEngineStarted);
     connect(m_engine, &WorkflowEngine::stopped,
             this, &MainWindow::onEngineStopped);
-    // 引擎日志/错误消息转发到日志控件
+    // 引擎运行日志（步骤切换、Modbus 写入结果等）→ 转发到日志控件
     connect(m_engine, &WorkflowEngine::stepLog,
             this, [this](const QString &msg) { log(msg); });
+    // 引擎错误（超时、AGV 故障等）→ 带 ⚠ 前缀显示
     connect(m_engine, &WorkflowEngine::engineError,
             this, [this](const QString &msg) { log(QString("⚠ %1").arg(msg)); });
-    // 步进延时 SpinBox 直接驱动引擎（运行中也生效）
+    // 步进延时 SpinBox 实时同步到引擎（运行中也生效）
     connect(m_spinDelay, &QSpinBox::valueChanged,
             m_engine, &WorkflowEngine::setInterval);
 
-    // ── 4. 连接 DeviceManager 信号 ───────────────────────────
+    // ── 5. 连接 DeviceManager 信号 ──────────────────────────
+    // 日志消息（配置应用、连通性测试结果等）
     connect(m_devMgr, &DeviceManager::logMessage,
             this, [this](const QString &msg) { log(msg); });
 
+    // TCP 连通性测试结果 → 更新对应设备的状态指示灯
     connect(m_devMgr, &DeviceManager::robotStatusChanged,
             this, [this](bool ok, const QString &s) { m_indRobot->setStatus(ok, s); });
     connect(m_devMgr, &DeviceManager::agvStatusChanged,
@@ -62,12 +93,14 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_devMgr, &DeviceManager::scannerStatusChanged,
             this, [this](bool ok, const QString &s) { m_indScanner->setStatus(ok, s); });
 
+    // 补光灯切换结果 / 配置应用结果
     connect(m_devMgr, &DeviceManager::lightChanged,
             this, &MainWindow::onLightChanged);
     connect(m_devMgr, &DeviceManager::configApplied,
             this, &MainWindow::onConfigApplied);
 
-    // ── 5. 透传 Modbus 连接状态到机械臂控制面板 ──────────────
+    // ── 6. 机械臂 Modbus 连接状态 ───────────────────────────
+    // 连接成功：更新 Modbus 调试面板指示灯 + 主状态指示灯
     connect(m_devMgr, &DeviceManager::robotModbusConnected, this, [this]() {
         m_indRobotConn->setStatus(true, QStringLiteral("已连接"));
         m_indRobot->setStatus(true, QStringLiteral("已连接"));
@@ -82,7 +115,7 @@ MainWindow::MainWindow(QWidget *parent)
         log(QString("[机械臂错误] %1").arg(msg));
     });
 
-    // ── AGV Modbus 连接状态 ────────────────────────────────────
+    // ── 7. AGV Modbus 连接状态 ──────────────────────────────
     connect(m_devMgr, &DeviceManager::agvModbusConnected, this, [this]() {
         m_indAGV->setStatus(true, QStringLiteral("已连接"));
         log(QStringLiteral("[AGV] Modbus 连接成功 ✓"));
@@ -95,15 +128,17 @@ MainWindow::MainWindow(QWidget *parent)
         log(QString("[AGV 错误] %1").arg(msg));
     });
 
-    // ── 6. 寄存器读取结果显示 ─────────────────────────────────
+    // ── 8. 寄存器读取结果显示（调试面板专用）──────────────
+    // 注意：只显示 Holding Register (FC03) 读取结果
+    // Input Register (FC04) 的结果由 WorkflowEngine 内部处理，不显示到调试面板
     connect(m_devMgr->robotController(), &RobotController::registersRead, this,
             [this](int startAddr, const QList<quint16> &values) {
         QString text;
         for (int i = 0; i < values.size(); ++i)
             text += QString("  寄存器 %1:  %2 (0x%3)\n")
-                        .arg(startAddr + i, 4)
-                        .arg(values[i], 5)
-                        .arg(values[i], 4, 16, QLatin1Char('0'));
+                        .arg(startAddr + i, 4)          // 地址（右对齐4位）
+                        .arg(values[i], 5)              // 十进制值（右对齐5位）
+                        .arg(values[i], 4, 16, QLatin1Char('0')); // 十六进制（4位补零）
         m_regView->setPlainText(text);
         log(QString("[机械臂] 读取 %1 个寄存器").arg(values.size()));
     });
@@ -117,8 +152,21 @@ MainWindow::~MainWindow()
     delete ui;
 }
 
-// ── UI 构建 ────────────────────────────────────────────────
+// ============================================================
+//  UI 构建
+// ============================================================
 
+/**
+ * @brief 初始化整个主窗口布局
+ *
+ * 布局结构：
+ *   VBoxLayout (root)
+ *     ├── HBoxLayout (toolbar)     工具栏：开始/停止/单步/延时/循环计数/主题开关
+ *     ├── HBoxLayout (mainArea)
+ *     │     ├── QScrollArea        左侧面板（设备状态+配置+调试面板，宽度受限340px）
+ *     │     └── WorkflowWidget     右侧流程图（弹性填充）
+ *     └── QPlainTextEdit (logView) 底部日志区
+ */
 void MainWindow::initUI()
 {
     setWindowTitle(QStringLiteral("仓储机器人可视化上位机"));
@@ -130,14 +178,14 @@ void MainWindow::initUI()
     root->setContentsMargins(10, 10, 10, 10);
     setCentralWidget(cw);
 
-    // ── 工具栏 ──
+    // ── 工具栏 ──────────────────────────────────────────────
     auto *toolbar = new QHBoxLayout();
     m_btnStart = new QPushButton(QStringLiteral("▶  开始运行"));
     m_btnStop  = new QPushButton(QStringLiteral("■  停止"));
     m_btnStep  = new QPushButton(QStringLiteral("▶| 单步运行"));
     m_btnStart->setFixedHeight(32);
     m_btnStop ->setFixedHeight(32);
-    m_btnStop ->setEnabled(false);
+    m_btnStop ->setEnabled(false);  // 初始状态：停止按钮不可用
     m_btnStep ->setFixedHeight(32);
 
     m_spinDelay = new QSpinBox();
@@ -145,14 +193,15 @@ void MainWindow::initUI()
     m_spinDelay->setValue(2000);
     m_spinDelay->setSuffix(QStringLiteral(" ms"));
     m_spinDelay->setFixedHeight(32);
-    m_spinDelay->setToolTip(QStringLiteral("每步间延时"));
+    m_spinDelay->setToolTip(QStringLiteral("仿真模式：每步等待时长；真实模式：步骤超时参考值"));
 
+    // 循环计数标签（数字）和当前步骤标签（文字）
     m_lblCycle = new QLabel(QStringLiteral("0"));
     m_lblCycle->setStyleSheet("font-size:14px; font-weight:bold; color:#4af;");
     m_lblStep = new QLabel(QStringLiteral("就绪"));
     m_lblStep->setStyleSheet("font-size:13px; color:#aaa;");
 
-    // 主题滑动开关
+    // 主题切换开关（放在工具栏最右侧）
     m_themeSwitch = new ThemeSwitch();
     connect(m_themeSwitch, &ThemeSwitch::toggled, this, &MainWindow::applyTheme);
 
@@ -168,18 +217,18 @@ void MainWindow::initUI()
     toolbar->addSpacing(20);
     toolbar->addWidget(new QLabel(QStringLiteral("当前:")));
     toolbar->addWidget(m_lblStep);
-    toolbar->addStretch();
+    toolbar->addStretch();       // 将主题开关推到最右侧
     toolbar->addWidget(m_themeSwitch);
     toolbar->addSpacing(6);
     root->addLayout(toolbar);
 
-    // ── 主体：左侧面板 + 右侧流程图 ──
+    // ── 主体区域 ─────────────────────────────────────────────
     auto *mainArea      = new QHBoxLayout();
     auto *leftContainer = new QWidget();
     auto *leftPanel     = new QVBoxLayout(leftContainer);
     leftPanel->setContentsMargins(0, 0, 4, 0);
 
-    // 设备状态指示灯组
+    // 设备状态指示灯组（顶部）
     auto *gbStatus     = new QGroupBox(QStringLiteral("设备状态"));
     auto *statusLayout = new QVBoxLayout(gbStatus);
     m_indCamera = new DeviceIndicator(QStringLiteral("奥比相机"));
@@ -192,14 +241,16 @@ void MainWindow::initUI()
     statusLayout->addWidget(m_indLight);
     leftPanel->addWidget(gbStatus);
 
-    initConfigPanel(leftPanel);
-    initCameraPanel(leftPanel);
-    initScannerPanel(leftPanel);
-    initRobotPanel(leftPanel);
+    // 各功能面板（按功能分组，内部实现见 initXxxPanel）
+    initConfigPanel(leftPanel);   // 网络配置 + 补光灯
+    initCameraPanel(leftPanel);   // 相机调试
+    initScannerPanel(leftPanel);  // 扫码器调试
+    initRobotPanel(leftPanel);    // 机械臂 Modbus 控制
 
-    leftPanel->addStretch();
+    leftPanel->addStretch(); // 底部弹性填充
     leftContainer->setMinimumWidth(280);
 
+    // 左侧面板加滚动条（屏幕高度不够时可滚动查看）
     auto *scrollArea = new QScrollArea();
     scrollArea->setWidgetResizable(true);
     scrollArea->setWidget(leftContainer);
@@ -207,18 +258,19 @@ void MainWindow::initUI()
     scrollArea->setStyleSheet("QScrollArea { border:none; }");
     mainArea->addWidget(scrollArea);
 
+    // 右侧流程图（弹性填充，stretch=1 占满剩余宽度）
     m_flow = new WorkflowWidget();
     m_flow->setMinimumSize(700, 280);
     mainArea->addWidget(m_flow, 1);
     root->addLayout(mainArea, 1);
 
-    // ── 日志 ──
+    // ── 底部日志区 ───────────────────────────────────────────
     m_logView = new QPlainTextEdit();
     m_logView->setReadOnly(true);
-    m_logView->setMaximumBlockCount(200);
+    m_logView->setMaximumBlockCount(200); // 最多保留 200 行，防止内存无限增长
     root->addWidget(m_logView, 1);
 
-    // ── 按钮信号 ──
+    // ── 按钮信号连接 ─────────────────────────────────────────
     connect(m_btnStart,          &QPushButton::clicked, this, &MainWindow::onStart);
     connect(m_btnStop,           &QPushButton::clicked, this, &MainWindow::onStop);
     connect(m_btnStep,           &QPushButton::clicked, this, &MainWindow::onStep);
@@ -230,23 +282,31 @@ void MainWindow::initUI()
     connect(m_btnTestCameraOpen, &QPushButton::clicked, this, &MainWindow::onTestCameraOpen);
     connect(m_btnTestScanner,    &QPushButton::clicked, this, &MainWindow::onTestScanner);
 
-    menuBar()->setVisible(false);
-    statusBar()->setVisible(false);
+    menuBar()->setVisible(false);   // 隐藏菜单栏（工业界面不需要）
+    statusBar()->setVisible(false); // 隐藏状态栏
+    // 按钮对象名用于 QSS 中的 #id 选择器精确着色
     m_btnStop->setObjectName("btnStop");
     m_btnStep->setObjectName("btnStep");
 
-    // 在所有控件创建完毕后统一应用深色主题（默认）
+    // 最后统一应用默认深色主题
     applyTheme(true);
 }
 
-// ── 左侧面板初始化 ──────────────────────────────────────────
+// ── 左侧面板初始化（按功能分组）─────────────────────────────
 
+/**
+ * @brief 初始化"网络配置"和"补光灯"面板
+ *
+ * 包含：机器人 IP:端口 + 测试按钮、AGV IP + 测试按钮、
+ *       应用配置按钮、补光灯切换按钮。
+ */
 void MainWindow::initConfigPanel(QVBoxLayout *leftPanel)
 {
     auto *gbCfg = new QGroupBox(QStringLiteral("网络配置"));
     auto *form  = new QFormLayout(gbCfg);
     form->setLabelAlignment(Qt::AlignRight);
 
+    // 机器人 IP 和端口输入行
     m_editRobotIP = new QLineEdit("192.168.10.10");
     m_editRobotIP->setFixedWidth(130);
     m_spinRobotPort = new QSpinBox();
@@ -264,6 +324,7 @@ void MainWindow::initConfigPanel(QVBoxLayout *leftPanel)
     robotRow->addWidget(m_btnTestRobot);
     form->addRow(QStringLiteral("机器人 IP:"), robotRow);
 
+    // AGV IP 输入行（端口固定 502，不暴露给用户）
     m_editAgvIP = new QLineEdit("192.168.192.5");
     m_editAgvIP->setFixedWidth(130);
     auto *agvRow = new QHBoxLayout();
@@ -275,17 +336,18 @@ void MainWindow::initConfigPanel(QVBoxLayout *leftPanel)
     form->addRow(QStringLiteral("AGV IP:"), agvRow);
 
     m_btnApply = new QPushButton(QStringLiteral("应用配置"));
-    m_btnApply->setObjectName("btnApply");
+    m_btnApply->setObjectName("btnApply"); // QSS 用蓝色区分
     m_btnApply->setFixedHeight(28);
     form->addRow(m_btnApply);
     leftPanel->addWidget(gbCfg);
 
-    // 补光灯控制
+    // ── 补光灯控制（单独一组）────────────────────────────────
     auto *gbLight     = new QGroupBox(QStringLiteral("补光灯"));
     auto *lightLayout = new QVBoxLayout(gbLight);
     m_btnLight = new QPushButton(QStringLiteral("● 关闭补光灯"));
     m_btnLight->setObjectName("btnLight");
     m_btnLight->setFixedHeight(30);
+    // 补光灯按钮有专用的橙色样式（深色/浅色主题切换时通过 onLightChanged 重新设置）
     m_btnLight->setStyleSheet(
         "#btnLight { background:#f0ad4e; color:white; border:none; "
         "border-radius:4px; padding:4px 16px; font-size:13px; }"
@@ -294,6 +356,11 @@ void MainWindow::initConfigPanel(QVBoxLayout *leftPanel)
     leftPanel->addWidget(gbLight);
 }
 
+/**
+ * @brief 初始化"奥比相机调试"面板
+ *
+ * 包含：相机 IP 输入、连接测试按钮、打开实时画面按钮、状态指示灯。
+ */
 void MainWindow::initCameraPanel(QVBoxLayout *leftPanel)
 {
     auto *gbCamera = new QGroupBox(QStringLiteral("奥比相机调试"));
@@ -303,8 +370,9 @@ void MainWindow::initCameraPanel(QVBoxLayout *leftPanel)
     m_editCameraIP = new QLineEdit("192.168.1.10");
     m_editCameraIP->setFixedWidth(130);
 
-    auto *camRow     = new QHBoxLayout();
-    m_btnTestCamera  = new QPushButton(QStringLiteral("连接"));
+    auto *camRow    = new QHBoxLayout();
+    // "连接"：TCP 连通性测试
+    m_btnTestCamera = new QPushButton(QStringLiteral("连接"));
     m_btnTestCamera->setFixedSize(56, 24);
     m_btnTestCamera->setObjectName("btnCamTest");
     m_btnTestCamera->setStyleSheet(
@@ -312,6 +380,7 @@ void MainWindow::initCameraPanel(QVBoxLayout *leftPanel)
         "border-radius:3px; font-size:11px; }"
         "#btnCamTest:hover { background:#6ed0ee; }");
 
+    // "相机"：打开 CameraWindow 查看实时画面
     m_btnTestCameraOpen = new QPushButton(QStringLiteral("相机"));
     m_btnTestCameraOpen->setFixedSize(56, 24);
     m_btnTestCameraOpen->setObjectName("btnCamOpen");
@@ -332,6 +401,11 @@ void MainWindow::initCameraPanel(QVBoxLayout *leftPanel)
     leftPanel->addWidget(gbCamera);
 }
 
+/**
+ * @brief 初始化"扫码器调试"面板
+ *
+ * 包含：扫码器 IP 输入、测试按钮、状态指示灯。
+ */
 void MainWindow::initScannerPanel(QVBoxLayout *leftPanel)
 {
     auto *gbScanner = new QGroupBox(QStringLiteral("扫码器调试"));
@@ -361,31 +435,41 @@ void MainWindow::initScannerPanel(QVBoxLayout *leftPanel)
     leftPanel->addWidget(gbScanner);
 }
 
+/**
+ * @brief 初始化"机械臂 Modbus 控制"调试面板
+ *
+ * 包含：Modbus 连接状态指示灯、寄存器读取（地址+数量+读取按钮）、
+ *       寄存器写入（地址+值+写入按钮）、寄存器显示文本框。
+ *
+ * 注：寄存器读写操作直接调用 m_devMgr->robotController()，
+ *     绕过 DeviceManager 层（调试面板专用，不影响正常流程）。
+ */
 void MainWindow::initRobotPanel(QVBoxLayout *leftPanel)
 {
-    // 注：RobotController 的生命周期由 DeviceManager 管理
-    // 此处仅构建 UI 并连接操作按钮
     auto *gb   = new QGroupBox(QStringLiteral("机械臂 Modbus 控制"));
     auto *form = new QFormLayout(gb);
     form->setLabelAlignment(Qt::AlignRight);
 
+    // Modbus 连接状态指示灯（显示在面板顶部）
     m_indRobotConn = new DeviceIndicator(QStringLiteral("连接状态"));
     m_indRobotConn->setFixedSize(180, 48);
     form->addRow(m_indRobotConn);
 
-    // 寄存器读取
+    // ── 寄存器读取行 ─────────────────────────────────────────
     auto *readRow = new QHBoxLayout();
-    m_editRegAddr = new QLineEdit("0");
+    m_editRegAddr = new QLineEdit("0");         // 起始地址输入
     m_editRegAddr->setFixedWidth(50);
-    m_spinRegCount = new QSpinBox();
+    m_spinRegCount = new QSpinBox();            // 读取数量（1-20）
     m_spinRegCount->setRange(1, 20);
     m_spinRegCount->setValue(4);
     m_btnReadReg = new QPushButton(QStringLiteral("读取"));
     m_btnReadReg->setFixedSize(56, 24);
+    // 读取按钮槽：直接调用 RobotController，结果通过 registersRead 信号显示到 m_regView
     connect(m_btnReadReg, &QPushButton::clicked, this, [this]() {
         bool ok;
         int addr = m_editRegAddr->text().toInt(&ok);
         if (!ok || addr < 0) return;
+        // 注意：这里调用的是 FC03 readHoldingRegisters，若要读 Input Register 需调用 readInputRegisters
         m_devMgr->robotController()->readHoldingRegisters(addr, m_spinRegCount->value());
     });
     readRow->addWidget(new QLabel(QStringLiteral("地址:")));
@@ -396,9 +480,9 @@ void MainWindow::initRobotPanel(QVBoxLayout *leftPanel)
     readRow->addStretch();
     form->addRow(QStringLiteral("读取寄存器:"), readRow);
 
-    // 寄存器写入
+    // ── 寄存器写入行 ─────────────────────────────────────────
     auto *writeRow = new QHBoxLayout();
-    m_editRegValue = new QLineEdit();
+    m_editRegValue = new QLineEdit();           // 写入值输入（十进制）
     m_editRegValue->setFixedWidth(60);
     m_btnWriteReg = new QPushButton(QStringLiteral("写入"));
     m_btnWriteReg->setFixedSize(56, 24);
@@ -416,9 +500,9 @@ void MainWindow::initRobotPanel(QVBoxLayout *leftPanel)
     writeRow->addStretch();
     form->addRow(QStringLiteral("写入寄存器:"), writeRow);
 
-    // 寄存器显示（样式由 applyTheme 统一管理）
+    // ── 寄存器值显示文本框（terminal 风格，样式由 applyTheme 管理）
     m_regView = new QPlainTextEdit();
-    m_regView->setObjectName("regView");
+    m_regView->setObjectName("regView"); // QSS #id 选择器
     m_regView->setReadOnly(true);
     m_regView->setMaximumBlockCount(50);
     m_regView->setFixedHeight(120);
@@ -427,21 +511,37 @@ void MainWindow::initRobotPanel(QVBoxLayout *leftPanel)
     leftPanel->addWidget(gb);
 }
 
-// ── 日志工具 ────────────────────────────────────────────────
+// ── 日志工具 ─────────────────────────────────────────────────
 
+/**
+ * @brief 向日志控件追加一条带时间戳的日志
+ * @param msg 日志内容（不含时间戳）
+ */
 void MainWindow::log(const QString &msg)
 {
     const QString ts = QDateTime::currentDateTime().toString("hh:mm:ss");
     m_logView->appendPlainText(QString("[%1] %2").arg(ts, msg));
 }
 
-// ── 主题切换 ────────────────────────────────────────────────
+// ── 主题切换 ─────────────────────────────────────────────────
 
+/**
+ * @brief 应用深色或浅色主题
+ * @param dark true=深色，false=浅色
+ *
+ * 通过 setStyleSheet() 应用全局 QSS，覆盖所有子控件的默认样式。
+ * 关键：必须包含 "QWidget { background:... }" 规则，
+ *       否则 Linux 系统主题会让 QGroupBox/QScrollArea 内的
+ *       QWidget 背景变成系统默认白色（Ubuntu 白色背景问题）。
+ *
+ * 部分控件（logView/regView/lblCycle/lblStep）有独立颜色需求，
+ * 通过内联 setStyleSheet() 在此方法中同步更新。
+ */
 void MainWindow::applyTheme(bool dark)
 {
-    // ── 深色主题 ──────────────────────────────────────────────
+    // ── 深色主题 QSS ─────────────────────────────────────────
     static const char *kDark =
-        // 关键：QWidget 覆盖所有容器背景，修复 Linux 白色背景问题
+        // ⚠ 关键：覆盖所有 QWidget 背景，修复 Linux 系统主题干扰
         "QWidget            { background:#2b2d33; color:#ccc; }"
         "QMainWindow        { background:#2b2d33; }"
         "QDialog            { background:#2b2d33; }"
@@ -458,17 +558,17 @@ void MainWindow::applyTheme(bool dark)
         "                     border-radius:4px; padding:4px 16px; font-size:13px; }"
         "QPushButton:hover  { background:#4da3e8; }"
         "QPushButton:disabled { background:#444; color:#888; }"
-        "QPushButton#btnStop  { background:#d9534f; }"
+        "QPushButton#btnStop  { background:#d9534f; }"       // 停止按钮：红色
         "QPushButton#btnStop:hover  { background:#e86562; }"
-        "QPushButton#btnStep  { background:#5cb85c; }"
+        "QPushButton#btnStep  { background:#5cb85c; }"       // 单步按钮：绿色
         "QPushButton#btnStep:hover  { background:#6ec86e; }"
-        "QPushButton#btnApply { background:#5bc0de; }"
+        "QPushButton#btnApply { background:#5bc0de; }"       // 应用按钮：蓝色
         "QPushButton#btnApply:hover { background:#6ed0ee; }"
         "QScrollBar:vertical { background:#2b2d33; width:8px; }"
         "QScrollBar::handle:vertical { background:#555; border-radius:4px; }"
         "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical { height:0; }";
 
-    // ── 浅色主题 ──────────────────────────────────────────────
+    // ── 浅色主题 QSS ─────────────────────────────────────────
     static const char *kLight =
         "QWidget            { background:#f0f0f0; color:#222; }"
         "QMainWindow        { background:#e8e8e8; }"
@@ -496,20 +596,20 @@ void MainWindow::applyTheme(bool dark)
         "QScrollBar::handle:vertical { background:#aaa; border-radius:4px; }"
         "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical { height:0; }";
 
-    // 应用全局样式表
     setStyleSheet(dark ? kDark : kLight);
 
-    // 日志控件（使用 termianl 风格，两个主题分别配色）
+    // ── 部分控件独立样式（terminal/强调配色）────────────────
+    // 日志控件：始终使用等宽字体，深浅色各自配色
     m_logView->setStyleSheet(dark
         ? "QPlainTextEdit { background:#1e1f24; color:#c0c0c0; font-family:monospace; }"
         : "QPlainTextEdit { background:#fafafa;  color:#333;    font-family:monospace; }");
 
-    // 寄存器显示控件（terminal 风格，始终深色）
+    // 寄存器显示：绿底黑字（terminal 风格），两个主题分别配色
     m_regView->setStyleSheet(dark
         ? "QPlainTextEdit { background:#1a1f1a; color:#80ff80; font-family:monospace; font-size:11px; }"
         : "QPlainTextEdit { background:#f0fff0; color:#006600; font-family:monospace; font-size:11px; }");
 
-    // 循环计数标签颜色跟随主题
+    // 工具栏标签颜色跟随主题
     m_lblCycle->setStyleSheet(dark
         ? "font-size:14px; font-weight:bold; color:#4af;"
         : "font-size:14px; font-weight:bold; color:#0078d4;");
@@ -520,6 +620,12 @@ void MainWindow::applyTheme(bool dark)
 
 // ── 读取 UI 控件 → Config 结构体 ────────────────────────────
 
+/**
+ * @brief 从 UI 输入控件读取当前配置，填充 DeviceManager::Config 结构体
+ *
+ * 集中读取避免在多个槽函数中重复读取 IP/端口文本，
+ * 所有需要配置的操作（onStart/onApplyConfig/onTestXxx）都先调用此方法。
+ */
 void MainWindow::buildConfig(DeviceManager::Config &cfg) const
 {
     cfg.robotIP   = m_editRobotIP->text().trimmed();
@@ -527,34 +633,45 @@ void MainWindow::buildConfig(DeviceManager::Config &cfg) const
     cfg.agvIP     = m_editAgvIP->text().trimmed();
     cfg.cameraIP  = m_editCameraIP->text().trimmed();
     cfg.scannerIP = m_editScannerIP->text().trimmed();
+    // agvPort 默认 502，无对应 UI 控件（Modbus 标准端口）
 }
 
-// ── 转发用户操作到业务层 ────────────────────────────────────
+// ── 转发用户操作到业务层 ─────────────────────────────────────
 
+/**
+ * @brief "▶ 开始运行"按钮回调
+ *
+ * 先应用配置（触发 Modbus 重连），再启动工作流引擎。
+ * 引擎启动后通过 onEngineStarted() 更新 UI 按钮状态。
+ */
 void MainWindow::onStart()
 {
     DeviceManager::Config cfg;
     buildConfig(cfg);
     m_devMgr->setConfig(cfg);
-    m_devMgr->applyConfig();
-    m_engine->start(m_spinDelay->value());
+    m_devMgr->applyConfig();               // 触发 Modbus 重连
+    m_engine->start(m_spinDelay->value()); // 启动五步循环
 }
 
+/// "■ 停止"按钮回调：停止引擎（内部会向机器人发复位命令）
 void MainWindow::onStop()
 {
     m_engine->stop();
 }
 
+/// "▶| 单步运行"按钮回调：手动推进一步（仅在停止状态下有效）
 void MainWindow::onStep()
 {
     m_engine->singleStep();
 }
 
+/// 补光灯切换按钮回调
 void MainWindow::onLightToggle()
 {
     m_devMgr->toggleLight();
 }
 
+/// "应用配置"按钮回调：保存配置并重连所有 Modbus 设备
 void MainWindow::onApplyConfig()
 {
     DeviceManager::Config cfg;
@@ -563,30 +680,34 @@ void MainWindow::onApplyConfig()
     m_devMgr->applyConfig();
 }
 
+/// 各设备测试按钮回调：先更新配置，再执行 TCP 连通性测试
 void MainWindow::onTestRobot()
 {
-    DeviceManager::Config cfg;
-    buildConfig(cfg);
+    DeviceManager::Config cfg; buildConfig(cfg);
     m_devMgr->setConfig(cfg);
     m_devMgr->testRobot();
 }
 
 void MainWindow::onTestAgv()
 {
-    DeviceManager::Config cfg;
-    buildConfig(cfg);
+    DeviceManager::Config cfg; buildConfig(cfg);
     m_devMgr->setConfig(cfg);
     m_devMgr->testAgv();
 }
 
 void MainWindow::onTestCamera()
 {
-    DeviceManager::Config cfg;
-    buildConfig(cfg);
+    DeviceManager::Config cfg; buildConfig(cfg);
     m_devMgr->setConfig(cfg);
     m_devMgr->testCamera();
 }
 
+/**
+ * @brief "相机"按钮回调：打开奥比相机实时画面对话框
+ *
+ * 创建 CameraWindow（内部启动 Python 子进程），设置 WA_DeleteOnClose
+ * 确保关闭时自动释放资源（包括终止 Python 进程）。
+ */
 void MainWindow::onTestCameraOpen()
 {
     const QString ip = m_editCameraIP->text().trimmed();
@@ -600,7 +721,7 @@ void MainWindow::onTestCameraOpen()
         m_indCameraDebug->setStatus(true, QStringLiteral("待机"));
         log(QStringLiteral("[相机] 画面窗口已关闭"));
     });
-    camWin->setAttribute(Qt::WA_DeleteOnClose);
+    camWin->setAttribute(Qt::WA_DeleteOnClose); // 关闭时自动 delete
     camWin->show();
 
     m_indCameraDebug->setStatus(true, QStringLiteral("画面已打开"));
@@ -609,44 +730,51 @@ void MainWindow::onTestCameraOpen()
 
 void MainWindow::onTestScanner()
 {
-    DeviceManager::Config cfg;
-    buildConfig(cfg);
+    DeviceManager::Config cfg; buildConfig(cfg);
     m_devMgr->setConfig(cfg);
     m_devMgr->testScanner();
 }
 
 // ── 响应业务层信号（纯 UI 更新）────────────────────────────
 
+/**
+ * @brief 响应 WorkflowEngine::stepActivated 信号
+ * @param idx     刚激活的步骤索引（0-4）
+ * @param station 当前工位编号（1-12）
+ * @param cycle   已完成的循环次数
+ *
+ * 更新：流程图高亮、工位条高亮、工具栏标签、设备状态指示灯、日志。
+ */
 void MainWindow::onStepActivated(int idx, int station, int cycle)
 {
-    // 更新流程图和状态栏
+    // 更新流程图控件
     m_lblStep->setText(WorkflowEngine::kSteps[idx].name);
     m_lblCycle->setText(QString::number(cycle));
     m_flow->setActiveStep(idx);
     m_flow->setStationHighlight(station);
 
-    // 根据当前步骤更新设备状态指示灯
+    // 根据当前步骤更新各设备状态指示灯和日志
     switch (idx) {
-    case 0:
+    case 0: // 相机拍照
         m_indCamera->setStatus(true, QStringLiteral("拍照中"));
         log(QString("→ 工位%1 相机拍照").arg(station));
         break;
-    case 1:
+    case 1: // 机器人抓取
         m_indRobot->setStatus(true, QStringLiteral("抓取中"));
         m_indCamera->setStatus(true, QStringLiteral("就绪"));
-        log(QStringLiteral("→ 华沿机器人执行抓取 MOVJ"));
+        log(QStringLiteral("→ 华沿机器人执行抓取"));
         break;
-    case 2:
+    case 2: // AGV 行走
         m_indRobot->setStatus(true, QStringLiteral("已抓取"));
         m_indAGV->setStatus(true, QStringLiteral("运行中"));
         log(QString("→ 仙工AGV前往工位%1上料站").arg(station));
         break;
-    case 3:
+    case 3: // 机器人放料
         m_indAGV->setStatus(true, QStringLiteral("已到位"));
         m_indRobot->setStatus(true, QStringLiteral("放料中"));
         log(QStringLiteral("→ AGV到位，机器人翻转卸料"));
         break;
-    case 4:
+    case 4: // 复位等待
         m_indRobot->setStatus(true, QStringLiteral("就绪"));
         m_indAGV->setStatus(true, QStringLiteral("复位中"));
         if (!m_engine->isRunning())
@@ -655,6 +783,7 @@ void MainWindow::onStepActivated(int idx, int station, int cycle)
     }
 }
 
+/// 响应引擎启动：禁用开始按钮，启用停止按钮，更新指示灯
 void MainWindow::onEngineStarted()
 {
     m_btnStart->setEnabled(false);
@@ -665,16 +794,18 @@ void MainWindow::onEngineStarted()
     log(QString("机器人 %1:%2  AGV %3")
             .arg(cfg.robotIP).arg(cfg.robotPort).arg(cfg.agvIP));
 
+    // 初始状态：所有设备显示"就绪/已连接"
     m_indCamera->setStatus(true, QStringLiteral("就绪"));
     m_indRobot->setStatus(true, QStringLiteral("已连接"));
     m_indAGV->setStatus(true, QStringLiteral("已连接"));
 }
 
+/// 响应引擎停止：恢复按钮状态，流程图清除高亮
 void MainWindow::onEngineStopped()
 {
     m_btnStart->setEnabled(true);
     m_btnStop->setEnabled(false);
-    m_flow->setActiveStep(-1);
+    m_flow->setActiveStep(-1);        // 清除流程图高亮
     m_lblStep->setText(QStringLiteral("已停止"));
     m_indCamera->setStatus(true, QStringLiteral("待机"));
     m_indRobot->setStatus(true, QStringLiteral("待机"));
@@ -683,6 +814,17 @@ void MainWindow::onEngineStopped()
     log(QStringLiteral("========== 循环已停止 =========="));
 }
 
+/**
+ * @brief 响应补光灯状态变化（DeviceManager::lightChanged 信号）
+ * @param on      目标状态（true=开启）
+ * @param success 操作是否成功（Linux GPIO 控制结果，Windows 始终 true）
+ *
+ * 注意 m_indLight 的状态逻辑：
+ *   - 灯开启成功 → 绿色（on=true, success=true）
+ *   - 灯开启失败 → 红色（on=true, success=false，灯实际未亮）
+ *   - 灯关闭成功 → 红色（on=false，灯已灭，用红灯表示"无光"）
+ *   - 灯关闭失败 → 绿色（on=false, success=false，灯还亮着）
+ */
 void MainWindow::onLightChanged(bool on, bool success)
 {
     if (on) {
@@ -699,12 +841,18 @@ void MainWindow::onLightChanged(bool on, bool success)
             "#btnLight { background:#555; color:#aaa; border:none; "
             "border-radius:4px; padding:4px 16px; font-size:13px; }"
             "#btnLight:hover { background:#666; }");
-        // 成功关灯 → 红灯（灯已灭）；关灯失败 → 绿灯（灯还亮着）
+        // 成功关灯 → 指示灯红（灯已灭）；关灯失败 → 指示灯绿（灯还亮着）
         m_indLight->setStatus(!success,
             success ? QStringLiteral("已关闭") : QStringLiteral("关闭失败"));
     }
 }
 
+/**
+ * @brief 响应配置应用（DeviceManager::configApplied 信号）
+ *
+ * 配置刚应用、Modbus 尚未连接，将指示灯更新为"待连接"过渡状态。
+ * 真正的连接成功/失败由 robotModbusConnected/Disconnected 信号处理。
+ */
 void MainWindow::onConfigApplied(const QString &robotIP, int /*port*/, const QString &agvIP)
 {
     m_indRobot->setStatus(true, QString("待连接 %1").arg(robotIP));

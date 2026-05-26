@@ -126,6 +126,43 @@
 
 ---
 
+---
+
+## 2026-05-26 | 会话 #4 — 全文件中文注释增强
+
+### 背景
+会话 #3 完成了 AgvController + 真实 Modbus 状态机后，代码逻辑已成型但注释稀少，可读性不足。
+本轮目标：为全部 15 个源文件添加详细中文注释，覆盖文件职责、类/结构体、每个方法、关键逻辑行。
+
+---
+
+### 修改文件（注释增强，无逻辑变更）
+
+| 文件 | 主要新增注释内容 |
+|------|----------------|
+| `main.cpp` | 文件职责注释，`QApplication::exec()` 说明 |
+| `workflowstep.h` | 结构体职责、每个字段含义（name/desc/icon/active） |
+| `deviceindicator.h` | 类职责 + 用法示例，构造/setStatus 参数说明 |
+| `deviceindicator.cpp` | LED 圆心像素位置计算注释，文字绘制逻辑 |
+| `workflowwidget.h` | 类职责 + ASCII 布局示意图，所有公开方法参数说明 |
+| `workflowwidget.cpp` | 布局参数计算，步骤框激活/非激活色，跨步箭头 vs 回环箭头，工位栏绘制 |
+| `camerawindow.h` | 类职责 + 通信协议说明（Python 子进程 + 本地 TCP 帧格式），成员变量说明 |
+| `camerawindow.cpp` | 帧解析两阶段（帧头→帧体），findPython 优先级，10 MB 安全截断，子进程生命周期 |
+| `themeswitch.cpp` | ASCII 布局示意，slidePos 范围，lerp 插值，图标激活阈值（0.5）说明 |
+| `robotcontroller.cpp` | Modbus 功能码对应表（FC01/03/04/05/06/16），顺序写保护说明（坐标先于 CmdID） |
+| `agvcontroller.cpp` | 寄存器差异说明（与 RobotController 对比），自动重连逻辑，arrived() 快捷信号用途 |
+| `workflowengine.cpp` | 文件级状态转换 ASCII 图，setRobotController/setAgvController 解耦模式，enterStep0-4 逻辑，三定时器（pollTimer/stepTimer/timeoutTimer）职责，PendingCmd 顺序写保护，completeCycle 站号轮转 |
+| `devicemanager.cpp` | 职责分区（①生命周期 ②TCP Ping ③补光灯 ④信号透传），tcpPing 阻塞警告，toggleLight 跨平台差异 |
+| `mainwindow.cpp` | 架构角色注释，信号连接顺序注释，initUI 布局图，onLightChanged 反直觉状态说明（success=false 时 indicator 为 red 而不是 yellow） |
+
+---
+
+### 注意事项
+- 本轮**未修改任何业务逻辑**，所有改动仅为注释。
+- `workflowengine.h` / `agvcontroller.h` / `robotcontroller.h` 头文件注释已在会话 #3 中随实现同步添加，本轮不再重复。
+
+---
+
 ## 模板（复制此块追加下一次记录）
 
 ```
