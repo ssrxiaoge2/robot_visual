@@ -18,8 +18,8 @@ class VisionHttpClient;
  * 未注入或设备离线时自动降级为基于定时器的仿真模式。
  *
  * 五步流程：
- *   Step 0  相机拍照  — 触发相机采集，等待坐标数据
- *   Step 1  机器人抓取 — 写坐标(Holding 901-906) → 写 CmdID=8(Holding 900) → 轮询 Input 1132 == GRAB_DONE
+ *   Step 0  就位/视觉 — 写 CmdID=8 → 轮询 Input1132==1 → 触发视觉推理 → 等待坐标回调
+ *   Step 1  机器人抓取 — 写坐标(Holding 901-906) → 轮询 Input 1132 == GRAB_DONE(2)
  *   Step 2  AGV 行走  — 写目标工位(AGV Holding 1000) → 轮询 AGV Input 1001 == ARRIVED
  *   Step 3  机器人放料 — 写 CmdID=FLIP(Holding 900) → 轮询 Input 1132 == UNLOAD_DONE
  *   Step 4  复位等待  — 写 CmdID=RESET(Holding 900) → 轮询 Input 1132 == IDLE
@@ -110,15 +110,16 @@ private slots:
 private:
     enum class EngineState {
         Idle,
-        Step0_Camera,      ///< 等待相机坐标数据
+        Step0_SendCmd,     ///< 已写 CmdID=8，轮询 Input1132 等待 status=REQ_PHOTO(1)
+        Step0_WaitVision,  ///< 机器人已到拍照位，已触发视觉推理，等待坐标回调
         Step1_WriteCoords, ///< 正在写入坐标寄存器（等待 writeCompleted）
-        Step1_Grabbing,    ///< 等待 Input 1132 == GRAB_DONE
+        Step1_Grabbing,    ///< 等待 Input 1132 == GRAB_DONE(2)
         Step2_AgvMoving,   ///< 等待 AGV 状态 == ARRIVED
-        Step3_Unloading,   ///< 等待 Input 1132 == UNLOAD_DONE
-        Step4_Resetting,   ///< 等待 Input 1132 == IDLE
+        Step3_Unloading,   ///< 等待 Input 1132 == UNLOAD_DONE(3)
+        Step4_Resetting,   ///< 等待 Input 1132 == IDLE(0)
     };
 
-    enum class PendingCmd { None, Grab, Flip, Reset };
+    enum class PendingCmd { None, WriteCoords };
 
     void enterStep(int idx);   ///< 统一入口：更新 m_currentStep，发 stepActivated，分发到 enterStepN()
     void enterStep0();

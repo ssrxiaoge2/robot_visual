@@ -28,6 +28,9 @@
 #include "camerawindow.h"
 #include "workflowengine.h"
 
+#include <QDate>
+#include <QDir>
+#include <QFile>
 #include <QGridLayout>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
@@ -36,6 +39,7 @@
 #include <QFont>
 #include <QFormLayout>
 #include <QScrollArea>
+#include <QTextStream>
 
 #include "handeyedialog.h"
 
@@ -47,6 +51,24 @@ MainWindow::MainWindow(QWidget *parent)
     : QMainWindow(parent), ui(new Ui::MainWindow)
 {
     ui->setupUi(this);
+
+    // ── 0. 初始化日志文件（需在第一条 log() 调用之前完成）──
+    // 用 PROJECT_SOURCE_DIR 宏（CMakeLists 第 12 行定义）保证绝对路径，
+    // 与 fill_light 路径策略一致，不受 Qt Creator 工作目录设置影响
+    {
+        const QString logDir = QStringLiteral(PROJECT_SOURCE_DIR "/Log");
+        QDir().mkpath(logDir);
+        const QString path = logDir + "/"
+            + QDate::currentDate().toString("yyyy-MM-dd") + " log.txt";
+        m_logFile = new QFile(path, this);
+        if (!m_logFile->open(QIODevice::Append | QIODevice::Text)) {
+            qWarning() << "[日志] 无法创建日志文件:" << path
+                       << m_logFile->errorString();
+        } else {
+            m_logStream = new QTextStream(m_logFile);
+            m_logStream->setEncoding(QStringConverter::Utf8);
+        }
+    }
 
     // ── 1. 先构造业务层 ─────────────────────────────────────
     // 注意：必须在 initUI() 之前构造，因为 initUI() 中的部分代码
@@ -151,6 +173,8 @@ MainWindow::MainWindow(QWidget *parent)
 
 MainWindow::~MainWindow()
 {
+    if (m_logFile && m_logFile->isOpen())
+        m_logFile->close();
     delete ui;
 }
 
@@ -530,8 +554,13 @@ void MainWindow::initRobotPanel(QVBoxLayout *leftPanel)
  */
 void MainWindow::log(const QString &msg)
 {
-    const QString ts = QDateTime::currentDateTime().toString("hh:mm:ss");
-    m_logView->appendPlainText(QString("[%1] %2").arg(ts, msg));
+    const QString ts   = QDateTime::currentDateTime().toString("hh:mm:ss");
+    const QString line = QString("[%1] %2").arg(ts, msg);
+    m_logView->appendPlainText(line);
+    if (m_logStream) {
+        *m_logStream << line << '\n';
+        m_logStream->flush();
+    }
 }
 
 // ── 主题切换 ─────────────────────────────────────────────────
