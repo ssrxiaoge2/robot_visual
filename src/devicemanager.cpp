@@ -193,7 +193,7 @@ void DeviceManager::testScanner()
 /**
  * @brief 切换补光灯开/关状态
  *
- * Linux 部署环境：调用 PROJECT_SOURCE_DIR/fill_light on|off 控制 GPIO 9554
+ * Linux 部署环境：调用 PROJECT_SOURCE_DIR/tools/fill_light on|off 控制 GPIO 9554
  * Windows 开发环境：仅模拟切换，发出日志提示，不访问硬件
  *
  * 结果通过 lightChanged(bool on, bool success) 信号通知 UI。
@@ -204,7 +204,7 @@ void DeviceManager::toggleLight()
 
 #ifdef Q_OS_LINUX
     // Linux 专属：调用外部 GPIO 控制程序
-    const QString lightBin = QStringLiteral(PROJECT_SOURCE_DIR "/fill_light");
+    const QString lightBin = QStringLiteral(PROJECT_SOURCE_DIR "/tools/fill_light");
     const QString arg      = m_lightOn ? "on" : "off";
 
     QProcess proc;
