@@ -100,6 +100,10 @@ signals:
     /// 请求相机执行一次拍照，结果通过 setCoordinates() 槽回调
     void requestCameraCapture();
 
+    // ── AGV 故障 ──────────────────────────────────────────────
+    /// AGV 报告故障（Input1001=3）时发出，供 UI 更新指示灯为故障状态
+    void agvFaultDetected();
+
 private slots:
     void onPollTick();
     void onStepTimeout();
