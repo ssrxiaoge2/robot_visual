@@ -5,6 +5,20 @@
 
 ---
 
+## 2026-05-26 | 补光灯初始状态修复
+
+### 修复
+
+#### `src/devicemanager.h`
+- `m_lightOn` 初始值由 `true` 改为 `false`，补光灯默认关闭
+
+#### `src/mainwindow.cpp`
+- `initConfigPanel()` 中按钮初始文本由"● 关闭补光灯"改为"○ 开启补光灯"
+- 按钮初始样式由橙色（亮灯态）改为灰色（灭灯态）
+- 新增 `m_indLight->setStatus(false, "已关闭")` 同步指示灯初始状态
+
+---
+
 ## 2026-05-26 | 目录结构整理 — 引入 src/ scripts/ tools/ 分层
 
 ### 变更

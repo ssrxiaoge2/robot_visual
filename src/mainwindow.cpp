@@ -343,16 +343,17 @@ void MainWindow::initConfigPanel(QVBoxLayout *leftPanel)
     // ── 补光灯控制（单独一组）────────────────────────────────
     auto *gbLight     = new QGroupBox(QStringLiteral("补光灯"));
     auto *lightLayout = new QVBoxLayout(gbLight);
-    m_btnLight = new QPushButton(QStringLiteral("● 关闭补光灯"));
+    m_btnLight = new QPushButton(QStringLiteral("○ 开启补光灯"));
     m_btnLight->setObjectName("btnLight");
     m_btnLight->setFixedHeight(30);
-    // 补光灯按钮有专用的橙色样式（深色/浅色主题切换时通过 onLightChanged 重新设置）
     m_btnLight->setStyleSheet(
-        "#btnLight { background:#f0ad4e; color:white; border:none; "
+        "#btnLight { background:#555; color:#aaa; border:none; "
         "border-radius:4px; padding:4px 16px; font-size:13px; }"
-        "#btnLight:hover { background:#f5c26b; }");
+        "#btnLight:hover { background:#666; }");
     lightLayout->addWidget(m_btnLight);
     leftPanel->addWidget(gbLight);
+
+    m_indLight->setStatus(false, QStringLiteral("已关闭"));
 }
 
 /**
