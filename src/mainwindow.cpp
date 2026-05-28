@@ -104,6 +104,12 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_spinDelay, &QSpinBox::valueChanged,
             m_engine, &WorkflowEngine::setInterval);
 
+    // AGV 故障：更新指示灯为故障状态（与引擎 stopped 信号的"待机"区分）
+    connect(m_engine, &WorkflowEngine::agvFaultDetected, this, [this]() {
+        m_indAGV->setStatus(false, QStringLiteral("故障"));
+        log(QStringLiteral("[AGV] 检测到故障，已停止流程并复位机器人"));
+    });
+
     // ── 5. 连接 DeviceManager 信号 ──────────────────────────
     // 日志消息（配置应用、连通性测试结果等）
     connect(m_devMgr, &DeviceManager::logMessage,

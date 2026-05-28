@@ -623,7 +623,9 @@ void WorkflowEngine::onRobotInputRegistersRead(int startAddr, const QList<quint1
  * @brief AGV 状态读取完成回调
  *
  * 仅在 Step2_AgvMoving 状态下处理。
- * Arrived(2) → 推进到 Step3；Fault(3) → 报错停止。
+ * Arrived(2) → 推进到 Step3
+ * Fault(3)   → 立即停止所有定时器，发出 agvFaultDetected() 供 UI 更新指示灯，
+ *              调用 stop()（内部写 CmdID=0 复位机械臂，防止悬臂悬停）
  */
 void WorkflowEngine::onAgvStatusRead(AgvController::AgvStatus status)
 {
@@ -634,10 +636,14 @@ void WorkflowEngine::onAgvStatusRead(AgvController::AgvStatus status)
         m_pollTimer->stop();
         m_stepTimer->stop();
         m_timeoutTimer->stop();
-        enterStep(3); // 推进到机器人放料
+        enterStep(3);
     } else if (status == AgvController::AgvStatus::Fault) {
-        emit engineError(QStringLiteral("[步骤2] AGV 报告故障，停止运行"));
-        stop();
+        m_pollTimer->stop();
+        m_stepTimer->stop();
+        m_timeoutTimer->stop();
+        emit engineError(QStringLiteral("[步骤2] AGV 故障（Input1001=3），停止流程并复位机器人"));
+        emit agvFaultDetected();  // UI 更新 AGV 指示灯为故障状态
+        stop();                   // 写 CmdID=0 复位机械臂，防止悬臂悬空
     }
     // Moving(1) / Idle(0)：继续等待，下次轮询再判断
 }

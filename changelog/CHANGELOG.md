@@ -331,6 +331,30 @@
 
 ---
 
+## 2026-05-28 | 会话 #7 — AGV 故障自动停机 + README 重写
+
+### 新增
+
+#### `src/workflowengine.h`
+- 新增 signal `agvFaultDetected()`：AGV Input1001=3 时发出，供 UI 更新指示灯
+
+#### `src/workflowengine.cpp`
+- `onAgvStatusRead()` Fault 分支：
+  - 显式停止 pollTimer / stepTimer / timeoutTimer
+  - emit `agvFaultDetected()` 通知 UI
+  - 调用 `stop()`（内部写 CmdID=0 复位机械臂，防止悬臂悬空）
+
+#### `src/mainwindow.cpp`
+- 新增 `agvFaultDetected` 信号连接：更新 AGV 指示灯为"故障"状态（区别于正常停止的"待机"）
+
+### 变更
+
+#### `README.md`
+- 完整重写：补充硬件配置表、项目结构（src/scripts/tools 分层）、正确的五步时序（Step0 先写 CmdID=8）
+- 新增"下一步工作"章节，按优先级详细列出所有 TODO 及条件
+
+---
+
 ## 模板（复制此块追加下一次记录）
 
 ```
