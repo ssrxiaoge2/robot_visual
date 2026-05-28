@@ -2,11 +2,13 @@
 #define MAINWINDOW_H
 
 #include <QMainWindow>
+#include <QFile>
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
 #include <QSpinBox>
+#include <QTextStream>
 #include <QVBoxLayout>
 
 #include "deviceindicator.h"
@@ -118,8 +120,10 @@ private:
     ThemeSwitch    *m_themeSwitch = nullptr;
 
     // ── 流程图 / 日志 ────────────────────────────────────────
-    WorkflowWidget *m_flow    = nullptr;
-    QPlainTextEdit *m_logView = nullptr;
+    WorkflowWidget *m_flow      = nullptr;
+    QPlainTextEdit *m_logView   = nullptr;
+    QFile          *m_logFile   = nullptr;
+    QTextStream    *m_logStream = nullptr;
 };
 
 #endif // MAINWINDOW_H

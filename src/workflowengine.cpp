@@ -7,19 +7,17 @@
  *   start()
  *     │
  *     ▼
- *   Step0_Camera ──── 收到 setCoordinates() ────────────────────────┐
- *     │                                                             │
- *     │ 仿真：simTimer 超时                                          │
- *     │ 用零坐标替代                                                  │
- *     └─────────────────────────────────────────────────────────────┘
- *                                                                   │
- *                                                             Step1_WriteCoords
- *                                                             （写 Holding 901-906）
- *                                                                   │ writeCompleted()
- *                                                                   ▼
- *                                                             Step1_Grabbing
- *                                                             （写 Holding 900=8）
- *                                                             （轮询 Input 1132）
+ *   Step0_SendCmd  （写 CmdID=8，轮询 Input1132）
+ *     │ 硬件：Input1132==1 (REQ_PHOTO)
+ *     │ 仿真：simTimer 超时
+ *     ▼
+ *   Step0_WaitVision（触发 fetchInference，等待 setCoordinates 回调）
+ *     │ 收到坐标 / 视觉超时（用零坐标）
+ *     ▼
+ *   Step1_WriteCoords（写 Holding 901-906）
+ *     │ writeCompleted()
+ *     ▼
+ *   Step1_Grabbing （轮询 Input 1132）
  *                                                                   │ status==GRAB_DONE
  *                                                                   ▼
  *                                                             Step2_AgvMoving
@@ -263,14 +261,13 @@ void WorkflowEngine::setCoordinates(const QList<quint16> &coords)
     m_coords    = coords;
     m_hasCoords = true;
 
-    // 若正在等待视觉数据，停止所有定时器，立即推进
-    if (m_state == EngineState::Step0_Camera) {
-        m_stepTimer->stop();    // 停止仿真推进定时器
-        m_timeoutTimer->stop(); // 停止 30s 超时保护（视觉已响应，超时无需触发）
-        emit stepLog(QStringLiteral("[视觉] 坐标数据已就绪，开始机器人抓取"));
-        enterStep1();
+    if (m_state == EngineState::Step0_WaitVision) {
+        m_stepTimer->stop();
+        m_timeoutTimer->stop();
+        emit stepLog(QStringLiteral("[视觉] 坐标数据已就绪，写入机器人寄存器 901-906"));
+        enterStep(1);  // 通过 enterStep() 发出 stepActivated(1) 更新 UI
     }
-    // 若在其他状态收到（例如相机延迟回调），存储坐标留下次循环使用
+    // 其他状态收到（延迟回调）：存储坐标，下次循环使用
 }
 
 // ── 步骤入口（统一分发）─────────────────────────────────────
@@ -296,59 +293,53 @@ void WorkflowEngine::enterStep(int idx)
 // ── 各步骤逻辑 ────────────────────────────────────────────────
 
 /**
- * @brief Step 0 — 视觉识别（触发 HTTP 推理或降级仿真）
+ * @brief Step 0 — 写抓取指令，等待机器人运动到拍照位，再触发视觉识别
  *
- * 真实模式（VisionHttpClient 已注入且已配置）：
- *   调用 fetchInference() → 视觉服务返回 JSON → setCoordinates() 被调用
- *   → Step0_Camera 状态退出，进入 Step1
- *   → 同时启动 30s 超时保护，防止视觉服务无响应时工作流卡死
+ * 真实模式（机器人已连接）：
+ *   1. 写 Holding 900=CMD_GRAB(8)：机器人收到指令后运动到预设拍照等待位
+ *   2. 300ms 轮询 Input 1132，直到 status==STATUS_REQ_PHOTO(1)
+ *   3. 检测到 status=1 后切换到 Step0_WaitVision，触发视觉推理
+ *   4. 视觉服务返回坐标后 setCoordinates() 被调用，推进到 Step1
  *
- * 仿真模式（无视觉服务或服务未配置）：
- *   发出 requestCameraCapture() 信号（供外部扩展使用）
- *   simIntervalMs 后定时器触发 onStepTimeout()，用零坐标自动推进
+ * 仿真模式（机器人未连接）：
+ *   stepTimer 超时后模拟机器人到达拍照位，切换到 Step0_WaitVision，
+ *   再次超时后用零坐标推进（或由视觉服务异步返回坐标）
  */
 void WorkflowEngine::enterStep0()
 {
-    m_state     = EngineState::Step0_Camera;
+    m_state     = EngineState::Step0_SendCmd;
     m_hasCoords = false;
     m_coords.clear();
 
-    emit stepLog(QString("[步骤0] 工位%1 触发视觉识别").arg(m_station));
+    emit stepLog(QString("[步骤0] 工位%1 发送抓取指令，等待机器人运动到拍照位").arg(m_station));
 
-    if (m_visionClient && m_visionClient->isConfigured()) {
-        // ── 真实模式：向视觉服务发起 HTTP 推理请求 ───────────
-        m_visionClient->fetchInference();
-        // 启动超时保护（30s 内视觉服务必须响应，否则停止流程）
-        m_timeoutTimer->start();
-        emit stepLog(QStringLiteral("[步骤0] 已请求视觉推理，等待坐标..."));
+    if (robotReady()) {
+        m_robotCtrl->writeRegister(REG_CMD_ID, CMD_GRAB);
+        startPollAndTimeout();
+        emit stepLog(QStringLiteral("[步骤0] 已写 CmdID=8，轮询 Input1132 等待 status=1"));
     } else {
-        // ── 仿真模式：定时器超时后自动推进 ──────────────────
-        emit requestCameraCapture(); // 保留，供外部扩展使用
         m_stepTimer->start(m_simIntervalMs);
-        emit stepLog(QStringLiteral("[步骤0][仿真] 视觉服务未配置，等待超时推进"));
+        emit stepLog(QStringLiteral("[步骤0][仿真] 机器人未连接，模拟运动到拍照位"));
     }
 }
 
 /**
- * @brief Step 1 — 机器人抓取
+ * @brief Step 1 — 写坐标并等待机器人抓取完成
  *
  * 硬件模式：
  *   1. 写 Holding 901-906（坐标）→ 等待 writeCompleted()
- *   2. onRobotWriteCompleted() 中写 Holding 900=8（CmdID）
- *   3. 轮询 Input 1132，等待 status == GRAB_DONE(2)
+ *   2. 坐标写完后进入 Step1_Grabbing，轮询 Input 1132 等待 status==GRAB_DONE(2)
+ *   （注：CmdID=8 已在 Step0 写入，机器人收到坐标后自动完成抓取）
  *
  * 仿真模式：simTimer 超时后直接推进 Step 2
- *
- * ⚠ 顺序写保护：必须先写坐标再写命令字，防止机器人读到错误坐标
  */
 void WorkflowEngine::enterStep1()
 {
     emit stepLog(QStringLiteral("[步骤1] 写坐标到机器人寄存器 901-906"));
 
     if (robotReady()) {
-        // 真实硬件模式
         m_state      = EngineState::Step1_WriteCoords;
-        m_pendingCmd = PendingCmd::Grab; // 标记下一步写 CmdID=8
+        m_pendingCmd = PendingCmd::WriteCoords;
 
         // 用相机提供的坐标，若无则用零坐标（仿真/测试场景）
         QList<quint16> coords = m_hasCoords ? m_coords : QList<quint16>(6, 0);
@@ -481,38 +472,46 @@ void WorkflowEngine::startPollAndTimeout()
 void WorkflowEngine::onPollTick()
 {
     switch (m_state) {
-    case EngineState::Step1_Grabbing:
-    case EngineState::Step3_Unloading:
-    case EngineState::Step4_Resetting:
-        // 读机器人状态字（FC04，Input 1132）
+    case EngineState::Step0_SendCmd:   // 等待机器人到达拍照位（Input1132==1）
+    case EngineState::Step1_Grabbing:  // 等待抓取完成（Input1132==2）
+    case EngineState::Step3_Unloading: // 等待卸料完成（Input1132==3）
+    case EngineState::Step4_Resetting: // 等待复位完成（Input1132==0）
         if (robotReady())
             m_robotCtrl->readInputRegisters(REG_ROBOT_STATUS, 1);
         break;
     case EngineState::Step2_AgvMoving:
-        // 读 AGV 状态字（FC04，Input 1001）
         if (agvReady())
             m_agvCtrl->readStatusRegister();
         break;
     default:
-        break; // 其他状态（Idle/WriteCoords/Camera）无需轮询
+        break;
     }
 }
 
 /**
- * @brief 步骤超时定时器回调（仿真模式）
+ * @brief 步骤超时定时器回调
  *
- * 在没有硬件连接时，充当每步的"虚拟完成"信号。
- * 硬件模式下此定时器不会被启动（enterStepN 中仅在 !robotReady/agvReady 时 start）。
+ * 仿真模式：充当每步的"虚拟完成"信号，自动推进到下一步。
+ * 真实模式：视觉等待阶段（Step0_WaitVision）超时时也会触发，用零坐标继续。
  */
 void WorkflowEngine::onStepTimeout()
 {
     switch (m_state) {
-    case EngineState::Step0_Camera:
-        // 相机超时：用全零坐标代替，继续执行（仿真/调试场景）
-        emit stepLog(QStringLiteral("[步骤0][仿真] 相机超时，使用零坐标继续"));
-        m_coords    = QList<quint16>(6, 0);
-        m_hasCoords = true;
-        enterStep1();
+    case EngineState::Step0_SendCmd:
+        // 仿真：机器人"已运动到拍照位"，切换到视觉等待阶段
+        emit stepLog(QStringLiteral("[步骤0][仿真] 机器人到达拍照位，触发视觉识别"));
+        m_state = EngineState::Step0_WaitVision;
+        if (m_visionClient && m_visionClient->isConfigured()) {
+            m_visionClient->fetchInference();
+        } else {
+            emit requestCameraCapture();
+        }
+        m_stepTimer->start(m_simIntervalMs); // 视觉响应超时备用
+        break;
+    case EngineState::Step0_WaitVision:
+        // 视觉服务超时（仿真降级或真实网络超时）：用零坐标继续
+        emit stepLog(QStringLiteral("[步骤0] 视觉超时，使用零坐标继续"));
+        setCoordinates(QList<quint16>(6, 0));
         break;
     case EngineState::Step1_Grabbing:
         emit stepLog(QStringLiteral("[步骤1][仿真] 抓取完成（模拟）"));
@@ -546,22 +545,17 @@ void WorkflowEngine::onStepTimeout()
 /**
  * @brief 机械臂寄存器写入完成回调
  *
- * 用于实现"先写坐标，再写命令字"的顺序写保护：
- *   - Step1 进入时写坐标（FC16，Holding 901-906），m_pendingCmd=Grab
- *   - 写坐标完成后，此回调检测到 Grab 标记，发送 CmdID=8 给机器人
- *   - CmdID 写完后再次触发此回调，但此时 m_pendingCmd=None，直接返回
- *
- * 这样保证机器人始终在拿到最新坐标之后才收到抓取指令。
+ * Step1 进入时写坐标（FC16，Holding 901-906），设 m_pendingCmd=WriteCoords；
+ * 写完后切换到 Step1_Grabbing，由轮询等待 Input1132==2。
+ * 注：CmdID=8 已在 Step0 写入，机器人拿到坐标后自行完成抓取，无需重复写命令字。
  */
 void WorkflowEngine::onRobotWriteCompleted()
 {
-    if (m_pendingCmd == PendingCmd::Grab && robotReady()) {
-        m_pendingCmd = PendingCmd::None; // 清除标记，防止重复触发
-        m_state      = EngineState::Step1_Grabbing; // 进入等待抓取完成状态
-        emit stepLog(QString("[步骤1] 坐标已写入 → 发送 CmdID=%1 启动抓取").arg(CMD_GRAB));
-        m_robotCtrl->writeRegister(REG_CMD_ID, CMD_GRAB);
+    if (m_pendingCmd == PendingCmd::WriteCoords && robotReady()) {
+        m_pendingCmd = PendingCmd::None;
+        m_state      = EngineState::Step1_Grabbing;
+        emit stepLog(QStringLiteral("[步骤1] 坐标已写入寄存器 901-906，轮询等待抓取完成"));
     }
-    // 其他情况（Step3/Step4 的单寄存器写完成）不需要额外处理
 }
 
 /**
@@ -578,31 +572,46 @@ void WorkflowEngine::onRobotInputRegistersRead(int startAddr, const QList<quint1
     const quint16 status = values[0];
 
     switch (m_state) {
+    case EngineState::Step0_SendCmd:
+        if (status == STATUS_REQ_PHOTO) {   // 状态字 == 1：机器人到达拍照位
+            emit stepLog(QStringLiteral("[步骤0] Input1132=1 机器人到达拍照位，触发视觉识别"));
+            m_pollTimer->stop();
+            m_timeoutTimer->stop();
+            m_state = EngineState::Step0_WaitVision;
+            if (m_visionClient && m_visionClient->isConfigured()) {
+                m_visionClient->fetchInference();
+                m_timeoutTimer->start(); // 重启 30s，等待视觉响应
+            } else {
+                emit requestCameraCapture();
+                m_stepTimer->start(m_simIntervalMs);
+            }
+        }
+        break;
     case EngineState::Step1_Grabbing:
         if (status == STATUS_GRAB_DONE) {   // 状态字 == 2：抓取完成
-            emit stepLog(QStringLiteral("[步骤1] Input1132 = 抓取完成 ✓"));
+            emit stepLog(QStringLiteral("[步骤1] Input1132=2 抓取完成 ✓"));
             m_pollTimer->stop();
             m_stepTimer->stop();
             m_timeoutTimer->stop();
-            enterStep(2); // 推进到 AGV 行走
+            enterStep(2);
         }
         break;
     case EngineState::Step3_Unloading:
         if (status == STATUS_UNLOAD_DONE) { // 状态字 == 3：卸料完成
-            emit stepLog(QStringLiteral("[步骤3] Input1132 = 卸料完成 ✓"));
+            emit stepLog(QStringLiteral("[步骤3] Input1132=3 卸料完成 ✓"));
             m_pollTimer->stop();
             m_stepTimer->stop();
             m_timeoutTimer->stop();
-            enterStep(4); // 推进到复位等待
+            enterStep(4);
         }
         break;
     case EngineState::Step4_Resetting:
         if (status == STATUS_IDLE) {        // 状态字 == 0：空闲就绪
-            emit stepLog(QStringLiteral("[步骤4] Input1132 = 空闲就绪 ✓"));
+            emit stepLog(QStringLiteral("[步骤4] Input1132=0 复位完成 ✓"));
             m_pollTimer->stop();
             m_stepTimer->stop();
             m_timeoutTimer->stop();
-            completeCycle(); // 一轮结束
+            completeCycle();
         }
         break;
     default:

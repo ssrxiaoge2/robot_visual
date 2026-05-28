@@ -271,6 +271,66 @@
 
 ---
 
+## 2026-05-28 | 会话 #6 — WorkflowEngine 状态机重构 + 日志持久化
+
+### 背景
+会话 #5 完成了手眼矩阵加载功能。本轮目标：
+1. 修复 WorkflowEngine Step0/Step1 时序 Bug：旧代码先触发相机再写 CmdID=8，
+   实际硬件要求先写 CmdID=8 → 机器人运动到拍照位 → Input1132=1 → 再触发相机
+2. 新增日志持久化：每条日志同步写入 `Log/<日期> log.txt`，追加模式，启动即生效
+
+---
+
+### 修改文件
+
+#### `src/workflowengine.h`
+- 类文档注释更新 Step 0 描述（写 CmdID=8 → 轮询 Input1132=1 → 触发视觉 → 等待坐标）
+- `EngineState` 枚举：移除 `Step0_Camera`，新增 `Step0_SendCmd`、`Step0_WaitVision`
+- `PendingCmd` 枚举：移除 `Grab`、`Flip`、`Reset`（后两个从未使用），新增 `WriteCoords`
+
+#### `src/workflowengine.cpp`
+- 文件头状态转换图更新，反映新两阶段 Step0
+- `enterStep0()`：
+  - 旧：直接 `fetchInference()` 或 emit `requestCameraCapture()`
+  - 新：先写 `CmdID=8`（硬件模式）或启动 simTimer（仿真模式），等待机器人到位
+- `setCoordinates()`：
+  - 状态检查从 `Step0_Camera` 改为 `Step0_WaitVision`
+  - 推进调用从 `enterStep1()` 改为 `enterStep(1)`，确保发出 `stepActivated(1)` 更新 UI
+- `enterStep1()`：
+  - `m_pendingCmd` 从 `PendingCmd::Grab` 改为 `PendingCmd::WriteCoords`
+  - 文档注释去除"再写 CmdID=8"步骤（已在 Step0 写入）
+- `onPollTick()`：新增 `Step0_SendCmd` case，每 300ms 读 Input1132 等待 status=1
+- `onStepTimeout()`：
+  - 移除 `Step0_Camera` case
+  - 新增 `Step0_SendCmd` case（仿真：切换 Step0_WaitVision，调用 fetchInference 或 emit requestCameraCapture）
+  - 新增 `Step0_WaitVision` case（视觉超时：使用零坐标继续）
+- `onRobotWriteCompleted()`：
+  - 检测 `PendingCmd::WriteCoords`（原 `Grab`），写完坐标仅切换到 `Step1_Grabbing`，不再写 CmdID=8
+- `onRobotInputRegistersRead()`：
+  - 新增 `Step0_SendCmd` case：检测 `status==STATUS_REQ_PHOTO(1)`，停定时器，切换 `Step0_WaitVision`，触发视觉推理
+
+#### `src/mainwindow.h`
+- 新增 include：`<QFile>`、`<QTextStream>`
+- 新增成员：`QFile *m_logFile = nullptr`、`QTextStream *m_logStream = nullptr`
+
+#### `src/mainwindow.cpp`
+- 新增 include：`<QCoreApplication>`、`<QDate>`、`<QDir>`、`<QFile>`、`<QTextStream>`
+- 构造函数起始处（`setupUi` 之后，业务层构造之前）：
+  - `mkpath("applicationDir/Log")`
+  - 以追加模式打开 `<日期> log.txt`，创建 `QTextStream`（UTF-8 编码）
+- `log()` 方法：同步将带时间戳的行写入 `m_logStream` 并 `flush()`
+- 析构函数：关闭 `m_logFile`
+
+---
+
+### 注意事项
+- 日志文件路径：可执行文件所在目录下的 `Log/` 子目录，文件名格式 `2026-05-28 log.txt`
+- 日志按"天"切换：程序跨天不重启则继续写当天文件（构造时确定路径）
+- 仿真模式 Step0 时序：`Step0_SendCmd` simTimer → `Step0_WaitVision` simTimer → `setCoordinates(零)` 推进，
+  全程无硬件写操作，`enterStep0()` 中写 CmdID=8 仅在 `robotReady()` 时执行
+
+---
+
 ## 模板（复制此块追加下一次记录）
 
 ```
