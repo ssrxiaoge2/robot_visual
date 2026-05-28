@@ -28,7 +28,6 @@
 #include "camerawindow.h"
 #include "workflowengine.h"
 
-#include <QCoreApplication>
 #include <QDate>
 #include <QDir>
 #include <QFile>
@@ -54,10 +53,10 @@ MainWindow::MainWindow(QWidget *parent)
     ui->setupUi(this);
 
     // ── 0. 初始化日志文件（需在第一条 log() 调用之前完成）──
+    // 使用相对路径 "Log/"，与工作目录保持一致（OrbbecSDK.log 也在此目录）
     {
-        const QString logDir = QCoreApplication::applicationDirPath() + "/Log";
-        QDir().mkpath(logDir);
-        const QString path = logDir + "/"
+        QDir().mkpath(QStringLiteral("Log"));
+        const QString path = QStringLiteral("Log/")
             + QDate::currentDate().toString("yyyy-MM-dd") + " log.txt";
         m_logFile = new QFile(path, this);
         if (m_logFile->open(QIODevice::Append | QIODevice::Text)) {
