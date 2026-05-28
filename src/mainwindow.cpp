@@ -28,6 +28,7 @@
 #include "camerawindow.h"
 #include "workflowengine.h"
 
+#include <QGridLayout>
 #include <QHBoxLayout>
 #include <QVBoxLayout>
 #include <QGroupBox>
@@ -35,6 +36,8 @@
 #include <QFont>
 #include <QFormLayout>
 #include <QScrollArea>
+
+#include "handeyedialog.h"
 
 // ============================================================
 //  构造 / 析构
@@ -227,17 +230,18 @@ void MainWindow::initUI()
     auto *leftPanel     = new QVBoxLayout(leftContainer);
     leftPanel->setContentsMargins(0, 0, 4, 0);
 
-    // 设备状态指示灯组（顶部）
+    // 设备状态指示灯组（2×2 网格）
     auto *gbStatus     = new QGroupBox(QStringLiteral("设备状态"));
-    auto *statusLayout = new QVBoxLayout(gbStatus);
+    auto *statusLayout = new QGridLayout(gbStatus);
+    statusLayout->setSpacing(4);
     m_indCamera = new DeviceIndicator(QStringLiteral("奥比相机"));
     m_indRobot  = new DeviceIndicator(QStringLiteral("华沿机器人"));
     m_indAGV    = new DeviceIndicator(QStringLiteral("仙工AGV"));
     m_indLight  = new DeviceIndicator(QStringLiteral("补光灯"));
-    statusLayout->addWidget(m_indCamera);
-    statusLayout->addWidget(m_indRobot);
-    statusLayout->addWidget(m_indAGV);
-    statusLayout->addWidget(m_indLight);
+    statusLayout->addWidget(m_indCamera, 0, 0);
+    statusLayout->addWidget(m_indRobot,  0, 1);
+    statusLayout->addWidget(m_indAGV,    1, 0);
+    statusLayout->addWidget(m_indLight,  1, 1);
     leftPanel->addWidget(gbStatus);
 
     // 各功能面板（按功能分组，内部实现见 initXxxPanel）
@@ -280,6 +284,7 @@ void MainWindow::initUI()
     connect(m_btnTestCamera,     &QPushButton::clicked, this, &MainWindow::onTestCamera);
     connect(m_btnTestCameraOpen, &QPushButton::clicked, this, &MainWindow::onTestCameraOpen);
     connect(m_btnTestScanner,    &QPushButton::clicked, this, &MainWindow::onTestScanner);
+    connect(m_btnHandEye,        &QPushButton::clicked, this, &MainWindow::onHandEyeCalib);
 
     menuBar()->setVisible(false);   // 隐藏菜单栏（工业界面不需要）
     statusBar()->setVisible(false); // 隐藏状态栏
@@ -343,6 +348,7 @@ void MainWindow::initConfigPanel(QVBoxLayout *leftPanel)
     // ── 补光灯控制（单独一组）────────────────────────────────
     auto *gbLight     = new QGroupBox(QStringLiteral("补光灯"));
     auto *lightLayout = new QVBoxLayout(gbLight);
+    // 补光灯默认关闭：按钮文字/样式与 m_lightOn=false 初始状态保持一致
     m_btnLight = new QPushButton(QStringLiteral("○ 开启补光灯"));
     m_btnLight->setObjectName("btnLight");
     m_btnLight->setFixedHeight(30);
@@ -351,9 +357,8 @@ void MainWindow::initConfigPanel(QVBoxLayout *leftPanel)
         "border-radius:4px; padding:4px 16px; font-size:13px; }"
         "#btnLight:hover { background:#666; }");
     lightLayout->addWidget(m_btnLight);
-    leftPanel->addWidget(gbLight);
-
     m_indLight->setStatus(false, QStringLiteral("已关闭"));
+    leftPanel->addWidget(gbLight);
 }
 
 /**
@@ -398,6 +403,16 @@ void MainWindow::initCameraPanel(QVBoxLayout *leftPanel)
     m_indCameraDebug = new DeviceIndicator(QStringLiteral("相机状态"));
     m_indCameraDebug->setFixedSize(180, 48);
     form->addRow(m_indCameraDebug);
+
+    // 手眼标定按钮：打开向导加载标定矩阵
+    m_btnHandEye = new QPushButton(QStringLiteral("手眼标定矩阵"));
+    m_btnHandEye->setFixedHeight(26);
+    m_btnHandEye->setObjectName("btnHandEye");
+    m_btnHandEye->setStyleSheet(
+        "#btnHandEye { background:#8e44ad; color:white; border:none; "
+        "border-radius:3px; font-size:12px; }"
+        "#btnHandEye:hover { background:#a85cc5; }");
+    form->addRow(m_btnHandEye);
     leftPanel->addWidget(gbCamera);
 }
 
@@ -730,6 +745,19 @@ void MainWindow::onTestScanner()
     DeviceManager::Config cfg; buildConfig(cfg);
     m_devMgr->setConfig(cfg);
     m_devMgr->testScanner();
+}
+
+/// "手眼标定矩阵"按钮回调：打开向导，用户确认后将矩阵写入视觉系统
+void MainWindow::onHandEyeCalib()
+{
+    auto *dlg = new HandEyeDialog(this);
+    connect(dlg, &HandEyeDialog::matrixConfirmed,
+            m_devMgr, &DeviceManager::applyHandEyeMatrix);
+    connect(m_devMgr, &DeviceManager::handEyeMatrixApplied, this, [this]() {
+        log(QStringLiteral("[手眼] 矩阵已成功应用，后续推理将使用新矩阵"));
+    });
+    dlg->setAttribute(Qt::WA_DeleteOnClose);
+    dlg->exec();
 }
 
 // ── 响应业务层信号（纯 UI 更新）────────────────────────────

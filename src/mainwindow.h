@@ -15,6 +15,7 @@
 #include "themeswitch.h"
 
 class WorkflowEngine;
+class HandEyeDialog;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -40,6 +41,7 @@ private slots:
     void onTestCamera();
     void onTestCameraOpen();
     void onTestScanner();
+    void onHandEyeCalib();
 
     // ── 响应业务层信号（纯 UI 更新）────────────────────────────
     void onStepActivated(int idx, int station, int cycle);
@@ -95,6 +97,7 @@ private:
     QLineEdit       *m_editCameraIP      = nullptr;
     QPushButton     *m_btnTestCamera     = nullptr;
     QPushButton     *m_btnTestCameraOpen = nullptr;
+    QPushButton     *m_btnHandEye        = nullptr;
     DeviceIndicator *m_indCameraDebug    = nullptr;
 
     // ── 扫码器调试面板 ──────────────────────────────────────

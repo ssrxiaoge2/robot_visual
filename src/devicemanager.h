@@ -63,6 +63,9 @@ public slots:
     void debugReadRobotRegisters(int addr, int count);
     void debugWriteRobotRegister(int addr, quint16 value);
 
+    // ── 手眼矩阵动态加载（来自 HandEyeDialog）──────────────
+    void applyHandEyeMatrix(const float m[16]);
+
 signals:
     // ── 设备连通状态（ok=true 可达，statusText 供指示灯显示）──
     void robotStatusChanged(bool ok, const QString &statusText);
@@ -88,6 +91,9 @@ signals:
 
     // ── 机械臂调试面板：寄存器读取结果（转发 RobotController::registersRead）──
     void debugRegistersRead(int startAddr, const QList<quint16> &values);
+
+    // ── 手眼矩阵已应用 ──────────────────────────────────────
+    void handEyeMatrixApplied();
 
     // ── 日志消息（供 MainWindow 转发到日志控件）──
     void logMessage(const QString &msg);
