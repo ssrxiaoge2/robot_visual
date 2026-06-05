@@ -40,3 +40,8 @@ Log/
 .DS_Store
 Thumbs.db
 desktop.ini
+# 党欢本地环境文件
+docs/
+AGENTS.md
+.vscode/
+

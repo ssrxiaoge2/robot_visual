@@ -5,6 +5,15 @@
 
 ---
 
+## 2026-06-05 | 修正奥比 SDK 位置，新增华研 SDK 与接口
+
+### 变更
+- 修正 `CMakeLists.txt` 中 Orbbec SDK 库路径
+- 新增华研 SDK 头文件 `3rd/HuaYansdk/.../include/HR_Pro.h`
+- 新增华研调度接口 `src/huayanScheduler.h` / `src/huayanScheduler.cpp`
+- 更新 `.gitignore`（忽略 `docs/`、`.vscode/` 等）
+
+
 ## 2026-05-26 | 补光灯初始状态修复
 
 ### 修复

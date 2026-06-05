@@ -21,6 +21,8 @@ set(PROJECT_SOURCES
         src/workflowengine.cpp
         src/workflowengine.h
         src/workflowstep.h
+        src/huayanScheduler.cpp
+        src/huayanScheduler.h
         src/devicemanager.cpp
         src/devicemanager.h
         src/robotcontroller.cpp
@@ -51,7 +53,7 @@ target_include_directories(wh-robot-visual PRIVATE src/)
 
 # ── 奥比中光 SDK（仅 Linux 部署时链接，Windows 开发环境跳过）──
 if(UNIX)
-    set(ORBBEC_SDK_ROOT "${CMAKE_SOURCE_DIR}/../helper/Project11/OrbbecSDK_C_C++_v1.10.35_20260128_fa838f5_linux_x64_release/OrbbecSDK_v1.10.35/SDK")
+    set(ORBBEC_SDK_ROOT "${CMAKE_SOURCE_DIR}/3rd/OrbbecSdk")
     target_include_directories(wh-robot-visual PRIVATE "${ORBBEC_SDK_ROOT}/include")
     target_link_directories(wh-robot-visual PRIVATE "${ORBBEC_SDK_ROOT}/lib")
     target_link_libraries(wh-robot-visual PRIVATE
@@ -61,6 +63,24 @@ if(UNIX)
         BUILD_RPATH "${ORBBEC_SDK_ROOT}/lib"
         INSTALL_RPATH "${ORBBEC_SDK_ROOT}/lib"
     )
+endif()
+
+# ── 华沿机械臂 SDK（Linux/Windows 均可配置）──
+set(HUAYAN_SDK_ROOT "${CMAKE_SOURCE_DIR}/3rd/HuaYansdk/HuayanRobotLibrary-C++-V1.0.15.0")
+
+target_include_directories(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/include")
+
+if(UNIX)
+    target_link_directories(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/Linux")
+    target_link_libraries(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/Linux/libHR_Pro.so")
+elseif(WIN32)
+    if(MSVC)
+        target_link_directories(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/MSVC")
+        target_link_libraries(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/MSVC/HR_Pro.lib")
+    elseif(MINGW)
+        target_link_directories(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/MinGW")
+        target_link_libraries(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/MinGW/libHR_Pro.dll.a")
+    endif()
 endif()
 
 # Windows：隐藏控制台窗口；Linux/macOS 不需要此属性
