@@ -42,6 +42,7 @@
 #include <QTextStream>
 
 #include "handeyedialog.h"
+#include "huayanScheduler.h"
 
 // ============================================================
 //  构造 / 析构
@@ -173,6 +174,19 @@ MainWindow::MainWindow(QWidget *parent)
         log(QString("[机械臂] 读取 %1 个寄存器").arg(values.size()));
     });
 
+    // ── 9. 华沿 SDK 信号连接 ─────────────────────────────────
+    {
+        HuayanScheduler *hs = m_devMgr->huayanScheduler();
+        connect(hs, &HuayanScheduler::logMessage,
+                this, &MainWindow::onHuayanLog);
+        connect(hs, &HuayanScheduler::stageStarted,
+                this, &MainWindow::onHuayanStageStarted);
+        connect(hs, &HuayanScheduler::stageCompleted,
+                this, &MainWindow::onHuayanStageCompleted);
+        connect(hs, &HuayanScheduler::stageError,
+                this, &MainWindow::onHuayanStageError);
+    }
+
     log(QStringLiteral("===== 上位机可视化系统启动 ====="));
     log(QStringLiteral("请配置设备IP后连接"));
 }
@@ -279,6 +293,7 @@ void MainWindow::initUI()
     initCameraPanel(leftPanel);   // 相机调试
     initScannerPanel(leftPanel);  // 扫码器调试
     initRobotPanel(leftPanel);    // 机械臂 Modbus 控制
+    initHuayanPanel(leftPanel);   // 华沿 SDK 调试
 
     leftPanel->addStretch(); // 底部弹性填充
     leftContainer->setMinimumWidth(280);
@@ -548,6 +563,52 @@ void MainWindow::initRobotPanel(QVBoxLayout *leftPanel)
     m_regView->setMaximumBlockCount(50);
     m_regView->setFixedHeight(120);
     form->addRow(m_regView);
+
+    leftPanel->addWidget(gb);
+}
+
+void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
+{
+    auto *gb   = new QGroupBox(QStringLiteral("华沿 SDK 调试"));
+    auto *vbox = new QVBoxLayout(gb);
+
+    auto *row1 = new QHBoxLayout();
+    m_huayanConnectBtn    = new QPushButton(QStringLiteral("连接机器人"));
+    m_huayanDisconnectBtn = new QPushButton(QStringLiteral("断开"));
+    m_huayanIndicator     = new DeviceIndicator(QStringLiteral("华沿 SDK"));
+    m_huayanDisconnectBtn->setEnabled(false);
+    m_huayanConnectBtn->setFixedHeight(26);
+    m_huayanDisconnectBtn->setFixedHeight(26);
+    row1->addWidget(m_huayanConnectBtn);
+    row1->addWidget(m_huayanDisconnectBtn);
+    row1->addStretch();
+    row1->addWidget(m_huayanIndicator);
+    vbox->addLayout(row1);
+
+    auto *line = new QFrame();
+    line->setFrameShape(QFrame::HLine);
+    line->setFrameShadow(QFrame::Sunken);
+    vbox->addWidget(line);
+
+    auto *row2 = new QHBoxLayout();
+    m_huayanStartBtn = new QPushButton(QStringLiteral("启动取料（阶段一）"));
+    m_huayanStopBtn  = new QPushButton(QStringLiteral("停止"));
+    m_huayanStartBtn->setEnabled(false);
+    m_huayanStopBtn->setEnabled(false);
+    m_huayanStartBtn->setFixedHeight(28);
+    m_huayanStopBtn->setFixedHeight(28);
+    row2->addWidget(m_huayanStartBtn);
+    row2->addWidget(m_huayanStopBtn);
+    vbox->addLayout(row2);
+
+    connect(m_huayanConnectBtn,    &QPushButton::clicked,
+            this, &MainWindow::onHuayanConnect);
+    connect(m_huayanDisconnectBtn, &QPushButton::clicked,
+            this, &MainWindow::onHuayanDisconnect);
+    connect(m_huayanStartBtn,      &QPushButton::clicked,
+            this, &MainWindow::onHuayanStartStageOne);
+    connect(m_huayanStopBtn,       &QPushButton::clicked,
+            this, &MainWindow::onHuayanStop);
 
     leftPanel->addWidget(gb);
 }
@@ -917,4 +978,75 @@ void MainWindow::onConfigApplied(const QString &robotIP, int /*port*/, const QSt
 {
     m_indRobot->setStatus(true, QString("待连接 %1").arg(robotIP));
     m_indAGV->setStatus(true, QString("待连接 %1").arg(agvIP));
+}
+
+// ── 华沿 SDK 调试面板槽 ──────────────────────────────────────
+
+void MainWindow::onHuayanConnect()
+{
+    m_huayanConnectBtn->setEnabled(false);
+    m_huayanIndicator->setStatus(false, QStringLiteral("连接中..."));
+    log(QStringLiteral("[华沿] 正在连接机器人..."));
+    m_devMgr->huayanScheduler()->connectRobot();
+}
+
+void MainWindow::onHuayanDisconnect()
+{
+    m_devMgr->huayanScheduler()->disconnectRobot();
+    m_huayanConnectBtn->setEnabled(true);
+    m_huayanDisconnectBtn->setEnabled(false);
+    m_huayanStartBtn->setEnabled(false);
+    m_huayanStopBtn->setEnabled(false);
+    m_huayanIndicator->setStatus(false, QStringLiteral("未连接"));
+    log(QStringLiteral("[华沿] 已断开连接"));
+}
+
+void MainWindow::onHuayanStartStageOne()
+{
+    m_huayanStartBtn->setEnabled(false);
+    m_devMgr->huayanScheduler()->startStageOne();
+}
+
+void MainWindow::onHuayanStop()
+{
+    m_devMgr->huayanScheduler()->stop();
+    m_huayanStopBtn->setEnabled(false);
+    m_huayanStartBtn->setEnabled(true);
+    m_huayanIndicator->setStatus(true, QStringLiteral("已停止"));
+}
+
+void MainWindow::onHuayanLog(const QString &msg)
+{
+    log(msg);
+    if (msg.contains(QStringLiteral("已连接"))) {
+        m_huayanConnectBtn->setEnabled(false);
+        m_huayanDisconnectBtn->setEnabled(true);
+        m_huayanStartBtn->setEnabled(true);
+        m_huayanStopBtn->setEnabled(false);
+        m_huayanIndicator->setStatus(true, QStringLiteral("已连接"));
+    }
+}
+
+void MainWindow::onHuayanStageStarted(const QString &stageName)
+{
+    m_huayanStartBtn->setEnabled(false);
+    m_huayanStopBtn->setEnabled(true);
+    m_huayanIndicator->setStatus(true, QStringLiteral("运行中"));
+    log(QStringLiteral("[华沿] 阶段启动：%1").arg(stageName));
+}
+
+void MainWindow::onHuayanStageCompleted(const QString &stageName)
+{
+    m_huayanStartBtn->setEnabled(true);
+    m_huayanStopBtn->setEnabled(false);
+    m_huayanIndicator->setStatus(true, QStringLiteral("完成"));
+    log(QStringLiteral("[华沿] 阶段完成：%1").arg(stageName));
+}
+
+void MainWindow::onHuayanStageError(const QString &msg)
+{
+    m_huayanStartBtn->setEnabled(true);
+    m_huayanStopBtn->setEnabled(false);
+    m_huayanIndicator->setStatus(false, QStringLiteral("错误"));
+    log(QStringLiteral("[华沿] 错误：%1").arg(msg));
 }

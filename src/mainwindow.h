@@ -18,6 +18,7 @@
 
 class WorkflowEngine;
 class HandEyeDialog;
+class HuayanScheduler;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -44,6 +45,14 @@ private slots:
     void onTestCameraOpen();
     void onTestScanner();
     void onHandEyeCalib();
+    void onHuayanConnect();
+    void onHuayanDisconnect();
+    void onHuayanStartStageOne();
+    void onHuayanStop();
+    void onHuayanLog(const QString &msg);
+    void onHuayanStageStarted(const QString &stageName);
+    void onHuayanStageCompleted(const QString &stageName);
+    void onHuayanStageError(const QString &msg);
 
     // ── 响应业务层信号（纯 UI 更新）────────────────────────────
     void onStepActivated(int idx, int station, int cycle);
@@ -58,6 +67,7 @@ private:
     void initCameraPanel(QVBoxLayout *leftPanel);
     void initScannerPanel(QVBoxLayout *leftPanel);
     void initRobotPanel(QVBoxLayout *leftPanel);
+    void initHuayanPanel(QVBoxLayout *leftPanel);
 
     void log(const QString &msg);
     /// 应用主题（true=深色，false=浅色），同时刷新所有有内联样式的控件
@@ -115,6 +125,13 @@ private:
     QLineEdit       *m_editRegValue = nullptr;
     QPushButton     *m_btnWriteReg  = nullptr;
     QPlainTextEdit  *m_regView      = nullptr;
+
+    // ── 华沿 SDK 调试面板 ───────────────────────────────────────
+    QPushButton     *m_huayanConnectBtn    = nullptr;
+    QPushButton     *m_huayanDisconnectBtn = nullptr;
+    DeviceIndicator *m_huayanIndicator     = nullptr;
+    QPushButton     *m_huayanStartBtn      = nullptr;
+    QPushButton     *m_huayanStopBtn       = nullptr;
 
     // ── 主题开关 ─────────────────────────────────────────────
     ThemeSwitch    *m_themeSwitch = nullptr;
