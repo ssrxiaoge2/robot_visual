@@ -214,12 +214,11 @@ void HuayanScheduler::setStackingFunction(const QString &funcName,
 
 void HuayanScheduler::startStageOne()
 {
-    // 阶段一：取料 -> 先移动到取料位，再闭合夹爪，最后抬升
     if (!ensureConnected())
         return;
 
     m_stage = Stage::StageOne;
-    m_stageStep = StageStep::MoveToPickup;
+    m_stageStep = StageStep::MoveToSurvey;
 
     emit stageStarted(stageName(m_stage));
     proceedStage();
@@ -324,12 +323,12 @@ void HuayanScheduler::advanceStep()
     // 进入下一阶段步骤，当前阶段完成后继续工作流
     switch (m_stage) {
     case Stage::StageOne:
-        if (m_stageStep == StageStep::MoveToPickup)
-            m_stageStep = StageStep::CloseGripper;
-        else if (m_stageStep == StageStep::CloseGripper)
-            m_stageStep = StageStep::LiftLoad;
-        else
-            m_stageStep = StageStep::None;
+        switch (m_stageStep) {
+        case StageStep::MoveToSurvey:  m_stageStep = StageStep::WaitForVision; break;
+        case StageStep::MoveToGrab:    m_stageStep = StageStep::CloseGripper;  break;
+        case StageStep::CloseGripper:  m_stageStep = StageStep::LiftLoad;      break;
+        default:                       m_stageStep = StageStep::None;          break;
+        }
         break;
     case Stage::StageTwo:
         if (m_stageStep == StageStep::MoveToUnload)
@@ -355,17 +354,27 @@ void HuayanScheduler::executeCurrentStep()
     switch (m_stage) {
     case Stage::StageOne:
         switch (m_stageStep) {
-        case StageStep::MoveToPickup:
-            emit logMessage(QStringLiteral("[阶段一] 机械臂移动到取料坐标"));
-            executeMoveJ(m_pickupPose.x, m_pickupPose.y, m_pickupPose.z,
-                         m_pickupPose.rx, m_pickupPose.ry, m_pickupPose.rz);
+        case StageStep::MoveToSurvey:
+            emit logMessage(QStringLiteral("[阶段一] 移动到拍照位"));
+            executeMoveJ(m_surveyPose.x, m_surveyPose.y, m_surveyPose.z,
+                         m_surveyPose.rx, m_surveyPose.ry, m_surveyPose.rz);
+            break;
+        case StageStep::WaitForVision:
+            emit logMessage(QStringLiteral("[阶段一] 已到拍照位，等待视觉推理结果"));
+            emit surveyReady();
+            break;
+        case StageStep::MoveToGrab:
+            emit logMessage(QStringLiteral("[阶段一] 视觉就绪，移动到抓取位（工具坐标系）"));
+            executeMoveJ(m_grabOffset.x, m_grabOffset.y, m_grabOffset.z,
+                         m_grabOffset.rx, m_grabOffset.ry, m_grabOffset.rz,
+                         QStringLiteral("0"), QStringLiteral("TCP"));
             break;
         case StageStep::CloseGripper:
             emit logMessage(QStringLiteral("[阶段一] 夹爪闭合，夹取物料"));
-            setGripper(false); // 0 = closed
+            setGripper(false);
             break;
         case StageStep::LiftLoad:
-            emit logMessage(QStringLiteral("[阶段一] 抬升物料并保持夹持状态"));
+            emit logMessage(QStringLiteral("[阶段一] 抬升物料"));
             executeMoveJ(m_pickupLiftPose.x, m_pickupLiftPose.y, m_pickupLiftPose.z,
                          m_pickupLiftPose.rx, m_pickupLiftPose.ry, m_pickupLiftPose.rz);
             break;
@@ -437,14 +446,13 @@ bool HuayanScheduler::executeMoveJ(double x, double y, double z,
                                   const QString &cmdId,
                                   const QString &ucsName)
 {
-    // 发送华研 MoveJ 运动命令
     if (!ensureConnected())
         return false;
 
     int nRet = HRIF_MoveJ(m_boxID, m_rbtID,
                           x, y, z, rx, ry, rz,
                           0, 0, 0, 0, 0, 0,
-                          kTcpName.toStdString(), kUcsName.toStdString(),
+                          kTcpName.toStdString(), ucsName.toStdString(),
                           kMoveVelocity, kMoveAcceleration, kMoveRadius,
                           0, 0, 0, 0,
                           cmdId.toStdString());
@@ -460,10 +468,11 @@ bool HuayanScheduler::executeMoveJ(double x, double y, double z,
 
 void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 {
-    m_grabOffset.x  = x;
-    m_grabOffset.y  = y;
-    m_grabOffset.z  = z;
-    m_grabOffset.rz = rz;
+    if (m_stage == Stage::None || m_stageStep != StageStep::WaitForVision)
+        return;
+    m_grabOffset = { x, y, z, 0.0, 0.0, rz };
+    m_stageStep = StageStep::MoveToGrab;
+    proceedStage();
 }
 
 void HuayanScheduler::setSurveyPose(const HuayanScheduler::Pose &p)
