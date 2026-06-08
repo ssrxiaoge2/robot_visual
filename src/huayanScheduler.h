@@ -57,6 +57,8 @@ public slots:
     void setGrabOffset(double x, double y, double z, double rz);
 
 signals:
+    void connected();
+    void disconnected();
     void stageStarted(const QString &stageName);
     void stageCompleted(const QString &stageName);
     void stageError(const QString &msg);

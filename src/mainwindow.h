@@ -47,6 +47,8 @@ private slots:
     void onHandEyeCalib();
     void onHuayanConnect();
     void onHuayanDisconnect();
+    void onHuayanConnected();
+    void onHuayanDisconnected();
     void onHuayanStartStageOne();
     void onHuayanStop();
     void onHuayanLog(const QString &msg);

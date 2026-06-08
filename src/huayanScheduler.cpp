@@ -180,6 +180,7 @@ bool HuayanScheduler::connectRobot()
 
     m_connected = true;
     emit logMessage(QStringLiteral("已连接华研机器人：%1:%2").arg(m_ip).arg(m_port));
+    emit connected();
     return true;
 }
 
@@ -196,6 +197,7 @@ bool HuayanScheduler::disconnectRobot()
 
     m_connected = false;
     emit logMessage(QStringLiteral("已断开华研机器人连接"));
+    emit disconnected();
     return true;
 }
 
@@ -361,7 +363,7 @@ void HuayanScheduler::executeCurrentStep()
         case StageStep::WaitForVision:
             emit logMessage(QStringLiteral("[阶段一] 已到拍照位，等待视觉推理结果"));
             emit surveyReady();
-            // setGrabOffset() 收到视觉结果后继续，此处不启动定时器
+            m_timeoutTimer->start(10000);
             break;
         case StageStep::MoveToGrab:
             emit logMessage(QStringLiteral("[阶段一] 视觉就绪，移动到抓取位（工具坐标系）"));

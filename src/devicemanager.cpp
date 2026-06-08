@@ -43,6 +43,16 @@ DeviceManager::DeviceManager(QObject *parent)
             m_visionClient,    &VisionHttpClient::fetchInference);
     connect(m_visionClient,    &VisionHttpClient::rawCoordinatesReady,
             m_huayanScheduler, &HuayanScheduler::setGrabOffset);
+    connect(m_visionClient, &VisionHttpClient::noObjectDetected,
+            this, [this] {
+        emit logMessage(QStringLiteral("[视觉] 未检测到目标，停止调度"));
+        m_huayanScheduler->stop();
+    });
+    connect(m_visionClient, &VisionHttpClient::errorOccurred,
+            this, [this](const QString &msg) {
+        emit logMessage(QStringLiteral("[视觉] 推理错误：%1，停止调度").arg(msg));
+        m_huayanScheduler->stop();
+    });
 
     connect(m_huayanScheduler, &HuayanScheduler::logMessage,
             this, &DeviceManager::logMessage);

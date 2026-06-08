@@ -178,6 +178,10 @@ MainWindow::MainWindow(QWidget *parent)
     {
         HuayanScheduler *hs = m_devMgr->huayanScheduler();
         Q_ASSERT(hs != nullptr);
+        connect(hs, &HuayanScheduler::connected,
+                this, &MainWindow::onHuayanConnected);
+        connect(hs, &HuayanScheduler::disconnected,
+                this, &MainWindow::onHuayanDisconnected);
         connect(hs, &HuayanScheduler::logMessage,
                 this, &MainWindow::onHuayanLog);
         connect(hs, &HuayanScheduler::stageStarted,
@@ -995,12 +999,6 @@ void MainWindow::onHuayanConnect()
 void MainWindow::onHuayanDisconnect()
 {
     m_devMgr->huayanScheduler()->disconnectRobot();
-    m_huayanConnectBtn->setEnabled(true);
-    m_huayanDisconnectBtn->setEnabled(false);
-    m_huayanStartBtn->setEnabled(false);
-    m_huayanStopBtn->setEnabled(false);
-    m_huayanIndicator->setStatus(false, QStringLiteral("未连接"));
-    log(QStringLiteral("[华沿] 已断开连接"));
 }
 
 void MainWindow::onHuayanStartStageOne()
@@ -1017,16 +1015,27 @@ void MainWindow::onHuayanStop()
     m_huayanIndicator->setStatus(false, QStringLiteral("已停止"));
 }
 
+void MainWindow::onHuayanConnected()
+{
+    m_huayanConnectBtn->setEnabled(false);
+    m_huayanDisconnectBtn->setEnabled(true);
+    m_huayanStartBtn->setEnabled(true);
+    m_huayanStopBtn->setEnabled(false);
+    m_huayanIndicator->setStatus(true, QStringLiteral("已连接"));
+}
+
+void MainWindow::onHuayanDisconnected()
+{
+    m_huayanConnectBtn->setEnabled(true);
+    m_huayanDisconnectBtn->setEnabled(false);
+    m_huayanStartBtn->setEnabled(false);
+    m_huayanStopBtn->setEnabled(false);
+    m_huayanIndicator->setStatus(false, QStringLiteral("未连接"));
+}
+
 void MainWindow::onHuayanLog(const QString &msg)
 {
     log(msg);
-    if (msg.contains(QStringLiteral("已连接"))) {
-        m_huayanConnectBtn->setEnabled(false);
-        m_huayanDisconnectBtn->setEnabled(true);
-        m_huayanStartBtn->setEnabled(true);
-        m_huayanStopBtn->setEnabled(false);
-        m_huayanIndicator->setStatus(true, QStringLiteral("已连接"));
-    }
 }
 
 void MainWindow::onHuayanStageStarted(const QString &stageName)
