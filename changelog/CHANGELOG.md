@@ -5,6 +5,37 @@
 
 ---
 
+## 2026-06-08 | 视觉引导取料功能（feature/vision-guided-pickup）
+
+### 新增
+- `VisionHttpClient`：新增 `rawCoordinatesReady(double x, double y, double z, double rz)` 信号，输出手眼变换后的工具坐标系 mm 值（供华研 SDK 路径使用）
+- `VisionHttpClient`：提取 `transformToMm()` 私有方法，`transformToRegisters()` 复用它，消除重复矩阵运算
+- `HuayanScheduler`：StageOne 新增三步 `MoveToSurvey → WaitForVision → MoveToGrab`，实现视觉引导抓取流程
+- `HuayanScheduler`：新增 `surveyReady()` 信号（通知外部触发视觉推理）、`setGrabOffset()` 槽（接收视觉坐标）、`setSurveyPose()` 方法
+- `HuayanScheduler`：`executeMoveJ()` 支持 `ucsName` 参数，`MoveToGrab` 步骤使用 UCS="TCP"
+- `DeviceManager`：新增 `HuayanScheduler` 成员，构造时连线 `surveyReady→fetchInference→rawCoordinatesReady→setGrabOffset` 完整信号链路
+- `DeviceManager::Config`：新增 `huayanIP`（默认 192.168.10.10）和 `huayanPort`（默认 10003）字段
+
+### 修复
+- `VisionHttpClient::parseInferenceReply`：消除重复手眼变换计算（原先 emit 两个信号时矩阵乘法执行两次）
+- `VisionHttpClient::checkStatus`：修复 fps 格式化字符串 `%.1f`（printf 语法），改为 Qt 正确用法 `.arg(fps, 0, 'f', 1)`
+- `HuayanScheduler::setGrabOffset`：守卫条件改为正向断言 `m_stage != StageOne`，防止未来状态扩展时静默漏过合法调用
+
+### 已知限制
+- `WaitForVision` 步骤无超时机制：若视觉服务返回 `noObjectDetected` 或 `errorOccurred`，状态机将永久停留在该步骤（后续 PR 补充超时/错误退出路径）
+- `m_surveyPose`、`m_pickupLiftPose` 需联机示教后通过 `setSurveyPose()` 等接口注入实际坐标
+
+---
+
+## 2026-06-05 | 修正奥比 SDK 位置，新增华研 SDK 与接口
+
+### 变更
+- 修正 `CMakeLists.txt` 中 Orbbec SDK 库路径
+- 新增华研 SDK 头文件 `3rd/HuaYansdk/.../include/HR_Pro.h`
+- 新增华研调度接口 `src/huayanScheduler.h` / `src/huayanScheduler.cpp`
+- 更新 `.gitignore`（忽略 `docs/`、`.vscode/` 等）
+
+
 ## 2026-05-26 | 补光灯初始状态修复
 
 ### 修复
