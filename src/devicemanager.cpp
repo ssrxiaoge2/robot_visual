@@ -1,22 +1,3 @@
-/**
- * @file devicemanager.cpp
- * @brief DeviceManager 设备管理器实现
- *
- * 职责划分：
- *   ① 生命周期管理：创建并持有 RobotController / AgvController / VisionHttpClient，
- *      在 applyConfig() 时重新连接 Modbus 并更新视觉服务 URL
- *   ② 连通性测试：tcpPing() 同步探测 Modbus 设备；
- *                  VisionHttpClient::checkStatus() 异步检测视觉服务
- *   ③ 补光灯控制：Linux 环境调用外部 fill_light 程序控制 GPIO；
- *                  Windows 环境模拟切换（不访问硬件）
- *   ④ 信号透传：将子控制器的连接状态/错误信号
- *               转发为 DeviceManager 自己的信号，供 MainWindow 订阅
- *
- * 注意：tcpPing() 是同步阻塞调用，会在当前线程等待最多 timeoutMs（默认2s）。
- * testCamera() 已改为异步方式（通过 VisionHttpClient::checkStatus()），
- * 结果通过 cameraStatusChanged 信号异步通知 UI。
- */
-
 #include "devicemanager.h"
 #include "robotcontroller.h"
 #include "agvcontroller.h"
@@ -28,14 +9,10 @@
 #  include <QProcess>  // fill_light GPIO 控制（仅 Linux 编译）
 #endif
 
-// ── 构造 ─────────────────────────────────────────────────────
-
 DeviceManager::DeviceManager(QObject *parent)
     : QObject(parent)
 {
-    // ── 机械臂控制器（Modbus TCP 主站，华沿机器人）────────────
     m_robotCtrl = new RobotController(this);
-    // 透传连接状态信号：MainWindow 订阅 DeviceManager 的信号，不直接接触 RobotController
     connect(m_robotCtrl, &RobotController::connected,
             this, &DeviceManager::robotModbusConnected);
     connect(m_robotCtrl, &RobotController::disconnected,
@@ -45,7 +22,6 @@ DeviceManager::DeviceManager(QObject *parent)
     connect(m_robotCtrl, &RobotController::registersRead,
             this, &DeviceManager::debugRegistersRead);
 
-    // ── AGV 控制器（Modbus TCP 主站，仙工 AGV）───────────────
     m_agvCtrl = new AgvController(this);
     connect(m_agvCtrl, &AgvController::connected,
             this, &DeviceManager::agvModbusConnected);
@@ -54,10 +30,7 @@ DeviceManager::DeviceManager(QObject *parent)
     connect(m_agvCtrl, &AgvController::errorOccurred,
             this, &DeviceManager::agvModbusError);
 
-    // ── 视觉服务客户端（HTTP，Flask 8080）────────────────────
     m_visionClient = new VisionHttpClient(this);
-    // 将视觉服务连通性结果透传为 cameraStatusChanged 信号
-    // testCamera() 调用 checkStatus()，结果由此链路异步回到 UI
     connect(m_visionClient, &VisionHttpClient::statusChanged,
             this, [this](bool ok, const QString &msg) {
         emit logMessage(QString("[视觉] %1").arg(msg));
@@ -68,25 +41,17 @@ DeviceManager::DeviceManager(QObject *parent)
 
     connect(m_huayanScheduler, &HuayanScheduler::surveyReady,
             m_visionClient,    &VisionHttpClient::fetchInference);
-    connect(m_visionClient,    &VisionHttpClient::rawCoordinatesReady,
-            m_huayanScheduler, &HuayanScheduler::setGrabOffset);
+    connect(m_visionClient,    SIGNAL(rawCoordinatesReady(double,double,double,double)),
+            m_huayanScheduler, SLOT(setGrabOffset(double,double,double,double)));
 
     connect(m_huayanScheduler, &HuayanScheduler::logMessage,
             this, &DeviceManager::logMessage);
     connect(m_huayanScheduler, &HuayanScheduler::stageError,
             this, [this](const QString &msg) {
-        emit logMessage(QStringLiteral("[华沿] 错误：") + msg);
+        emit logMessage(QStringLiteral("[华沿] 错误：%1").arg(msg));
     });
 }
 
-// ── 配置应用 ─────────────────────────────────────────────────
-
-/**
- * @brief 应用当前配置并重新连接所有设备
- *
- * 先断开现有 Modbus 连接再重建，同时更新视觉服务地址。
- * 调用后各设备会异步尝试连接，连接结果通过信号通知。
- */
 void DeviceManager::applyConfig()
 {
     if (m_cfg.robotIP.isEmpty() || m_cfg.agvIP.isEmpty()) {
@@ -115,14 +80,6 @@ void DeviceManager::applyConfig()
     m_huayanScheduler->setConnectionParams(m_cfg.huayanIP, m_cfg.huayanPort);
 }
 
-// ── TCP 连通性测试 ────────────────────────────────────────────
-
-/**
- * @brief 测试机械臂 TCP 连通性（同步，阻塞约 2s）
- *
- * 仅用于手动点击"测试"按钮的场景，不用于自动运行中。
- * 结果通过 robotStatusChanged(bool, QString) 信号通知 UI。
- */
 void DeviceManager::testRobot()
 {
     if (m_cfg.robotIP.isEmpty()) {
@@ -165,13 +122,6 @@ void DeviceManager::testAgv()
     }
 }
 
-/**
- * @brief 检测视觉服务（Flask HTTP）连通性（异步）
- *
- * 替换原来的同步 tcpPing（奥比相机 8090 端口）。
- * 改为调用 VisionHttpClient::checkStatus()（GET /status），
- * 结果由构造函数中已连接的 statusChanged 信号异步传回 UI。
- */
 void DeviceManager::testCamera()
 {
     if (m_cfg.cameraIP.isEmpty()) {
@@ -205,16 +155,6 @@ void DeviceManager::testScanner()
     }
 }
 
-// ── 补光灯控制 ────────────────────────────────────────────────
-
-/**
- * @brief 切换补光灯开/关状态
- *
- * Linux 部署环境：调用 PROJECT_SOURCE_DIR/tools/fill_light on|off 控制 GPIO 9554
- * Windows 开发环境：仅模拟切换，发出日志提示，不访问硬件
- *
- * 结果通过 lightChanged(bool on, bool success) 信号通知 UI。
- */
 void DeviceManager::toggleLight()
 {
     m_lightOn = !m_lightOn; // 先翻转目标状态，再执行
@@ -244,8 +184,6 @@ void DeviceManager::toggleLight()
 #endif
 }
 
-// ── 机械臂调试接口 ────────────────────────────────────────────
-
 void DeviceManager::debugReadRobotRegisters(int addr, int count)
 {
     m_robotCtrl->readHoldingRegisters(addr, count);
@@ -257,8 +195,6 @@ void DeviceManager::debugWriteRobotRegister(int addr, quint16 value)
     m_robotCtrl->writeRegister(addr, value);
 }
 
-// ── 手眼矩阵动态加载 ──────────────────────────────────────────
-
 void DeviceManager::applyHandEyeMatrix(const float m[16])
 {
     m_visionClient->setHandEyeMatrix(m);
@@ -266,19 +202,7 @@ void DeviceManager::applyHandEyeMatrix(const float m[16])
     emit handEyeMatrixApplied();
 }
 
-// ── 内部工具 ─────────────────────────────────────────────────
-
-/**
- * @brief 同步 TCP 连通性探测
- * @param ip         目标 IP 地址
- * @param port       目标端口
- * @param timeoutMs  最长等待时间（默认 2000ms）
- * @return true=TCP 握手成功（端口可达），false=连接失败或超时
- *
- * ⚠ 此函数会阻塞调用线程最多 timeoutMs 毫秒。
- * 仅用于用户手动点击"测试"按钮的场景（robot/AGV）。
- * 视觉服务改用异步 HTTP 检测，不再使用此函数。
- */
+// 同步阻塞，仅用于手动测试按钮，不用于自动流程
 bool DeviceManager::tcpPing(const QString &ip, int port, int timeoutMs)
 {
     QTcpSocket sock;

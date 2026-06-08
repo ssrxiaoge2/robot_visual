@@ -60,10 +60,8 @@ signals:
     void logMessage(const QString &msg);
     void surveyReady();
 
-public slots:
-    void setGrabOffset(double x, double y, double z, double rz);
-
 private slots:
+    void setGrabOffset(double x, double y, double z, double rz);
     void onPollTick();
     void onStepTimeout();
 
