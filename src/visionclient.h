@@ -116,10 +116,15 @@ signals:
     void noObjectDetected();
     /// 网络或 JSON 解析错误
     void errorOccurred(QString msg);
+    /// 工具坐标系原始 mm 值（手眼变换后，未乘寄存器倍率）
+    void rawCoordinatesReady(double x, double y, double z, double rz);
 
 private:
     /// 解析 /inference 响应 JSON
     void parseInferenceReply(QNetworkReply *reply);
+
+    struct RawCoords { double x, y, z, rz; };
+    RawCoords transformToMm(float cx, float cy, float cz, float angleDeg);
 
     /**
      * @brief 将相机坐标转换为机器人 Holding 寄存器值（6 个 quint16）

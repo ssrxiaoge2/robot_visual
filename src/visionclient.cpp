@@ -228,10 +228,31 @@ void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
     // 注意：此信号没有 log，由调用方（WorkflowEngine）记录
     Q_UNUSED(conf) // 当前仅记录 confidence，不过滤
 
+    const RawCoords raw = transformToMm(cx, cy, cz, angle);
+    emit rawCoordinatesReady(raw.x, raw.y, raw.z, raw.rz);
     emit coordinatesReady(transformToRegisters(cx, cy, cz, angle));
 }
 
 // ── 坐标变换 ─────────────────────────────────────────────────
+
+VisionHttpClient::RawCoords VisionHttpClient::transformToMm(
+    float cx, float cy, float cz, float angleDeg)
+{
+    const float in[4]  = { cx, cy, cz, 1.0f };
+    float       out[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            out[r] += m_T[r][c] * in[c];
+
+    float normAngle = std::fmod(angleDeg, 180.0f);
+    if (normAngle < 0.0f)  normAngle += 180.0f;
+    if (normAngle > 90.0f) normAngle -= 180.0f;
+
+    return { static_cast<double>(out[0]),
+             static_cast<double>(out[1]),
+             static_cast<double>(out[2]),
+             static_cast<double>(normAngle) };
+}
 
 /**
  * @brief 将相机坐标转换为机器人 Holding 寄存器值（6 个 quint16）
@@ -248,45 +269,21 @@ void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
 QList<quint16> VisionHttpClient::transformToRegisters(
     float cx, float cy, float cz, float angleDeg)
 {
-    // ── 1. 手眼变换：[xt,yt,zt,1]^T = T_tool_cam × [cx,cy,cz,1]^T ────
-    const float in[4]  = { cx, cy, cz, 1.0f };
-    float       out[4] = { 0.0f, 0.0f, 0.0f, 0.0f };
-    for (int r = 0; r < 4; ++r)
-        for (int c = 0; c < 4; ++c)
-            out[r] += m_T[r][c] * in[c];
+    const RawCoords raw = transformToMm(cx, cy, cz, angleDeg);
 
-    // ── 2. 单位转换：mm → 寄存器值（kCoordScale = 1000 → 0.001mm/unit）─
-    const qint32 regX = qRound(out[0] * kCoordScale);
-    const qint32 regY = qRound(out[1] * kCoordScale);
-    const qint32 regZ = qRound(out[2] * kCoordScale);
-
-    // ── 3. Rx / Ry 固定值（不随目标旋转）──────────────────────────────
+    // ── 单位转换：mm → 寄存器值（kCoordScale = 1000 → 0.001mm/unit）─
+    const qint32 regX  = qRound(raw.x * kCoordScale);
+    const qint32 regY  = qRound(raw.y * kCoordScale);
+    const qint32 regZ  = qRound(raw.z * kCoordScale);
     const qint32 regRx = m_baseRxReg;
     const qint32 regRy = m_baseRyReg;
+    // ⚠ 若 Rz 旋转方向与实际相反，改为 m_baseRzReg - qRound(raw.rz * kRzScale)
+    const qint32 regRz = m_baseRzReg + qRound(raw.rz * kRzScale);
 
-    // ── 4. Rz：规范化夹爪旋转角 → 叠加到基准值 ─────────────────────
-    //
-    // 夹爪 180° 对称，因此 angle 和 angle±180° 物理等价。
-    // 规范化到 (-90°, 90°]：
-    //   fmod(angle, 180°) → [0°, 180°)（先处理负角）
-    //   if > 90°: 减 180° → (-90°, 0°]（等价方向，选小旋转量）
-    float normAngle = std::fmod(angleDeg, 180.0f);
-    if (normAngle < 0.0f)   normAngle += 180.0f; // 处理负角度 → [0°, 180°)
-    if (normAngle > 90.0f)  normAngle -= 180.0f; // 超过 90° → (-90°, 0°]
-
-    // normAngle × kRzScale：角度 → 寄存器增量
-    // ⚠ 若方向相反，改为 m_baseRzReg - qRound(normAngle * kRzScale)
-    const qint32 regRz = m_baseRzReg + qRound(normAngle * kRzScale);
-
-    // ── 5. 打包为 quint16（保留补码，机器人按 int16_t 解释负值）───────
-    // 例：-10mm → regX = -10000 → static_cast<quint16>(-10000) = 55536
-    //     机器人读 int16_t(55536) = -10000 → 还原为 -10mm ✓
+    // 打包为 quint16（保留补码，机器人按 int16_t 解释负值）
     return {
-        static_cast<quint16>(regX),
-        static_cast<quint16>(regY),
-        static_cast<quint16>(regZ),
-        static_cast<quint16>(regRx),
-        static_cast<quint16>(regRy),
-        static_cast<quint16>(regRz),
+        static_cast<quint16>(regX), static_cast<quint16>(regY),
+        static_cast<quint16>(regZ), static_cast<quint16>(regRx),
+        static_cast<quint16>(regRy), static_cast<quint16>(regRz),
     };
 }
