@@ -21,6 +21,7 @@
 #include "robotcontroller.h"
 #include "agvcontroller.h"
 #include "visionclient.h"
+#include "huayanScheduler.h"
 
 #include <QTcpSocket>
 #ifdef Q_OS_LINUX
@@ -62,6 +63,20 @@ DeviceManager::DeviceManager(QObject *parent)
         emit logMessage(QString("[视觉] %1").arg(msg));
         emit cameraStatusChanged(ok, msg);
     });
+
+    m_huayanScheduler = new HuayanScheduler(this);
+
+    connect(m_huayanScheduler, &HuayanScheduler::surveyReady,
+            m_visionClient,    &VisionHttpClient::fetchInference);
+    connect(m_visionClient,    &VisionHttpClient::rawCoordinatesReady,
+            m_huayanScheduler, &HuayanScheduler::setGrabOffset);
+
+    connect(m_huayanScheduler, &HuayanScheduler::logMessage,
+            this, &DeviceManager::logMessage);
+    connect(m_huayanScheduler, &HuayanScheduler::stageError,
+            this, [this](const QString &msg) {
+        emit logMessage(QStringLiteral("[华沿] 错误：") + msg);
+    });
 }
 
 // ── 配置应用 ─────────────────────────────────────────────────
@@ -96,6 +111,8 @@ void DeviceManager::applyConfig()
     // 更新视觉服务 URL（不需要重连，HTTP 是无状态协议）
     if (!m_cfg.cameraIP.isEmpty())
         m_visionClient->setServerUrl(m_cfg.cameraIP, m_cfg.cameraPort);
+
+    m_huayanScheduler->setConnectionParams(m_cfg.huayanIP, m_cfg.huayanPort);
 }
 
 // ── TCP 连通性测试 ────────────────────────────────────────────

@@ -8,6 +8,7 @@
 class RobotController;
 class AgvController;
 class VisionHttpClient;
+class HuayanScheduler;
 
 /*!
  * \brief 设备管理器
@@ -35,6 +36,8 @@ public:
         QString cameraIP   = QStringLiteral("192.168.1.10");
         int     cameraPort = 8080; ///< 视觉服务 Flask HTTP 端口（默认 8080）
         QString scannerIP  = QStringLiteral("192.168.2.100");
+        QString huayanIP   = QStringLiteral("192.168.10.10");
+        quint16 huayanPort = 10003;
     };
 
     explicit DeviceManager(QObject *parent = nullptr);
@@ -42,6 +45,7 @@ public:
     RobotController  *robotController()  const { return m_robotCtrl;   }
     AgvController    *agvController()    const { return m_agvCtrl;     }
     VisionHttpClient *visionClient()     const { return m_visionClient; }
+    HuayanScheduler  *huayanScheduler() const { return m_huayanScheduler; }
     bool              lightIsOn()        const { return m_lightOn;      }
     const Config     &config()           const { return m_cfg;          }
 
@@ -105,6 +109,7 @@ private:
     RobotController  *m_robotCtrl    = nullptr;
     AgvController    *m_agvCtrl     = nullptr;
     VisionHttpClient *m_visionClient = nullptr;
+    HuayanScheduler  *m_huayanScheduler = nullptr;
     Config            m_cfg;
     bool              m_lightOn      = false;
 };

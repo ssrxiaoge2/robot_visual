@@ -60,10 +60,12 @@ signals:
     void logMessage(const QString &msg);
     void surveyReady();
 
+public slots:
+    void setGrabOffset(double x, double y, double z, double rz);
+
 private slots:
     void onPollTick();
     void onStepTimeout();
-    void setGrabOffset(double x, double y, double z, double rz);
 
 private:
     enum class StageStep {
