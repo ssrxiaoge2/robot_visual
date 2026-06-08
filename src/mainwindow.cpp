@@ -177,6 +177,7 @@ MainWindow::MainWindow(QWidget *parent)
     // ── 9. 华沿 SDK 信号连接 ─────────────────────────────────
     {
         HuayanScheduler *hs = m_devMgr->huayanScheduler();
+        Q_ASSERT(hs != nullptr);
         connect(hs, &HuayanScheduler::logMessage,
                 this, &MainWindow::onHuayanLog);
         connect(hs, &HuayanScheduler::stageStarted,
@@ -578,8 +579,8 @@ void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
     m_huayanIndicator     = new DeviceIndicator(QStringLiteral("华沿 SDK"));
     m_huayanIndicator->setStatus(false, QStringLiteral("未连接"));
     m_huayanDisconnectBtn->setEnabled(false);
-    m_huayanConnectBtn->setFixedHeight(26);
-    m_huayanDisconnectBtn->setFixedHeight(26);
+    m_huayanConnectBtn->setFixedHeight(28);
+    m_huayanDisconnectBtn->setFixedHeight(28);
     row1->addWidget(m_huayanConnectBtn);
     row1->addWidget(m_huayanDisconnectBtn);
     row1->addStretch();
@@ -1013,7 +1014,7 @@ void MainWindow::onHuayanStop()
     m_devMgr->huayanScheduler()->stop();
     m_huayanStopBtn->setEnabled(false);
     m_huayanStartBtn->setEnabled(true);
-    m_huayanIndicator->setStatus(true, QStringLiteral("已停止"));
+    m_huayanIndicator->setStatus(false, QStringLiteral("已停止"));
 }
 
 void MainWindow::onHuayanLog(const QString &msg)
