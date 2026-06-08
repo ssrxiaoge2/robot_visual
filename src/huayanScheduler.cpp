@@ -20,7 +20,6 @@ static constexpr double kMoveRadius = 0.0;
 
 // 华研机器人默认 TCP/UCS 名称
 static const QString kTcpName = QStringLiteral("TCP");
-static const QString kUcsName = QStringLiteral("Base");
 static const QString kFlipFuncName = QStringLiteral("FlipUnload");
 
 QString stageName(HuayanScheduler::Stage stage)
@@ -226,7 +225,6 @@ void HuayanScheduler::startStageOne()
 
 void HuayanScheduler::startStageTwo()
 {
-    // 阶段二：卸料 -> 先移动到卸料位，再执行翻转卸料，再打开夹爪，最后移动空箱
     if (!ensureConnected())
         return;
 
@@ -327,6 +325,7 @@ void HuayanScheduler::advanceStep()
         case StageStep::MoveToSurvey:  m_stageStep = StageStep::WaitForVision; break;
         case StageStep::MoveToGrab:    m_stageStep = StageStep::CloseGripper;  break;
         case StageStep::CloseGripper:  m_stageStep = StageStep::LiftLoad;      break;
+        case StageStep::LiftLoad:      m_stageStep = StageStep::None;          break;
         default:                       m_stageStep = StageStep::None;          break;
         }
         break;
@@ -362,6 +361,7 @@ void HuayanScheduler::executeCurrentStep()
         case StageStep::WaitForVision:
             emit logMessage(QStringLiteral("[阶段一] 已到拍照位，等待视觉推理结果"));
             emit surveyReady();
+            // setGrabOffset() 收到视觉结果后继续，此处不启动定时器
             break;
         case StageStep::MoveToGrab:
             emit logMessage(QStringLiteral("[阶段一] 视觉就绪，移动到抓取位（工具坐标系）"));
@@ -468,7 +468,7 @@ bool HuayanScheduler::executeMoveJ(double x, double y, double z,
 
 void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 {
-    if (m_stage == Stage::None || m_stageStep != StageStep::WaitForVision)
+    if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision)
         return;
     m_grabOffset = { x, y, z, 0.0, 0.0, rz };
     m_stageStep = StageStep::MoveToGrab;
