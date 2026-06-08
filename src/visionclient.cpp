@@ -158,7 +158,7 @@ void VisionHttpClient::checkStatus()
                 const double fps      = doc.object().value("fps").toDouble();
                 emit statusChanged(camRunning,
                     camRunning
-                        ? QString("在线 %1 (%.1f fps)").arg(m_ip).arg(fps)
+                        ? QString("在线 %1 (%2 fps)").arg(m_ip).arg(fps, 0, 'f', 1)
                         : QStringLiteral("相机未就绪"));
             } else {
                 emit statusChanged(false, QStringLiteral("响应解析失败"));
@@ -230,7 +230,16 @@ void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
 
     const RawCoords raw = transformToMm(cx, cy, cz, angle);
     emit rawCoordinatesReady(raw.x, raw.y, raw.z, raw.rz);
-    emit coordinatesReady(transformToRegisters(cx, cy, cz, angle));
+
+    const qint32 regX  = qRound(raw.x * kCoordScale);
+    const qint32 regY  = qRound(raw.y * kCoordScale);
+    const qint32 regZ  = qRound(raw.z * kCoordScale);
+    const qint32 regRz = m_baseRzReg + qRound(raw.rz * kRzScale);
+    emit coordinatesReady({
+        static_cast<quint16>(regX),   static_cast<quint16>(regY),
+        static_cast<quint16>(regZ),   static_cast<quint16>(m_baseRxReg),
+        static_cast<quint16>(m_baseRyReg), static_cast<quint16>(regRz)
+    });
 }
 
 // ── 坐标变换 ─────────────────────────────────────────────────
