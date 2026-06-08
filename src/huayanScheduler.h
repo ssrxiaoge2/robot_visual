@@ -53,6 +53,9 @@ public:
 
     void setSurveyPose(const Pose &p);
 
+public slots:
+    void setGrabOffset(double x, double y, double z, double rz);
+
 signals:
     void stageStarted(const QString &stageName);
     void stageCompleted(const QString &stageName);
@@ -61,7 +64,6 @@ signals:
     void surveyReady();
 
 private slots:
-    void setGrabOffset(double x, double y, double z, double rz);
     void onPollTick();
     void onStepTimeout();
 

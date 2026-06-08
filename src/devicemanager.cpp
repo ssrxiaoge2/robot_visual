@@ -41,8 +41,8 @@ DeviceManager::DeviceManager(QObject *parent)
 
     connect(m_huayanScheduler, &HuayanScheduler::surveyReady,
             m_visionClient,    &VisionHttpClient::fetchInference);
-    connect(m_visionClient,    SIGNAL(rawCoordinatesReady(double,double,double,double)),
-            m_huayanScheduler, SLOT(setGrabOffset(double,double,double,double)));
+    connect(m_visionClient,    &VisionHttpClient::rawCoordinatesReady,
+            m_huayanScheduler, &HuayanScheduler::setGrabOffset);
 
     connect(m_huayanScheduler, &HuayanScheduler::logMessage,
             this, &DeviceManager::logMessage);
