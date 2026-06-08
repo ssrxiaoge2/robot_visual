@@ -576,6 +576,7 @@ void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
     m_huayanConnectBtn    = new QPushButton(QStringLiteral("连接机器人"));
     m_huayanDisconnectBtn = new QPushButton(QStringLiteral("断开"));
     m_huayanIndicator     = new DeviceIndicator(QStringLiteral("华沿 SDK"));
+    m_huayanIndicator->setStatus(false, QStringLiteral("未连接"));
     m_huayanDisconnectBtn->setEnabled(false);
     m_huayanConnectBtn->setFixedHeight(26);
     m_huayanDisconnectBtn->setFixedHeight(26);
