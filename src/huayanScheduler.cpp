@@ -22,6 +22,14 @@ static constexpr double kMoveRadius = 0.0;
 static const QString kTcpName = QStringLiteral("TCP");
 static const QString kFlipFuncName = QStringLiteral("FlipUnload");
 
+QString describeError(unsigned int boxID, int code)
+{
+    string msg;
+    if (HRIF_GetErrorCodeStr(boxID, code, msg) == 0 && !msg.empty())
+        return QString::fromStdString(msg);
+    return QString();
+}
+
 QString stageName(HuayanScheduler::Stage stage)
 {
     switch (stage) {
@@ -283,7 +291,10 @@ void HuayanScheduler::onPollTick()
         return;
     }
     if (nErrorState != 0) {
-        emit stageError(QStringLiteral("机器人报错，错误码：%1").arg(nErrorCode));
+        const QString detail = describeError(m_boxID, nErrorCode);
+        emit stageError(detail.isEmpty()
+            ? QStringLiteral("机器人报错，错误码：%1").arg(nErrorCode)
+            : QStringLiteral("机器人报错，错误码：%1（%2）").arg(nErrorCode).arg(detail));
         stop();
         return;
     }
@@ -459,7 +470,10 @@ bool HuayanScheduler::executeMoveJ(double x, double y, double z,
                           0, 0, 0, 0,
                           cmdId.toStdString());
     if (nRet != 0) {
-        emit stageError(QStringLiteral("移动指令失败：%1").arg(nRet));
+        const QString detail = describeError(m_boxID, nRet);
+        emit stageError(detail.isEmpty()
+            ? QStringLiteral("移动指令失败：%1").arg(nRet)
+            : QStringLiteral("移动指令失败：%1（%2）").arg(nRet).arg(detail));
         stop();
         return false;
     }
