@@ -85,9 +85,17 @@ private:
         ExecuteStackingFunction
     };
 
+    // 工具坐标系单轴相对运动（HRIF_MoveRelL），用于视觉偏移的分轴串联微调
+    struct RelMove {
+        int poseId;     // 0~5 = X/Y/Z/Rx/Ry/Rz
+        int direction;  // 0=负向, 1=正向
+        double distance;
+    };
+
     void proceedStage();
     void advanceStep();
     void executeCurrentStep();
+    bool executeNextGrabMove();
 
     void setPickupPose(const Pose &p);
     Pose pickupPose() const;
@@ -125,6 +133,8 @@ private:
 
     Pose m_surveyPose;
     Pose m_grabOffset;
+    QList<RelMove> m_grabMoves;
+    int m_grabMoveIdx = 0;
     Pose m_pickupPose;
     Pose m_pickupLiftPose;
     Pose m_unloadPose;

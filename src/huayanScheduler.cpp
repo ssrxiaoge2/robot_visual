@@ -313,8 +313,14 @@ void HuayanScheduler::onPollTick()
     if (m_pollCount >= 2 && nMovingState == 0) {
         m_pollTimer->stop();
         m_timeoutTimer->stop();
-        advanceStep();
-        proceedStage();
+        // MoveToGrab 是多次 MoveRelL 串联，单次到位后继续下一个偏移分量
+        if (m_stage == Stage::StageOne && m_stageStep == StageStep::MoveToGrab) {
+            m_grabMoveIdx++;
+            executeNextGrabMove();
+        } else {
+            advanceStep();
+            proceedStage();
+        }
     }
 }
 
@@ -386,10 +392,7 @@ void HuayanScheduler::executeCurrentStep()
             m_timeoutTimer->start(10000);
             break;
         case StageStep::MoveToGrab:
-            emit logMessage(QStringLiteral("[阶段一] 视觉就绪，移动到抓取位（工具坐标系）"));
-            executeMoveJ(m_grabOffset.x, m_grabOffset.y, m_grabOffset.z,
-                         m_grabOffset.rx, m_grabOffset.ry, m_grabOffset.rz,
-                         QStringLiteral("0"), QStringLiteral("TCP"));
+            executeNextGrabMove();
             break;
         case StageStep::CloseGripper:
             emit logMessage(QStringLiteral("[阶段一] 调用夹紧函数 %1").arg(m_gripFuncName));
@@ -494,9 +497,61 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 {
     if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision)
         return;
+
     m_grabOffset = { x, y, z, 0.0, 0.0, rz };
+    emit logMessage(QStringLiteral("[阶段一] 视觉偏移(工具系) X=%1 Y=%2 Z=%3 Rz=%4")
+                        .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1)
+                        .arg(z, 0, 'f', 1).arg(rz, 0, 'f', 1));
+
+    // 第一版：仅做工具坐标系 XY 平面对准，低速验证方向；Rz/Z 暂不施加（Z 深度需另行受控下探）
+    m_grabMoves.clear();
+    auto addMove = [this](int poseId, double v) {
+        if (qAbs(v) < 0.5) return;   // 忽略 <0.5mm 的微小偏移
+        m_grabMoves.append({ poseId, v >= 0 ? 1 : 0, qAbs(v) });
+    };
+    addMove(0, x);  // X
+    addMove(1, y);  // Y
+
+    m_grabMoveIdx = 0;
     m_stageStep = StageStep::MoveToGrab;
     proceedStage();
+}
+
+bool HuayanScheduler::executeNextGrabMove()
+{
+    if (m_grabMoveIdx >= m_grabMoves.size()) {
+        emit logMessage(QStringLiteral("[阶段一] 视觉 XY 对准完成，进入夹紧"));
+        advanceStep();      // MoveToGrab → CloseGripper
+        proceedStage();
+        return true;
+    }
+
+    if (!ensureConnected())
+        return false;
+
+    static const QString axisName[] = {
+        QStringLiteral("X"),  QStringLiteral("Y"),  QStringLiteral("Z"),
+        QStringLiteral("Rx"), QStringLiteral("Ry"), QStringLiteral("Rz")
+    };
+    const RelMove &mv = m_grabMoves.at(m_grabMoveIdx);
+    emit logMessage(QStringLiteral("[阶段一] 工具系微调 %1 %2 %3")
+                        .arg(axisName[mv.poseId])
+                        .arg(mv.direction ? QStringLiteral("正向") : QStringLiteral("负向"))
+                        .arg(mv.distance, 0, 'f', 1));
+
+    // nToolMotion=1：在工具(TCP)坐标系下做相对运动
+    int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, mv.poseId, mv.direction, mv.distance, 1);
+    if (nRet != 0) {
+        const QString detail = describeError(m_boxID, nRet);
+        emit stageError(detail.isEmpty()
+            ? QStringLiteral("相对运动失败：%1").arg(nRet)
+            : QStringLiteral("相对运动失败：%1（%2）").arg(nRet).arg(detail));
+        stop();
+        return false;
+    }
+
+    startWaitForIdle();
+    return true;
 }
 
 void HuayanScheduler::setSurveyPose(const HuayanScheduler::Pose &p)
