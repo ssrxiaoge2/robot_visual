@@ -61,13 +61,14 @@ HuayanScheduler::HuayanScheduler(QObject *parent)
     m_timeoutTimer->setSingleShot(true);
     connect(m_timeoutTimer, &QTimer::timeout, this, &HuayanScheduler::onStepTimeout);
 
-    // 默认位姿（与原硬编码值对应），可被外部覆写
-    m_pickupPose.x = 1000.0; m_pickupPose.y = 2000.0; m_pickupPose.z = 1500.0;
-    m_pickupPose.rx = 0.0; m_pickupPose.ry = 0.0; m_pickupPose.rz = 0.0;
+    // 拍照位（Base 坐标系，联机示教值）——阶段一 MoveToSurvey 使用
+    m_surveyPose.x = 1278.21; m_surveyPose.y = -348.99; m_surveyPose.z = 555.87;
+    m_surveyPose.rx = 0.0; m_surveyPose.ry = 0.0; m_surveyPose.rz = 0.0;
 
-    m_pickupLiftPose = m_pickupPose;
-    m_pickupLiftPose.z = 2500.0;
+    // 抬升位：夹取后退回拍照高度（安全位），按需示教覆写
+    m_pickupLiftPose = m_surveyPose;
 
+    // 阶段二位姿（卸料/空箱），联机后示教覆写
     m_unloadPose.x = 2000.0; m_unloadPose.y = 1000.0; m_unloadPose.z = 1500.0;
     m_emptyBoxPose.x = 2100.0; m_emptyBoxPose.y = 1100.0; m_emptyBoxPose.z = 1200.0;
 }
@@ -266,6 +267,12 @@ void HuayanScheduler::stop()
 {
     m_pollTimer->stop();
     m_timeoutTimer->stop();
+    // 软件状态机之外，必须向控制器发停止指令让机器人真正减速停下
+    if (m_connected) {
+        int nRet = HRIF_GrpStop(m_boxID, m_rbtID);
+        if (nRet != 0)
+            emit logMessage(QStringLiteral("[警告] 停止指令未成功下发：%1").arg(nRet));
+    }
     m_stage = Stage::None;
     m_stageStep = StageStep::None;
     emit logMessage(QStringLiteral("调度已停止"));
