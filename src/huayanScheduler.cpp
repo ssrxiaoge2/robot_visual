@@ -61,12 +61,8 @@ HuayanScheduler::HuayanScheduler(QObject *parent)
     m_timeoutTimer->setSingleShot(true);
     connect(m_timeoutTimer, &QTimer::timeout, this, &HuayanScheduler::onStepTimeout);
 
-    // 拍照位（Base 坐标系，联机示教值）——阶段一 MoveToSurvey 使用
-    m_surveyPose.x = 1278.21; m_surveyPose.y = -348.99; m_surveyPose.z = 555.87;
-    m_surveyPose.rx = 0.0; m_surveyPose.ry = 0.0; m_surveyPose.rz = 0.0;
-
-    // 抬升位：夹取后退回拍照高度（安全位），按需示教覆写
-    m_pickupLiftPose = m_surveyPose;
+    // 阶段一改为调用示教器函数（Func_capture / Func_jiajin），
+    // 拍照位/抓取/抬升的姿态与轨迹全部由示教器保证，不再硬编码坐标
 
     // 阶段二位姿（卸料/空箱），联机后示教覆写
     m_unloadPose.x = 2000.0; m_unloadPose.y = 1000.0; m_unloadPose.z = 1500.0;
@@ -188,6 +184,13 @@ bool HuayanScheduler::connectRobot()
     }
 
     m_connected = true;
+
+    // 应用当前脚本，确保后续 RunFunc 能在该脚本里找到示教好的函数
+    nRet = HRIF_SwitchScript(m_boxID, m_rbtID, m_scriptName.toStdString());
+    if (nRet != 0)
+        emit logMessage(QStringLiteral("[警告] 切换脚本 %1 失败：%2，RunFunc 可能无法调用函数")
+                            .arg(m_scriptName).arg(nRet));
+
     emit logMessage(QStringLiteral("已连接华研机器人：%1:%2").arg(m_ip).arg(m_port));
     emit connected();
     return true;
@@ -374,9 +377,8 @@ void HuayanScheduler::executeCurrentStep()
     case Stage::StageOne:
         switch (m_stageStep) {
         case StageStep::MoveToSurvey:
-            emit logMessage(QStringLiteral("[阶段一] 移动到拍照位"));
-            executeMoveJ(m_surveyPose.x, m_surveyPose.y, m_surveyPose.z,
-                         m_surveyPose.rx, m_surveyPose.ry, m_surveyPose.rz);
+            emit logMessage(QStringLiteral("[阶段一] 调用拍照位函数 %1").arg(m_captureFuncName));
+            executeRunFunc(m_captureFuncName);
             break;
         case StageStep::WaitForVision:
             emit logMessage(QStringLiteral("[阶段一] 已到拍照位，等待视觉推理结果"));
@@ -390,13 +392,12 @@ void HuayanScheduler::executeCurrentStep()
                          QStringLiteral("0"), QStringLiteral("TCP"));
             break;
         case StageStep::CloseGripper:
-            emit logMessage(QStringLiteral("[阶段一] 夹爪闭合，夹取物料"));
-            setGripper(false);
+            emit logMessage(QStringLiteral("[阶段一] 调用夹紧函数 %1").arg(m_gripFuncName));
+            executeGripFunc();
             break;
         case StageStep::LiftLoad:
-            emit logMessage(QStringLiteral("[阶段一] 抬升物料"));
-            executeMoveJ(m_pickupLiftPose.x, m_pickupLiftPose.y, m_pickupLiftPose.z,
-                         m_pickupLiftPose.rx, m_pickupLiftPose.ry, m_pickupLiftPose.rz);
+            emit logMessage(QStringLiteral("[阶段一] 抬升（调用拍照位函数 %1 回到安全高度）").arg(m_captureFuncName));
+            executeRunFunc(m_captureFuncName);
             break;
         case StageStep::None:
             emit stageCompleted(stageName(m_stage));
@@ -518,6 +519,52 @@ bool HuayanScheduler::setGripper(bool open)
 
     // 夹爪是 IO 动作，nMovingState 不反映其状态，固定等待 1.5s 让气动/伺服完成动作
     QTimer::singleShot(1500, this, [this] {
+        if (m_stage != Stage::None) {
+            advanceStep();
+            proceedStage();
+        }
+    });
+    return true;
+}
+
+bool HuayanScheduler::executeRunFunc(const QString &funcName, int timeoutMs)
+{
+    if (!ensureConnected())
+        return false;
+
+    std::vector<string> params;
+    int nRet = HRIF_RunFunc(m_boxID, funcName.toStdString(), params);
+    if (nRet != 0) {
+        const QString detail = describeError(m_boxID, nRet);
+        emit stageError(detail.isEmpty()
+            ? QStringLiteral("调用函数 %1 失败：%2").arg(funcName).arg(nRet)
+            : QStringLiteral("调用函数 %1 失败：%2（%3）").arg(funcName).arg(nRet).arg(detail));
+        stop();
+        return false;
+    }
+
+    startWaitForIdle(timeoutMs);
+    return true;
+}
+
+bool HuayanScheduler::executeGripFunc()
+{
+    if (!ensureConnected())
+        return false;
+
+    std::vector<string> params;
+    int nRet = HRIF_RunFunc(m_boxID, m_gripFuncName.toStdString(), params);
+    if (nRet != 0) {
+        const QString detail = describeError(m_boxID, nRet);
+        emit stageError(detail.isEmpty()
+            ? QStringLiteral("调用夹紧函数失败：%1").arg(nRet)
+            : QStringLiteral("调用夹紧函数失败：%1（%2）").arg(nRet).arg(detail));
+        stop();
+        return false;
+    }
+
+    // 夹爪是 IO/气动动作，nMovingState 不反映其状态，固定等待让动作完成
+    QTimer::singleShot(2500, this, [this] {
         if (m_stage != Stage::None) {
             advanceStep();
             proceedStage();

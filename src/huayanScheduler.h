@@ -107,6 +107,8 @@ private:
                       const QString &cmdId   = QStringLiteral("0"),
                       const QString &ucsName = QStringLiteral("Base"));
     bool setGripper(bool open);
+    bool executeRunFunc(const QString &funcName, int timeoutMs = 30000);
+    bool executeGripFunc();
     bool executeFlipUnload();
     bool executeStackingFunction();
 
@@ -136,6 +138,11 @@ private:
 
     QString m_stackingFuncName;
     QStringList m_stackingParams;
+
+    // 示教器脚本与函数名（方案 C：上位机调用示教器内已示教好的函数）
+    QString m_scriptName      = QStringLiteral("dashiceshi");
+    QString m_captureFuncName = QStringLiteral("Func_capture");
+    QString m_gripFuncName    = QStringLiteral("Func_jiajin");
 };
 
 #endif // HUAYANSCHEDULER_H
