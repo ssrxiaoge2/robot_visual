@@ -230,6 +230,10 @@ void HuayanScheduler::startStageOne()
     if (!ensureConnected())
         return;
 
+    // 上一轮 stop() 的 GrpStop 会让机器人进入 ProgramStopped 态（20018），
+    // 启动前先复位恢复可运动状态
+    HRIF_GrpReset(m_boxID, m_rbtID);
+
     m_stage = Stage::StageOne;
     m_stageStep = StageStep::MoveToSurvey;
 
