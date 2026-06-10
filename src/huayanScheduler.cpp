@@ -338,7 +338,12 @@ void HuayanScheduler::onPollTick()
         // MoveToGrab 是多次 MoveRelL 串联，单次到位后继续下一个偏移分量
         if (m_stage == Stage::StageOne && m_stageStep == StageStep::MoveToGrab) {
             m_grabMoveIdx++;
-            executeNextGrabMove();
+            // 运动结束后机器人状态切换有滞后(nMovingState=0 但仍 RobotInMoving)，
+            // 高速下稍等再发下一轴，避免 20018 RobotInMoving
+            QTimer::singleShot(300, this, [this] {
+                if (m_stage == Stage::StageOne && m_stageStep == StageStep::MoveToGrab)
+                    executeNextGrabMove();
+            });
         } else {
             advanceStep();
             proceedStage();
