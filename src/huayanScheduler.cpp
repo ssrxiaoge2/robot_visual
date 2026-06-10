@@ -543,8 +543,8 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
         if (qAbs(v) < 0.5) return;   // 忽略 <0.5mm 的微小偏移
         m_grabMoves.append({ poseId, v >= 0 ? 1 : 0, qAbs(v) });
     };
-    // 视觉系偏移方向与工具系运动方向相反，取反后施加
-    addMove(0, -x);  // X
+    // 方向修正（联机实测）：X 方向一致直接施加，Y 方向相反需取反
+    addMove(0, x);   // X
     addMove(1, -y);  // Y
 
     m_grabMoveIdx = 0;
