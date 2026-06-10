@@ -611,6 +611,17 @@ void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
     row2->addWidget(m_huayanReleaseBtn);
     vbox->addLayout(row2);
 
+    auto *row3 = new QHBoxLayout();
+    m_huayanSpeedSlider = new QSlider(Qt::Horizontal);
+    m_huayanSpeedSlider->setRange(1, 100);
+    m_huayanSpeedSlider->setValue(15);
+    m_huayanSpeedLabel = new QLabel(QStringLiteral("15%"));
+    m_huayanSpeedLabel->setMinimumWidth(40);
+    row3->addWidget(new QLabel(QStringLiteral("速度")));
+    row3->addWidget(m_huayanSpeedSlider);
+    row3->addWidget(m_huayanSpeedLabel);
+    vbox->addLayout(row3);
+
     connect(m_huayanConnectBtn,    &QPushButton::clicked,
             this, &MainWindow::onHuayanConnect);
     connect(m_huayanDisconnectBtn, &QPushButton::clicked,
@@ -621,6 +632,8 @@ void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
             this, &MainWindow::onHuayanStop);
     connect(m_huayanReleaseBtn,    &QPushButton::clicked,
             this, &MainWindow::onHuayanRelease);
+    connect(m_huayanSpeedSlider,   &QSlider::valueChanged,
+            this, &MainWindow::onHuayanSpeedChanged);
 
     leftPanel->addWidget(gb);
 }
@@ -1052,6 +1065,12 @@ void MainWindow::onHuayanLog(const QString &msg)
 void MainWindow::onHuayanRelease()
 {
     m_devMgr->huayanScheduler()->releaseGripper();
+}
+
+void MainWindow::onHuayanSpeedChanged(int percent)
+{
+    m_huayanSpeedLabel->setText(QStringLiteral("%1%").arg(percent));
+    m_devMgr->huayanScheduler()->setSpeedOverride(percent);
 }
 
 void MainWindow::onHuayanStageStarted(const QString &stageName)

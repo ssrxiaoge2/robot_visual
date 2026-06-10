@@ -52,7 +52,8 @@ public:
     void stop();
 
     void setSurveyPose(const Pose &p);
-    void releaseGripper();   // 手动松开夹爪（UI 按钮调用）
+    void releaseGripper();           // 手动松开夹爪（UI 按钮调用）
+    void setSpeedOverride(int percent);  // 运动速度倍率 1~100(%)，可经 UI 实时调整
 
 public slots:
     void setGrabOffset(double x, double y, double z, double rz);
@@ -148,6 +149,7 @@ private:
     unsigned int m_boxID = 0;
     unsigned int m_rbtID = 0;
     bool m_connected = false;
+    int  m_speedPercent = 15;   // 运动速度倍率(%)，连接时应用，可经 UI 实时调整
 
     QString m_stackingFuncName;
     QStringList m_stackingParams;

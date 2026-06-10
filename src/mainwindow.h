@@ -7,6 +7,7 @@
 #include <QLineEdit>
 #include <QPlainTextEdit>
 #include <QPushButton>
+#include <QSlider>
 #include <QSpinBox>
 #include <QTextStream>
 #include <QVBoxLayout>
@@ -52,6 +53,7 @@ private slots:
     void onHuayanStartStageOne();
     void onHuayanStop();
     void onHuayanRelease();
+    void onHuayanSpeedChanged(int percent);
     void onHuayanLog(const QString &msg);
     void onHuayanStageStarted(const QString &stageName);
     void onHuayanStageCompleted(const QString &stageName);
@@ -136,6 +138,8 @@ private:
     QPushButton     *m_huayanStartBtn      = nullptr;
     QPushButton     *m_huayanStopBtn       = nullptr;
     QPushButton     *m_huayanReleaseBtn    = nullptr;
+    QSlider         *m_huayanSpeedSlider   = nullptr;
+    QLabel          *m_huayanSpeedLabel    = nullptr;
 
     // ── 主题开关 ─────────────────────────────────────────────
     ThemeSwitch    *m_themeSwitch = nullptr;

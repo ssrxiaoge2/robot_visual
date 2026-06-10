@@ -178,7 +178,7 @@ bool HuayanScheduler::connectRobot()
     int nSimulateRobot = 0;
     nRet = HRIF_IsSimulateRobot(m_boxID, nSimulateRobot);
     if (nRet == 0) {
-        const double overrideValue = (nSimulateRobot == 1) ? 1.0 : 0.15;
+        const double overrideValue = (nSimulateRobot == 1) ? 1.0 : (m_speedPercent / 100.0);
         HRIF_SetOverride(m_boxID, m_rbtID, overrideValue);
     }
 
@@ -616,6 +616,13 @@ void HuayanScheduler::releaseGripper()
         return;
     }
     emit logMessage(QStringLiteral("已调用松开夹爪 %1").arg(m_releaseFuncName));
+}
+
+void HuayanScheduler::setSpeedOverride(int percent)
+{
+    m_speedPercent = qBound(1, percent, 100);
+    if (m_connected)
+        HRIF_SetOverride(m_boxID, m_rbtID, m_speedPercent / 100.0);
 }
 
 bool HuayanScheduler::setGripper(bool open)
