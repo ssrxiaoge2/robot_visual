@@ -20,6 +20,7 @@ static constexpr double kMoveRadius = 0.0;
 
 // 闭环视觉矫正参数
 static constexpr double kGrabTolerance     = 2.0;    // XY 偏移收敛阈值(mm)
+static constexpr double kRzTolerance       = 1.0;    // Rz 旋转收敛阈值(度)
 static constexpr int    kMaxGrabIterations = 6;      // 最大矫正迭代次数（防死循环）
 static constexpr int    kVisionSettleMs    = 2000;   // 移动后等视觉出新帧(ms)
 
@@ -589,11 +590,11 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
                         .arg(z, 0, 'f', 1).arg(rz, 0, 'f', 1)
                         .arg(m_grabIterations));
 
-    // 闭环收敛：XY 都小于阈值，或达到最大迭代次数 → 进入夹紧
-    if ((qAbs(x) < kGrabTolerance && qAbs(y) < kGrabTolerance)
+    // 闭环收敛：XY 平移与 Rz 旋转都达标，或达到最大迭代次数 → 进入 Z 下探
+    if ((qAbs(x) < kGrabTolerance && qAbs(y) < kGrabTolerance && qAbs(rz) < kRzTolerance)
         || m_grabIterations >= kMaxGrabIterations) {
-        emit logMessage(QStringLiteral("[阶段一] 视觉对准完成（X=%1 Y=%2），开始 Z 下探")
-                            .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1));
+        emit logMessage(QStringLiteral("[阶段一] 视觉对准完成（X=%1 Y=%2 Rz=%3），开始 Z 下探")
+                            .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1).arg(rz, 0, 'f', 1));
         m_stageStep = StageStep::DescendZ;
         proceedStage();
         return;
@@ -609,6 +610,7 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
     // 方向修正（联机实测）：X 方向一致直接施加，Y 方向相反需取反
     addMove(0, x);   // X
     addMove(1, -y);  // Y
+    addMove(5, rz);  // Rz 旋转（方向先假设不取反，联机验证后若反则改为 -rz）
 
     m_grabMoveIdx = 0;
     m_stageStep = StageStep::MoveToGrab;
