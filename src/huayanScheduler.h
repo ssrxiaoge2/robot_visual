@@ -77,6 +77,7 @@ private:
         MoveToSurvey,
         WaitForVision,
         MoveToGrab,
+        DescendZ,
         MoveToPickup,
         CloseGripper,
         LiftLoad,

@@ -23,6 +23,11 @@ static constexpr double kGrabTolerance     = 2.0;    // XY 偏移收敛阈值(mm
 static constexpr int    kMaxGrabIterations = 6;      // 最大矫正迭代次数（防死循环）
 static constexpr int    kVisionSettleMs    = 2000;   // 移动后等视觉出新帧(ms)
 
+// Z 下探参数（联机标定）：下探量 = 视觉深度 - 余量，受上限约束
+static constexpr double kGrabZClearance = 30.0;    // 下探后 TCP 距物体的余量(mm)
+static constexpr double kMaxDescend     = 150.0;   // 单次下探上限(mm)；测好方向后调大到能抓到
+static constexpr bool   kZDescendInvert = false;   // Z 下探方向；若实际朝反方向，改 true
+
 // 华研机器人默认 TCP/UCS 名称
 static const QString kTcpName = QStringLiteral("TCP");
 static const QString kFlipFuncName = QStringLiteral("FlipUnload");
@@ -379,7 +384,7 @@ void HuayanScheduler::advanceStep()
     case Stage::StageOne:
         switch (m_stageStep) {
         case StageStep::MoveToSurvey:  m_stageStep = StageStep::WaitForVision; break;
-        case StageStep::MoveToGrab:    m_stageStep = StageStep::CloseGripper;  break;
+        case StageStep::DescendZ:      m_stageStep = StageStep::CloseGripper;  break;
         case StageStep::CloseGripper:  m_stageStep = StageStep::LiftLoad;      break;
         case StageStep::LiftLoad:      m_stageStep = StageStep::None;          break;
         default:                       m_stageStep = StageStep::None;          break;
@@ -421,6 +426,30 @@ void HuayanScheduler::executeCurrentStep()
         case StageStep::MoveToGrab:
             executeNextGrabMove();
             break;
+        case StageStep::DescendZ: {
+            const double descend = qBound(0.0, m_grabOffset.z - kGrabZClearance, kMaxDescend);
+            if (descend < 1.0) {
+                emit logMessage(QStringLiteral("[阶段一] 无需 Z 下探，直接夹紧"));
+                m_stageStep = StageStep::CloseGripper;
+                proceedStage();
+                break;
+            }
+            emit logMessage(QStringLiteral("[阶段一] Z 下探 %1mm（视觉深度 %2 - 余量 %3，上限 %4）")
+                                .arg(descend, 0, 'f', 1).arg(m_grabOffset.z, 0, 'f', 1)
+                                .arg(kGrabZClearance, 0, 'f', 1).arg(kMaxDescend, 0, 'f', 1));
+            int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, 2,
+                                     kZDescendInvert ? 0 : 1, descend, 1);
+            if (nRet != 0) {
+                const QString detail = describeError(m_boxID, nRet);
+                emit stageError(detail.isEmpty()
+                    ? QStringLiteral("Z 下探失败：%1").arg(nRet)
+                    : QStringLiteral("Z 下探失败：%1（%2）").arg(nRet).arg(detail));
+                stop();
+                break;
+            }
+            startWaitForIdle();
+            break;
+        }
         case StageStep::CloseGripper:
             emit logMessage(QStringLiteral("[阶段一] 调用夹紧函数 %1").arg(m_gripFuncName));
             executeGripFunc();
@@ -534,9 +563,9 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
     // 闭环收敛：XY 都小于阈值，或达到最大迭代次数 → 进入夹紧
     if ((qAbs(x) < kGrabTolerance && qAbs(y) < kGrabTolerance)
         || m_grabIterations >= kMaxGrabIterations) {
-        emit logMessage(QStringLiteral("[阶段一] 视觉对准完成（X=%1 Y=%2），进入夹紧")
+        emit logMessage(QStringLiteral("[阶段一] 视觉对准完成（X=%1 Y=%2），开始 Z 下探")
                             .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1));
-        m_stageStep = StageStep::CloseGripper;
+        m_stageStep = StageStep::DescendZ;
         proceedStage();
         return;
     }
