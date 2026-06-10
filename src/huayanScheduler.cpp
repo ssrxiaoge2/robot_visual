@@ -26,7 +26,7 @@ static constexpr int    kVisionSettleMs    = 2000;   // 移动后等视觉出新
 // Z 下探参数：下探量 = 视觉深度 - kGrabZClearance，受 kMaxDescend 上限约束
 // kGrabZClearance 标定法：固定一物体，记视觉深度 D 和能夹到的下探量 H，则 = D - H
 //   （本例 D=1048, H=640 → 408）。此值对不同深度通用，视觉深度变化时下探量自动适应。
-static constexpr double kGrabZClearance = 408.0;   // 视觉深度与实际下探量的标定差(mm)
+static constexpr double kGrabZClearance = 412.0;   // 视觉深度与实际下探量的标定差(mm)
 static constexpr double kMaxDescend     = 1078.0;  // 下探安全上限(mm)，正常不应触发截断
 static constexpr bool   kZDescendInvert = false;   // Z 下探方向；若实际朝反方向，改 true
 
