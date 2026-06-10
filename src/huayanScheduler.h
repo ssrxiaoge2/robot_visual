@@ -128,6 +128,7 @@ private:
     QTimer *m_pollTimer    = nullptr;
     QTimer *m_timeoutTimer = nullptr;
     int     m_pollCount    = 0;
+    bool    m_hasSeenMoving = false;  // 是否已观察到运动真正开始（避免启动延迟误判完成）
 
     Stage m_stage = Stage::None;
     StageStep m_stageStep = StageStep::None;

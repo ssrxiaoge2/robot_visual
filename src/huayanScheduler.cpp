@@ -21,7 +21,7 @@ static constexpr double kMoveRadius = 0.0;
 // 闭环视觉矫正参数
 static constexpr double kGrabTolerance     = 2.0;    // XY 偏移收敛阈值(mm)
 static constexpr int    kMaxGrabIterations = 6;      // 最大矫正迭代次数（防死循环）
-static constexpr int    kVisionSettleMs    = 1000;   // 移动后等视觉出新帧(ms)
+static constexpr int    kVisionSettleMs    = 2000;   // 移动后等视觉出新帧(ms)
 
 // 华研机器人默认 TCP/UCS 名称
 static const QString kTcpName = QStringLiteral("TCP");
@@ -59,7 +59,7 @@ HuayanScheduler::HuayanScheduler(QObject *parent)
     : QObject(parent)
 {
     m_pollTimer = new QTimer(this);
-    m_pollTimer->setInterval(300);
+    m_pollTimer->setInterval(100);
     connect(m_pollTimer, &QTimer::timeout, this, &HuayanScheduler::onPollTick);
 
     m_timeoutTimer = new QTimer(this);
@@ -190,11 +190,19 @@ bool HuayanScheduler::connectRobot()
 
     m_connected = true;
 
-    // 应用当前脚本，确保后续 RunFunc 能在该脚本里找到示教好的函数
-    nRet = HRIF_SwitchScript(m_boxID, m_rbtID, m_scriptName.toStdString());
-    if (nRet != 0)
-        emit logMessage(QStringLiteral("[警告] 切换脚本 %1 失败：%2，RunFunc 可能无法调用函数")
-                            .arg(m_scriptName).arg(nRet));
+    // 仅在当前应用脚本不是目标脚本时才切换：SwitchScript 会让脚本回到"未编译"
+    // 状态，每次连接都切换会导致每次启动都提示需重新编译
+    string curScript;
+    int nReadRet = HRIF_ReadDefaultScript(m_boxID, m_rbtID, curScript);
+    const QString cur = QString::fromStdString(curScript);
+    emit logMessage(QStringLiteral("当前应用脚本：%1").arg(cur.isEmpty() ? QStringLiteral("(空)") : cur));
+    if (nReadRet != 0 || (cur != m_scriptName && cur != m_scriptName + QStringLiteral(".json"))) {
+        nRet = HRIF_SwitchScript(m_boxID, m_rbtID, m_scriptName.toStdString());
+        if (nRet != 0)
+            emit logMessage(QStringLiteral("[警告] 切换脚本 %1 失败：%2").arg(m_scriptName).arg(nRet));
+        else
+            emit logMessage(QStringLiteral("已切换到脚本 %1（请确认已在示教器编译）").arg(m_scriptName));
+    }
 
     emit logMessage(QStringLiteral("已连接华研机器人：%1:%2").arg(m_ip).arg(m_port));
     emit connected();
@@ -294,6 +302,7 @@ void HuayanScheduler::stop()
 void HuayanScheduler::startWaitForIdle(int timeoutMs)
 {
     m_pollCount = 0;
+    m_hasSeenMoving = false;
     m_timeoutTimer->start(timeoutMs);
     m_pollTimer->start();
 }
@@ -318,9 +327,12 @@ void HuayanScheduler::onPollTick()
         stop();
         return;
     }
+    if (nMovingState != 0)
+        m_hasSeenMoving = true;
     m_pollCount++;
-    // 至少等待 2 次轮询（600ms）确保机器人已开始运动再判断是否停止
-    if (m_pollCount >= 2 && nMovingState == 0) {
+    // 必须先观察到运动真正开始(nMovingState!=0)再判结束，避免指令启动延迟被误判完成；
+    // 兜底：极短运动可能采样不到运动态，超过约 3 秒(pollCount>=30 @100ms)也判完成
+    if ((m_hasSeenMoving || m_pollCount >= 30) && nMovingState == 0) {
         m_pollTimer->stop();
         m_timeoutTimer->stop();
         // MoveToGrab 是多次 MoveRelL 串联，单次到位后继续下一个偏移分量
@@ -531,8 +543,9 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
         if (qAbs(v) < 0.5) return;   // 忽略 <0.5mm 的微小偏移
         m_grabMoves.append({ poseId, v >= 0 ? 1 : 0, qAbs(v) });
     };
-    addMove(0, x);  // X
-    addMove(1, y);  // Y
+    // 视觉系偏移方向与工具系运动方向相反，取反后施加
+    addMove(0, -x);  // X
+    addMove(1, -y);  // Y
 
     m_grabMoveIdx = 0;
     m_stageStep = StageStep::MoveToGrab;
