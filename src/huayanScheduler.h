@@ -149,7 +149,7 @@ private:
     unsigned int m_boxID = 0;
     unsigned int m_rbtID = 0;
     bool m_connected = false;
-    int  m_speedPercent = 15;   // 运动速度倍率(%)，连接时应用，可经 UI 实时调整
+    int  m_speedPercent = 100;   // 运动速度倍率(%)，连接时应用，可经 UI 实时调整
 
     QString m_stackingFuncName;
     QStringList m_stackingParams;

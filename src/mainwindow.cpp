@@ -361,7 +361,7 @@ void MainWindow::initConfigPanel(QVBoxLayout *leftPanel)
     form->setLabelAlignment(Qt::AlignRight);
 
     // 机器人 IP 和端口输入行
-    m_editRobotIP = new QLineEdit("192.168.10.10");
+    m_editRobotIP = new QLineEdit("192.168.1.11");
     m_editRobotIP->setFixedWidth(130);
     m_spinRobotPort = new QSpinBox();
     m_spinRobotPort->setRange(1, 65535);
@@ -379,7 +379,7 @@ void MainWindow::initConfigPanel(QVBoxLayout *leftPanel)
     form->addRow(QStringLiteral("机器人 IP:"), robotRow);
 
     // AGV IP 输入行（端口固定 502，不暴露给用户）
-    m_editAgvIP = new QLineEdit("192.168.192.5");
+    m_editAgvIP = new QLineEdit("192.168.1.100");
     m_editAgvIP->setFixedWidth(130);
     auto *agvRow = new QHBoxLayout();
     m_btnTestAgv = new QPushButton(QStringLiteral("测试"));
@@ -422,7 +422,7 @@ void MainWindow::initCameraPanel(QVBoxLayout *leftPanel)
     auto *form     = new QFormLayout(gbCamera);
     form->setLabelAlignment(Qt::AlignRight);
 
-    m_editCameraIP = new QLineEdit("192.168.1.10");
+    m_editCameraIP = new QLineEdit("127.0.0.1");
     m_editCameraIP->setFixedWidth(130);
 
     auto *camRow    = new QHBoxLayout();
@@ -477,7 +477,7 @@ void MainWindow::initScannerPanel(QVBoxLayout *leftPanel)
     auto *form      = new QFormLayout(gbScanner);
     form->setLabelAlignment(Qt::AlignRight);
 
-    m_editScannerIP = new QLineEdit("192.168.2.100");
+    m_editScannerIP = new QLineEdit("192.168.1.12");
     m_editScannerIP->setFixedWidth(130);
 
     auto *scanRow    = new QHBoxLayout();
@@ -614,8 +614,8 @@ void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
     auto *row3 = new QHBoxLayout();
     m_huayanSpeedSlider = new QSlider(Qt::Horizontal);
     m_huayanSpeedSlider->setRange(1, 100);
-    m_huayanSpeedSlider->setValue(15);
-    m_huayanSpeedLabel = new QLabel(QStringLiteral("15%"));
+    m_huayanSpeedSlider->setValue(100);
+    m_huayanSpeedLabel = new QLabel(QStringLiteral("100%"));
     m_huayanSpeedLabel->setMinimumWidth(40);
     row3->addWidget(new QLabel(QStringLiteral("速度")));
     row3->addWidget(m_huayanSpeedSlider);

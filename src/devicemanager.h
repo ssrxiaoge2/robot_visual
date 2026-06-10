@@ -15,14 +15,14 @@ class DeviceManager : public QObject
     Q_OBJECT
 public:
     struct Config {
-        QString robotIP    = QStringLiteral("192.168.10.10");
+        QString robotIP    = QStringLiteral("192.168.1.11");
         int     robotPort  = 502;
-        QString agvIP      = QStringLiteral("192.168.192.5");
+        QString agvIP      = QStringLiteral("192.168.1.100");
         int     agvPort    = 502;
-        QString cameraIP   = QStringLiteral("192.168.1.10");
+        QString cameraIP   = QStringLiteral("127.0.0.1");
         int     cameraPort = 8080;
-        QString scannerIP  = QStringLiteral("192.168.2.100");
-        QString huayanIP   = QStringLiteral("192.168.10.10");
+        QString scannerIP  = QStringLiteral("192.168.1.12");
+        QString huayanIP   = QStringLiteral("192.168.1.11");
         quint16 huayanPort = 10003;
     };
 
