@@ -597,14 +597,18 @@ void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
     vbox->addWidget(line);
 
     auto *row2 = new QHBoxLayout();
-    m_huayanStartBtn = new QPushButton(QStringLiteral("启动取料（阶段一）"));
-    m_huayanStopBtn  = new QPushButton(QStringLiteral("停止"));
+    m_huayanStartBtn   = new QPushButton(QStringLiteral("启动取料（阶段一）"));
+    m_huayanStopBtn    = new QPushButton(QStringLiteral("停止"));
+    m_huayanReleaseBtn = new QPushButton(QStringLiteral("松开夹爪"));
     m_huayanStartBtn->setEnabled(false);
     m_huayanStopBtn->setEnabled(false);
+    m_huayanReleaseBtn->setEnabled(false);
     m_huayanStartBtn->setFixedHeight(28);
     m_huayanStopBtn->setFixedHeight(28);
+    m_huayanReleaseBtn->setFixedHeight(28);
     row2->addWidget(m_huayanStartBtn);
     row2->addWidget(m_huayanStopBtn);
+    row2->addWidget(m_huayanReleaseBtn);
     vbox->addLayout(row2);
 
     connect(m_huayanConnectBtn,    &QPushButton::clicked,
@@ -615,6 +619,8 @@ void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
             this, &MainWindow::onHuayanStartStageOne);
     connect(m_huayanStopBtn,       &QPushButton::clicked,
             this, &MainWindow::onHuayanStop);
+    connect(m_huayanReleaseBtn,    &QPushButton::clicked,
+            this, &MainWindow::onHuayanRelease);
 
     leftPanel->addWidget(gb);
 }
@@ -1024,6 +1030,7 @@ void MainWindow::onHuayanConnected()
     m_huayanDisconnectBtn->setEnabled(true);
     m_huayanStartBtn->setEnabled(true);
     m_huayanStopBtn->setEnabled(false);
+    m_huayanReleaseBtn->setEnabled(true);
     m_huayanIndicator->setStatus(true, QStringLiteral("已连接"));
 }
 
@@ -1033,12 +1040,18 @@ void MainWindow::onHuayanDisconnected()
     m_huayanDisconnectBtn->setEnabled(false);
     m_huayanStartBtn->setEnabled(false);
     m_huayanStopBtn->setEnabled(false);
+    m_huayanReleaseBtn->setEnabled(false);
     m_huayanIndicator->setStatus(false, QStringLiteral("未连接"));
 }
 
 void MainWindow::onHuayanLog(const QString &msg)
 {
     log(msg);
+}
+
+void MainWindow::onHuayanRelease()
+{
+    m_devMgr->huayanScheduler()->releaseGripper();
 }
 
 void MainWindow::onHuayanStageStarted(const QString &stageName)

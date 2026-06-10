@@ -51,6 +51,7 @@ private slots:
     void onHuayanDisconnected();
     void onHuayanStartStageOne();
     void onHuayanStop();
+    void onHuayanRelease();
     void onHuayanLog(const QString &msg);
     void onHuayanStageStarted(const QString &stageName);
     void onHuayanStageCompleted(const QString &stageName);
@@ -134,6 +135,7 @@ private:
     DeviceIndicator *m_huayanIndicator     = nullptr;
     QPushButton     *m_huayanStartBtn      = nullptr;
     QPushButton     *m_huayanStopBtn       = nullptr;
+    QPushButton     *m_huayanReleaseBtn    = nullptr;
 
     // ── 主题开关 ─────────────────────────────────────────────
     ThemeSwitch    *m_themeSwitch = nullptr;

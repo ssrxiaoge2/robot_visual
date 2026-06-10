@@ -18,6 +18,11 @@ static constexpr double kMoveVelocity = 50.0;
 static constexpr double kMoveAcceleration = 100.0;
 static constexpr double kMoveRadius = 0.0;
 
+// 闭环视觉矫正参数
+static constexpr double kGrabTolerance     = 2.0;    // XY 偏移收敛阈值(mm)
+static constexpr int    kMaxGrabIterations = 6;      // 最大矫正迭代次数（防死循环）
+static constexpr int    kVisionSettleMs    = 1000;   // 移动后等视觉出新帧(ms)
+
 // 华研机器人默认 TCP/UCS 名称
 static const QString kTcpName = QStringLiteral("TCP");
 static const QString kFlipFuncName = QStringLiteral("FlipUnload");
@@ -236,6 +241,7 @@ void HuayanScheduler::startStageOne()
 
     m_stage = Stage::StageOne;
     m_stageStep = StageStep::MoveToSurvey;
+    m_grabIterations = 0;
 
     emit stageStarted(stageName(m_stage));
     proceedStage();
@@ -503,11 +509,23 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
         return;
 
     m_grabOffset = { x, y, z, 0.0, 0.0, rz };
-    emit logMessage(QStringLiteral("[阶段一] 视觉偏移(工具系) X=%1 Y=%2 Z=%3 Rz=%4")
+    emit logMessage(QStringLiteral("[阶段一] 视觉偏移(工具系) X=%1 Y=%2 Z=%3 Rz=%4 (迭代 %5)")
                         .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1)
-                        .arg(z, 0, 'f', 1).arg(rz, 0, 'f', 1));
+                        .arg(z, 0, 'f', 1).arg(rz, 0, 'f', 1)
+                        .arg(m_grabIterations));
 
-    // 第一版：仅做工具坐标系 XY 平面对准，低速验证方向；Rz/Z 暂不施加（Z 深度需另行受控下探）
+    // 闭环收敛：XY 都小于阈值，或达到最大迭代次数 → 进入夹紧
+    if ((qAbs(x) < kGrabTolerance && qAbs(y) < kGrabTolerance)
+        || m_grabIterations >= kMaxGrabIterations) {
+        emit logMessage(QStringLiteral("[阶段一] 视觉对准完成（X=%1 Y=%2），进入夹紧")
+                            .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1));
+        m_stageStep = StageStep::CloseGripper;
+        proceedStage();
+        return;
+    }
+
+    // 未收敛：工具坐标系 XY 平面微调，移动完成后回 WaitForVision 重新拍照
+    m_grabIterations++;
     m_grabMoves.clear();
     auto addMove = [this](int poseId, double v) {
         if (qAbs(v) < 0.5) return;   // 忽略 <0.5mm 的微小偏移
@@ -524,9 +542,13 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 bool HuayanScheduler::executeNextGrabMove()
 {
     if (m_grabMoveIdx >= m_grabMoves.size()) {
-        emit logMessage(QStringLiteral("[阶段一] 视觉 XY 对准完成，进入夹紧"));
-        advanceStep();      // MoveToGrab → CloseGripper
-        proceedStage();
+        // 本次 XY 微调完成，回到拍照状态，等视觉出新帧后重新检测（闭环）
+        emit logMessage(QStringLiteral("[阶段一] 本次微调完成，等待视觉更新后重新检测"));
+        m_stageStep = StageStep::WaitForVision;
+        QTimer::singleShot(kVisionSettleMs, this, [this] {
+            if (m_stage == Stage::StageOne && m_stageStep == StageStep::WaitForVision)
+                proceedStage();
+        });
         return true;
     }
 
@@ -561,6 +583,26 @@ bool HuayanScheduler::executeNextGrabMove()
 void HuayanScheduler::setSurveyPose(const HuayanScheduler::Pose &p)
 {
     m_surveyPose = p;
+}
+
+void HuayanScheduler::releaseGripper()
+{
+    if (!ensureConnected())
+        return;
+
+    // 阶段结束后机器人可能处于 ProgramStopped 态，先复位再调用
+    HRIF_GrpReset(m_boxID, m_rbtID);
+
+    std::vector<string> params;
+    int nRet = HRIF_RunFunc(m_boxID, m_releaseFuncName.toStdString(), params);
+    if (nRet != 0) {
+        const QString detail = describeError(m_boxID, nRet);
+        emit stageError(detail.isEmpty()
+            ? QStringLiteral("松开夹爪失败：%1").arg(nRet)
+            : QStringLiteral("松开夹爪失败：%1（%2）").arg(nRet).arg(detail));
+        return;
+    }
+    emit logMessage(QStringLiteral("已调用松开夹爪 %1").arg(m_releaseFuncName));
 }
 
 bool HuayanScheduler::setGripper(bool open)

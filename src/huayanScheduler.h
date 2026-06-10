@@ -52,6 +52,7 @@ public:
     void stop();
 
     void setSurveyPose(const Pose &p);
+    void releaseGripper();   // 手动松开夹爪（UI 按钮调用）
 
 public slots:
     void setGrabOffset(double x, double y, double z, double rz);
@@ -135,6 +136,7 @@ private:
     Pose m_grabOffset;
     QList<RelMove> m_grabMoves;
     int m_grabMoveIdx = 0;
+    int m_grabIterations = 0;   // 闭环视觉矫正的迭代计数
     Pose m_pickupPose;
     Pose m_pickupLiftPose;
     Pose m_unloadPose;
@@ -153,6 +155,7 @@ private:
     QString m_scriptName      = QStringLiteral("dashiceshi");
     QString m_captureFuncName = QStringLiteral("Func_capture");
     QString m_gripFuncName    = QStringLiteral("Func_jiajin");
+    QString m_releaseFuncName = QStringLiteral("Func_songzhua");
 };
 
 #endif // HUAYANSCHEDULER_H
