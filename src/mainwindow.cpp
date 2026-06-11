@@ -599,8 +599,11 @@ void MainWindow::updateAgvMonitor(const AgvMonitorData &d)
     m_lblAgvCtrl->setText(d.ctrlSeized ? QStringLiteral("被外部抢占")
                                        : QStringLiteral("正常"));
 
+    // 指示灯随导航状态恢复，避免一次异常后粘滞在"导航异常"
     if (d.navStatus >= 5 && d.navStatus <= 7)
         m_indAGV->setStatus(false, QStringLiteral("导航异常"));
+    else
+        m_indAGV->setStatus(true, QStringLiteral("已连接"));
 }
 
 void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
