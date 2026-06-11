@@ -18,15 +18,11 @@ set(PROJECT_SOURCES
         src/mainwindow.cpp
         src/mainwindow.h
         src/mainwindow.ui
-        src/workflowengine.cpp
-        src/workflowengine.h
         src/workflowstep.h
         src/huayanScheduler.cpp
         src/huayanScheduler.h
         src/devicemanager.cpp
         src/devicemanager.h
-        src/robotcontroller.cpp
-        src/robotcontroller.h
         src/agvcontroller.cpp
         src/agvcontroller.h
         src/visionclient.cpp

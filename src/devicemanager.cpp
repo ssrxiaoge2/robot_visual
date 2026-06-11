@@ -1,5 +1,4 @@
 #include "devicemanager.h"
-#include "robotcontroller.h"
 #include "agvcontroller.h"
 #include "visionclient.h"
 #include "huayanScheduler.h"
@@ -18,16 +17,6 @@ static const char *kStationMapKey = "agv/stationMap";
 DeviceManager::DeviceManager(QObject *parent)
     : QObject(parent)
 {
-    m_robotCtrl = new RobotController(this);
-    connect(m_robotCtrl, &RobotController::connected,
-            this, &DeviceManager::robotModbusConnected);
-    connect(m_robotCtrl, &RobotController::disconnected,
-            this, &DeviceManager::robotModbusDisconnected);
-    connect(m_robotCtrl, &RobotController::errorOccurred,
-            this, &DeviceManager::robotModbusError);
-    connect(m_robotCtrl, &RobotController::registersRead,
-            this, &DeviceManager::debugRegistersRead);
-
     m_agvCtrl = new AgvController(this);
     connect(m_agvCtrl, &AgvController::connected,
             this, &DeviceManager::agvModbusConnected);
@@ -83,15 +72,11 @@ void DeviceManager::applyConfig()
         return;
     }
 
-    emit logMessage(QString("配置已更新 → 机器人 %1:%2  AGV %3:%4  视觉 %5:%6")
-                        .arg(m_cfg.robotIP).arg(m_cfg.robotPort)
+    emit logMessage(QString("配置已更新 → 机械臂 %1  AGV %2:%3  视觉 %4:%5")
+                        .arg(m_cfg.robotIP)
                         .arg(m_cfg.agvIP).arg(m_cfg.agvPort)
                         .arg(m_cfg.cameraIP).arg(m_cfg.cameraPort));
-    emit configApplied(m_cfg.robotIP, m_cfg.robotPort, m_cfg.agvIP);
-
-    // 重连机械臂 Modbus（先断开，再用新参数连接）
-    m_robotCtrl->disconnectFromHost();
-    m_robotCtrl->connectToHost(m_cfg.robotIP, m_cfg.robotPort);
+    emit configApplied(m_cfg.robotIP, m_cfg.agvIP);
 
     // 重连 AGV Modbus
     m_agvCtrl->disconnectFromHost();
@@ -107,20 +92,20 @@ void DeviceManager::applyConfig()
 void DeviceManager::testRobot()
 {
     if (m_cfg.robotIP.isEmpty()) {
-        emit logMessage(QStringLiteral("[测试] 机器人 IP 为空"));
+        emit logMessage(QStringLiteral("[测试] 机械臂 IP 为空"));
         return;
     }
-    emit logMessage(QString("[测试] 正在连接机器人 %1:%2 ...")
-                        .arg(m_cfg.robotIP).arg(m_cfg.robotPort));
+    emit logMessage(QString("[测试] 正在连接机械臂 SDK %1:%2 ...")
+                        .arg(m_cfg.robotIP).arg(m_cfg.huayanPort));
     emit robotStatusChanged(false, QStringLiteral("测试中..."));
 
-    if (tcpPing(m_cfg.robotIP, m_cfg.robotPort)) {
-        emit logMessage(QString("[测试] 机器人 %1:%2 连接成功 ✓")
-                            .arg(m_cfg.robotIP).arg(m_cfg.robotPort));
+    if (tcpPing(m_cfg.robotIP, m_cfg.huayanPort)) {
+        emit logMessage(QString("[测试] 机械臂 SDK %1:%2 连接成功 ✓")
+                            .arg(m_cfg.robotIP).arg(m_cfg.huayanPort));
         emit robotStatusChanged(true, QString("可达 %1").arg(m_cfg.robotIP));
     } else {
-        emit logMessage(QString("[测试] 机器人 %1:%2 连接失败 ✗")
-                            .arg(m_cfg.robotIP).arg(m_cfg.robotPort));
+        emit logMessage(QString("[测试] 机械臂 SDK %1:%2 连接失败 ✗")
+                            .arg(m_cfg.robotIP).arg(m_cfg.huayanPort));
         emit robotStatusChanged(false, QStringLiteral("不可达"));
     }
 }
@@ -206,17 +191,6 @@ void DeviceManager::toggleLight()
                         .arg(m_lightOn ? "开启" : "关闭"));
     emit lightChanged(m_lightOn, true); // success=true 表示"切换"成功（虽然只是模拟）
 #endif
-}
-
-void DeviceManager::debugReadRobotRegisters(int addr, int count)
-{
-    m_robotCtrl->readHoldingRegisters(addr, count);
-}
-
-void DeviceManager::debugWriteRobotRegister(int addr, quint16 value)
-{
-    emit logMessage(QString("[机械臂] 写入寄存器 %1 = %2").arg(addr).arg(value));
-    m_robotCtrl->writeRegister(addr, value);
 }
 
 void DeviceManager::applyHandEyeMatrix(const float m[16])

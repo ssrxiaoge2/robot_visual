@@ -17,7 +17,6 @@
 #include "devicemanager.h"
 #include "themeswitch.h"
 
-class WorkflowEngine;
 class HandEyeDialog;
 class HuayanScheduler;
 
@@ -37,7 +36,6 @@ private slots:
     // ── 转发用户操作到业务层 ──────────────────────────────────
     void onStart();
     void onStop();
-    void onStep();
     void onLightToggle();
     void onApplyConfig();
     void onTestRobot();
@@ -60,18 +58,14 @@ private slots:
     void onHuayanStageError(const QString &msg);
 
     // ── 响应业务层信号（纯 UI 更新）────────────────────────────
-    void onStepActivated(int idx, int station, int cycle);
-    void onEngineStarted();
-    void onEngineStopped();
     void onLightChanged(bool on, bool success);
-    void onConfigApplied(const QString &robotIP, int port, const QString &agvIP);
+    void onConfigApplied(const QString &robotIP, const QString &agvIP);
 
 private:
     void initUI();
     void initConfigPanel(QVBoxLayout *leftPanel);
     void initCameraPanel(QVBoxLayout *leftPanel);
     void initScannerPanel(QVBoxLayout *leftPanel);
-    void initRobotPanel(QVBoxLayout *leftPanel);
     void initHuayanPanel(QVBoxLayout *leftPanel);
 
     void log(const QString &msg);
@@ -84,14 +78,11 @@ private:
     Ui::MainWindow *ui = nullptr;
 
     // ── 业务层（不含 UI 逻辑）──────────────────────────────────
-    WorkflowEngine *m_engine = nullptr;
     DeviceManager  *m_devMgr = nullptr;
 
     // ── 工具栏控件 ───────────────────────────────────────────
     QPushButton *m_btnStart  = nullptr;
     QPushButton *m_btnStop   = nullptr;
-    QPushButton *m_btnStep   = nullptr;
-    QSpinBox    *m_spinDelay = nullptr;
     QLabel      *m_lblCycle  = nullptr;
     QLabel      *m_lblStep   = nullptr;
 
@@ -103,7 +94,6 @@ private:
 
     // ── 网络配置面板 ────────────────────────────────────────
     QLineEdit   *m_editRobotIP   = nullptr;
-    QSpinBox    *m_spinRobotPort = nullptr;
     QLineEdit   *m_editAgvIP     = nullptr;
     QPushButton *m_btnLight      = nullptr;
     QPushButton *m_btnApply      = nullptr;
@@ -121,15 +111,6 @@ private:
     QLineEdit       *m_editScannerIP  = nullptr;
     QPushButton     *m_btnTestScanner = nullptr;
     DeviceIndicator *m_indScanner     = nullptr;
-
-    // ── 机械臂 Modbus 控制面板 ──────────────────────────────
-    DeviceIndicator *m_indRobotConn = nullptr;
-    QLineEdit       *m_editRegAddr  = nullptr;
-    QSpinBox        *m_spinRegCount = nullptr;
-    QPushButton     *m_btnReadReg   = nullptr;
-    QLineEdit       *m_editRegValue = nullptr;
-    QPushButton     *m_btnWriteReg  = nullptr;
-    QPlainTextEdit  *m_regView      = nullptr;
 
     // ── 华沿 SDK 调试面板 ───────────────────────────────────────
     QPushButton     *m_huayanConnectBtn    = nullptr;

@@ -3,7 +3,7 @@
  * @brief 工作流步骤的元数据结构
  *
  * 该结构体仅用于描述步骤的"外观"（名称、描述、颜色），
- * 不包含任何业务逻辑，由 WorkflowEngine 和 WorkflowWidget 共同引用。
+ * 不包含任何业务逻辑，由 HuayanScheduler 和 WorkflowWidget 共同引用。
  */
 
 #ifndef WORKFLOWSTEP_H
@@ -15,7 +15,7 @@
 /**
  * @brief 单个工作流步骤的元数据
  *
- * WorkflowEngine::kSteps 和 WorkflowWidget 中的 kDefaultSteps
+ * HuayanScheduler 和 WorkflowWidget 中的 kDefaultSteps
  * 均使用此结构体描述每个步骤的显示信息。
  */
 struct WorkflowStep {

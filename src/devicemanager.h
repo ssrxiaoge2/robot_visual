@@ -6,7 +6,6 @@
 #include <QObject>
 #include <QString>
 
-class RobotController;
 class AgvController;
 class VisionHttpClient;
 class HuayanScheduler;
@@ -17,7 +16,6 @@ class DeviceManager : public QObject
 public:
     struct Config {
         QString robotIP    = QStringLiteral("192.168.1.11");
-        int     robotPort  = 502;
         QString agvIP      = QStringLiteral("192.168.1.100");
         int     agvPort    = 502;
         QString cameraIP   = QStringLiteral("127.0.0.1");
@@ -29,7 +27,6 @@ public:
 
     explicit DeviceManager(QObject *parent = nullptr);
 
-    RobotController  *robotController()  const { return m_robotCtrl;   }
     AgvController    *agvController()    const { return m_agvCtrl;     }
     VisionHttpClient *visionClient()     const { return m_visionClient; }
     HuayanScheduler  *huayanScheduler() const { return m_huayanScheduler; }
@@ -50,8 +47,6 @@ public slots:
     void testCamera();
     void testScanner();
     void toggleLight();
-    void debugReadRobotRegisters(int addr, int count);
-    void debugWriteRobotRegister(int addr, quint16 value);
     void applyHandEyeMatrix(const float m[16]);
     void dispatchAgv(int workstation);
     void cancelAgvNav();
@@ -64,14 +59,10 @@ signals:
     void cameraStatusChanged(bool ok, const QString &statusText);
     void scannerStatusChanged(bool ok, const QString &statusText);
     void lightChanged(bool on, bool success);
-    void configApplied(const QString &robotIP, int port, const QString &agvIP);
-    void robotModbusConnected();
-    void robotModbusDisconnected();
-    void robotModbusError(const QString &msg);
+    void configApplied(const QString &robotIP, const QString &agvIP);
     void agvModbusConnected();
     void agvModbusDisconnected();
     void agvModbusError(const QString &msg);
-    void debugRegistersRead(int startAddr, const QList<quint16> &values);
     void handEyeMatrixApplied();
     void logMessage(const QString &msg);
 
@@ -80,7 +71,6 @@ private:
     void loadStationMap();
     void saveStationMap() const;
 
-    RobotController  *m_robotCtrl    = nullptr;
     AgvController    *m_agvCtrl     = nullptr;
     VisionHttpClient *m_visionClient = nullptr;
     HuayanScheduler  *m_huayanScheduler = nullptr;
