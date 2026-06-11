@@ -91,7 +91,8 @@
 - `DeviceManager` 持有 `QHash<int,int> m_stationMap`，提供
   `int resolveStation(int workstation) const`（**未配置回退 id=工位号**）、
   `void setStationMap(const QHash<int,int>&)`
-- QSettings 持久化（构造时加载，setStationMap 时保存），键格式 `agv/stationMap`
+- QSettings 持久化（构造时加载，setStationMap 时保存），键 `agv/stationMap`，
+  值为字符串，格式 `工位:站点id` 逗号分隔（如 `"2:3,5:7"`），解析失败的条目跳过
 - `AgvController` 不感知映射，只接收最终站点 id（协议层纯净）；
   将来 SDK 自动调度同样经 `resolveStation()` 走同一张表
 
@@ -111,8 +112,14 @@
 
 ### 3.6 派单链路
 
-面板工位号 → `DeviceManager::resolveStation()` → `AgvController::sendToStation(站点id)`。
-到达判定按站点 id 匹配（现有逻辑）。日志同时打印工位号与站点 id。
+遵守"MainWindow 不含 Modbus 逻辑"原则，`DeviceManager` 新增四个转发槽供面板按钮调用：
+
+- `dispatchAgv(int workstation)`：`resolveStation()` 转换后调
+  `AgvController::sendToStation(站点id)`，日志同时打印工位号与站点 id
+- `cancelAgvNav()` / `pauseAgvNav()` / `resumeAgvNav()`：直接转发到 AgvController 对应方法
+
+到达判定按站点 id 匹配（现有逻辑不动）。监控数据 `monitorUpdated` 信号由
+MainWindow 直接连接 `m_devMgr->agvController()`（与现有指示灯连接方式一致，只读不控制）。
 
 ## 4. 配置面板与 DeviceManager 调整
 
