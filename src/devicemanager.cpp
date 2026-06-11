@@ -275,7 +275,7 @@ int DeviceManager::resolveStation(int workstation) const
 void DeviceManager::dispatchAgv(int workstation)
 {
     const int station = resolveStation(workstation);
-    emit logMessage(QString("[AGV] 派单：工位 %1 → 站点 %2").arg(workstation).arg(station));
+    emit logMessage(QStringLiteral("[AGV] 派单：工位 %1 → 站点 %2").arg(workstation).arg(station));
     m_agvCtrl->sendToStation(station);
 }
 
