@@ -9,6 +9,7 @@
 #include <QPushButton>
 #include <QSlider>
 #include <QSpinBox>
+#include <QTableWidget>
 #include <QTextStream>
 #include <QVBoxLayout>
 
@@ -16,6 +17,7 @@
 #include "workflowwidget.h"
 #include "devicemanager.h"
 #include "themeswitch.h"
+#include "agvcontroller.h"
 
 class HandEyeDialog;
 class HuayanScheduler;
@@ -68,6 +70,11 @@ private:
     void initCameraPanel(QVBoxLayout *leftPanel);
     void initScannerPanel(QVBoxLayout *leftPanel);
     void initHuayanPanel(QVBoxLayout *leftPanel);
+    void initAgvPanel(QVBoxLayout *leftPanel);
+    void loadStationMapToTable();
+    void rebuildStationMapFromTable();
+    void refreshResolvedLabel();
+    void updateAgvMonitor(const AgvMonitorData &d);
 
     void log(const QString &msg);
     /// 应用主题（true=深色，false=浅色），同时刷新所有有内联样式的控件
@@ -123,6 +130,23 @@ private:
     QPushButton     *m_huayanReleaseBtn    = nullptr;
     QSlider         *m_huayanSpeedSlider   = nullptr;
     QLabel          *m_huayanSpeedLabel    = nullptr;
+
+    // ── AGV 调试面板 ────────────────────────────────────────
+    QSpinBox     *m_spinWorkstation = nullptr;
+    QLabel       *m_lblResolved     = nullptr;
+    QPushButton  *m_btnAgvGo        = nullptr;
+    QPushButton  *m_btnAgvCancel    = nullptr;
+    QPushButton  *m_btnAgvPause     = nullptr;
+    QPushButton  *m_btnAgvResume    = nullptr;
+    QTableWidget *m_tblStationMap   = nullptr;
+    QPushButton  *m_btnMapAdd       = nullptr;
+    QPushButton  *m_btnMapDel       = nullptr;
+    QLabel       *m_lblAgvNav       = nullptr;
+    QLabel       *m_lblAgvStation   = nullptr;
+    QLabel       *m_lblAgvLoc       = nullptr;
+    QLabel       *m_lblAgvBattery   = nullptr;
+    QLabel       *m_lblAgvCtrl      = nullptr;
+    bool          m_darkTheme       = true;
 
     // ── 主题开关 ─────────────────────────────────────────────
     ThemeSwitch    *m_themeSwitch = nullptr;

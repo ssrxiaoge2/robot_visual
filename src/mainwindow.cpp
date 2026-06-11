@@ -35,8 +35,11 @@
 #include <QDateTime>
 #include <QFont>
 #include <QFormLayout>
+#include <QHeaderView>
 #include <QScrollArea>
 #include <QTextStream>
+
+#include <algorithm>
 
 #include "handeyedialog.h"
 #include "huayanScheduler.h"
@@ -227,6 +230,7 @@ void MainWindow::initUI()
     initConfigPanel(leftPanel);   // 网络配置 + 补光灯
     initCameraPanel(leftPanel);   // 相机调试
     initScannerPanel(leftPanel);  // 扫码器调试
+    initAgvPanel(leftPanel);      // AGV 调试
     initHuayanPanel(leftPanel);   // 华沿 SDK 调试
 
     leftPanel->addStretch(); // 底部弹性填充
@@ -421,6 +425,184 @@ void MainWindow::initScannerPanel(QVBoxLayout *leftPanel)
     leftPanel->addWidget(gbScanner);
 }
 
+/**
+ * @brief 初始化"AGV 调试"面板
+ *
+ * 三块：派单行（工位号→站点解析+四按钮）、工位→站点映射表（编辑即存 QSettings）、
+ * 实时监控区（AgvController 1s 轮询经 monitorUpdated 刷新）。
+ */
+void MainWindow::initAgvPanel(QVBoxLayout *leftPanel)
+{
+    auto *gb   = new QGroupBox(QStringLiteral("AGV 调试"));
+    auto *vbox = new QVBoxLayout(gb);
+
+    // ── 派单行 ───────────────────────────────────────────────
+    auto *dispatchRow = new QHBoxLayout();
+    m_spinWorkstation = new QSpinBox();
+    m_spinWorkstation->setRange(1, 65535);
+    m_spinWorkstation->setFixedWidth(70);
+    m_lblResolved = new QLabel();
+    m_btnAgvGo = new QPushButton(QStringLiteral("出发"));
+    m_btnAgvGo->setFixedSize(56, 24);
+    dispatchRow->addWidget(new QLabel(QStringLiteral("工位:")));
+    dispatchRow->addWidget(m_spinWorkstation);
+    dispatchRow->addWidget(m_lblResolved);
+    dispatchRow->addStretch();
+    dispatchRow->addWidget(m_btnAgvGo);
+    vbox->addLayout(dispatchRow);
+
+    auto *navRow = new QHBoxLayout();
+    m_btnAgvCancel = new QPushButton(QStringLiteral("取消"));
+    m_btnAgvPause  = new QPushButton(QStringLiteral("暂停"));
+    m_btnAgvResume = new QPushButton(QStringLiteral("继续"));
+    for (auto *b : {m_btnAgvCancel, m_btnAgvPause, m_btnAgvResume})
+        b->setFixedHeight(24);
+    navRow->addWidget(m_btnAgvCancel);
+    navRow->addWidget(m_btnAgvPause);
+    navRow->addWidget(m_btnAgvResume);
+    navRow->addStretch();
+    vbox->addLayout(navRow);
+
+    // ── 工位 → 站点映射表 ───────────────────────────────────
+    m_tblStationMap = new QTableWidget(0, 2);
+    m_tblStationMap->setHorizontalHeaderLabels(
+        {QStringLiteral("工位号"), QStringLiteral("站点 id")});
+    m_tblStationMap->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    m_tblStationMap->verticalHeader()->setVisible(false);
+    m_tblStationMap->setFixedHeight(110);
+    vbox->addWidget(m_tblStationMap);
+
+    auto *mapBtnRow = new QHBoxLayout();
+    m_btnMapAdd = new QPushButton(QStringLiteral("+ 添加"));
+    m_btnMapDel = new QPushButton(QStringLiteral("- 删除"));
+    m_btnMapAdd->setFixedSize(56, 22);
+    m_btnMapDel->setFixedSize(56, 22);
+    mapBtnRow->addWidget(m_btnMapAdd);
+    mapBtnRow->addWidget(m_btnMapDel);
+    mapBtnRow->addStretch();
+    vbox->addLayout(mapBtnRow);
+
+    // ── 实时监控区 ───────────────────────────────────────────
+    auto *monForm = new QFormLayout();
+    m_lblAgvNav     = new QLabel(QStringLiteral("-"));
+    m_lblAgvStation = new QLabel(QStringLiteral("-"));
+    m_lblAgvLoc     = new QLabel(QStringLiteral("-"));
+    m_lblAgvBattery = new QLabel(QStringLiteral("-"));
+    m_lblAgvCtrl    = new QLabel(QStringLiteral("-"));
+    monForm->addRow(QStringLiteral("导航状态:"), m_lblAgvNav);
+    monForm->addRow(QStringLiteral("当前站点:"), m_lblAgvStation);
+    monForm->addRow(QStringLiteral("定位状态:"), m_lblAgvLoc);
+    monForm->addRow(QStringLiteral("电池电量:"), m_lblAgvBattery);
+    monForm->addRow(QStringLiteral("控制权:"),   m_lblAgvCtrl);
+    vbox->addLayout(monForm);
+
+    leftPanel->addWidget(gb);
+
+    // ── 信号连接 ─────────────────────────────────────────────
+    connect(m_btnAgvGo, &QPushButton::clicked, this, [this]() {
+        const int ws = m_spinWorkstation->value();
+        m_devMgr->dispatchAgv(ws);
+        m_flow->setStationHighlight(ws);
+    });
+    connect(m_btnAgvCancel, &QPushButton::clicked, m_devMgr, &DeviceManager::cancelAgvNav);
+    connect(m_btnAgvPause,  &QPushButton::clicked, m_devMgr, &DeviceManager::pauseAgvNav);
+    connect(m_btnAgvResume, &QPushButton::clicked, m_devMgr, &DeviceManager::resumeAgvNav);
+    connect(m_spinWorkstation, &QSpinBox::valueChanged,
+            this, [this](int) { refreshResolvedLabel(); });
+
+    connect(m_btnMapAdd, &QPushButton::clicked, this, [this]() {
+        const int row = m_tblStationMap->rowCount();
+        m_tblStationMap->insertRow(row);
+        m_tblStationMap->setItem(row, 0, new QTableWidgetItem(QStringLiteral("1")));
+        m_tblStationMap->setItem(row, 1, new QTableWidgetItem(QStringLiteral("1")));
+    });
+    connect(m_btnMapDel, &QPushButton::clicked, this, [this]() {
+        const int row = m_tblStationMap->currentRow();
+        if (row >= 0) m_tblStationMap->removeRow(row);
+        rebuildStationMapFromTable();
+    });
+    connect(m_tblStationMap, &QTableWidget::cellChanged,
+            this, [this](int, int) { rebuildStationMapFromTable(); });
+
+    connect(m_devMgr->agvController(), &AgvController::monitorUpdated,
+            this, [this](const AgvMonitorData &d) { updateAgvMonitor(d); });
+
+    loadStationMapToTable();
+    refreshResolvedLabel();
+}
+
+/// QSettings 中的映射 → 填充表格（QSignalBlocker 防止 cellChanged 递归回写）
+void MainWindow::loadStationMapToTable()
+{
+    const QSignalBlocker blocker(m_tblStationMap);
+    const QHash<int, int> map = m_devMgr->stationMap();
+    QList<int> keys = map.keys();
+    std::sort(keys.begin(), keys.end());
+    m_tblStationMap->setRowCount(0);
+    for (int w : keys) {
+        const int row = m_tblStationMap->rowCount();
+        m_tblStationMap->insertRow(row);
+        m_tblStationMap->setItem(row, 0, new QTableWidgetItem(QString::number(w)));
+        m_tblStationMap->setItem(row, 1, new QTableWidgetItem(QString::number(map[w])));
+    }
+}
+
+/// 表格 → 映射哈希并持久化；非法行（非 1-65535 整数）跳过
+void MainWindow::rebuildStationMapFromTable()
+{
+    QHash<int, int> map;
+    for (int row = 0; row < m_tblStationMap->rowCount(); ++row) {
+        const auto *itemW = m_tblStationMap->item(row, 0);
+        const auto *itemS = m_tblStationMap->item(row, 1);
+        if (!itemW || !itemS) continue;
+        bool okW = false, okS = false;
+        const int w = itemW->text().toInt(&okW);
+        const int s = itemS->text().toInt(&okS);
+        if (okW && okS && w > 0 && s > 0 && w <= 65535 && s <= 65535)
+            map.insert(w, s);
+    }
+    m_devMgr->setStationMap(map);
+    refreshResolvedLabel();
+}
+
+void MainWindow::refreshResolvedLabel()
+{
+    const int ws = m_spinWorkstation->value();
+    m_lblResolved->setText(QString("→ 站点 %1").arg(m_devMgr->resolveStation(ws)));
+}
+
+/// 监控快照 → 五行标签；导航状态着色：到达=绿 失败/取消/超时=红
+void MainWindow::updateAgvMonitor(const AgvMonitorData &d)
+{
+    static const QStringList kNavText = {
+        QStringLiteral("无"), QStringLiteral("等待"), QStringLiteral("执行中"),
+        QStringLiteral("暂停"), QStringLiteral("到达"), QStringLiteral("失败"),
+        QStringLiteral("取消"), QStringLiteral("超时")};
+    static const QStringList kLocText = {
+        QStringLiteral("失败"), QStringLiteral("正确"),
+        QStringLiteral("重定位中"), QStringLiteral("完成(需确认)")};
+
+    const QString nav = int(d.navStatus) < kNavText.size()
+        ? kNavText[d.navStatus] : QString::number(d.navStatus);
+    m_lblAgvNav->setText(QString("%1 (%2)").arg(nav).arg(d.navStatus));
+
+    QString color = m_darkTheme ? "#ccc" : "#333";
+    if (d.navStatus == 4) color = m_darkTheme ? "#5cb85c" : "#107c10";
+    else if (d.navStatus >= 5 && d.navStatus <= 7) color = m_darkTheme ? "#d9534f" : "#c42b1c";
+    m_lblAgvNav->setStyleSheet(QString("color:%1; font-weight:bold;").arg(color));
+
+    m_lblAgvStation->setText(QString("%1（导航目标 %2）")
+                                 .arg(d.curStation).arg(d.navStation));
+    m_lblAgvLoc->setText(int(d.locStatus) < kLocText.size()
+        ? kLocText[d.locStatus] : QString::number(d.locStatus));
+    m_lblAgvBattery->setText(QString("%1%").arg(d.battery));
+    m_lblAgvCtrl->setText(d.ctrlSeized ? QStringLiteral("被外部抢占")
+                                       : QStringLiteral("正常"));
+
+    if (d.navStatus >= 5 && d.navStatus <= 7)
+        m_indAGV->setStatus(false, QStringLiteral("导航异常"));
+}
+
 void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
 {
     auto *gb   = new QGroupBox(QStringLiteral("华沿 SDK 调试"));
@@ -520,6 +702,8 @@ void MainWindow::log(const QString &msg)
  */
 void MainWindow::applyTheme(bool dark)
 {
+    m_darkTheme = dark;
+
     // ── 深色主题 QSS ─────────────────────────────────────────
     static const char *kDark =
         // ⚠ 关键：覆盖所有 QWidget 背景，修复 Linux 系统主题干扰
@@ -543,6 +727,9 @@ void MainWindow::applyTheme(bool dark)
         "QPushButton#btnStop:hover  { background:#e86562; }"
         "QPushButton#btnApply { background:#5bc0de; }"       // 应用按钮：蓝色
         "QPushButton#btnApply:hover { background:#6ed0ee; }"
+        "QTableWidget { background:#3a3d44; color:#ddd; gridline-color:#555;"
+        "               border:1px solid #555; font-size:12px; }"
+        "QHeaderView::section { background:#2f3138; color:#ccc; border:none; padding:2px 4px; }"
         "QScrollBar:vertical { background:#2b2d33; width:8px; }"
         "QScrollBar::handle:vertical { background:#555; border-radius:4px; }"
         "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical { height:0; }";
@@ -569,6 +756,9 @@ void MainWindow::applyTheme(bool dark)
         "QPushButton#btnStop:hover  { background:#d83b2e; }"
         "QPushButton#btnApply { background:#0078d4; }"
         "QPushButton#btnApply:hover { background:#106ebe; }"
+        "QTableWidget { background:#ffffff; color:#222; gridline-color:#ccc;"
+        "               border:1px solid #bbb; font-size:12px; }"
+        "QHeaderView::section { background:#e8e8e8; color:#333; border:none; padding:2px 4px; }"
         "QScrollBar:vertical { background:#e0e0e0; width:8px; }"
         "QScrollBar::handle:vertical { background:#aaa; border-radius:4px; }"
         "QScrollBar::add-line:vertical,QScrollBar::sub-line:vertical { height:0; }";
