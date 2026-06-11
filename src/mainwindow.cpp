@@ -615,6 +615,7 @@ void MainWindow::buildConfig(DeviceManager::Config &cfg) const
 
 void MainWindow::onStart()
 {
+    m_btnStart->setEnabled(false); // 连接为阻塞调用，先禁用防止窗口期重复点击
     DeviceManager::Config cfg;
     buildConfig(cfg);
     m_devMgr->setConfig(cfg);
