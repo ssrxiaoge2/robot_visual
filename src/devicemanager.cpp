@@ -4,10 +4,16 @@
 #include "visionclient.h"
 #include "huayanScheduler.h"
 
+#include <QSettings>
 #include <QTcpSocket>
 #ifdef Q_OS_LINUX
 #  include <QProcess>  // fill_light GPIO 控制（仅 Linux 编译）
 #endif
+
+// QSettings 组织/应用名与映射键（值格式 "工位:站点,工位:站点"，如 "2:3,5:7"）
+static const char *kSettingsOrg  = "wh-robot";
+static const char *kSettingsApp  = "robot-visual";
+static const char *kStationMapKey = "agv/stationMap";
 
 DeviceManager::DeviceManager(QObject *parent)
     : QObject(parent)
@@ -66,6 +72,8 @@ DeviceManager::DeviceManager(QObject *parent)
             this, [this](const QString &msg) {
         emit logMessage(QStringLiteral("[华沿] 错误：%1").arg(msg));
     });
+
+    loadStationMap();
 }
 
 void DeviceManager::applyConfig()
@@ -226,4 +234,65 @@ bool DeviceManager::tcpPing(const QString &ip, int port, int timeoutMs)
     const bool ok = sock.waitForConnected(timeoutMs); // 阻塞等待
     if (ok) sock.disconnectFromHost();                // 握手成功后立即断开（只测试可达性）
     return ok;
+}
+
+void DeviceManager::loadStationMap()
+{
+    m_stationMap.clear();
+    QSettings settings(kSettingsOrg, kSettingsApp);
+    const QString raw = settings.value(kStationMapKey).toString();
+    for (const QString &entry : raw.split(',', Qt::SkipEmptyParts)) {
+        const QStringList kv = entry.split(':');
+        if (kv.size() != 2) continue;
+        bool okW = false, okS = false;
+        const int w = kv[0].toInt(&okW);
+        const int s = kv[1].toInt(&okS);
+        if (okW && okS && w > 0 && s > 0 && w <= 65535 && s <= 65535)
+            m_stationMap.insert(w, s);
+    }
+}
+
+void DeviceManager::saveStationMap() const
+{
+    QStringList entries;
+    for (auto it = m_stationMap.constBegin(); it != m_stationMap.constEnd(); ++it)
+        entries << QString("%1:%2").arg(it.key()).arg(it.value());
+    QSettings settings(kSettingsOrg, kSettingsApp);
+    settings.setValue(kStationMapKey, entries.join(','));
+}
+
+void DeviceManager::setStationMap(const QHash<int, int> &map)
+{
+    m_stationMap = map;
+    saveStationMap();
+}
+
+int DeviceManager::resolveStation(int workstation) const
+{
+    return m_stationMap.value(workstation, workstation);
+}
+
+void DeviceManager::dispatchAgv(int workstation)
+{
+    const int station = resolveStation(workstation);
+    emit logMessage(QString("[AGV] 派单：工位 %1 → 站点 %2").arg(workstation).arg(station));
+    m_agvCtrl->sendToStation(station);
+}
+
+void DeviceManager::cancelAgvNav()
+{
+    m_agvCtrl->cancelNavigation();
+    emit logMessage(QStringLiteral("[AGV] 已发送取消导航"));
+}
+
+void DeviceManager::pauseAgvNav()
+{
+    m_agvCtrl->pauseNavigation();
+    emit logMessage(QStringLiteral("[AGV] 已发送暂停导航"));
+}
+
+void DeviceManager::resumeAgvNav()
+{
+    m_agvCtrl->resumeNavigation();
+    emit logMessage(QStringLiteral("[AGV] 已发送继续导航"));
 }

@@ -1,6 +1,7 @@
 #ifndef DEVICEMANAGER_H
 #define DEVICEMANAGER_H
 
+#include <QHash>
 #include <QList>
 #include <QObject>
 #include <QString>
@@ -37,6 +38,11 @@ public:
 
     void setConfig(const Config &cfg) { m_cfg = cfg; }
 
+    /// 工位号 → AGV 站点 id（未配置回退 id=工位号）
+    int resolveStation(int workstation) const;
+    QHash<int, int> stationMap() const { return m_stationMap; }
+    void setStationMap(const QHash<int, int> &map);
+
 public slots:
     void applyConfig();
     void testRobot();
@@ -47,6 +53,10 @@ public slots:
     void debugReadRobotRegisters(int addr, int count);
     void debugWriteRobotRegister(int addr, quint16 value);
     void applyHandEyeMatrix(const float m[16]);
+    void dispatchAgv(int workstation);
+    void cancelAgvNav();
+    void pauseAgvNav();
+    void resumeAgvNav();
 
 signals:
     void robotStatusChanged(bool ok, const QString &statusText);
@@ -67,6 +77,8 @@ signals:
 
 private:
     bool tcpPing(const QString &ip, int port, int timeoutMs = 2000);
+    void loadStationMap();
+    void saveStationMap() const;
 
     RobotController  *m_robotCtrl    = nullptr;
     AgvController    *m_agvCtrl     = nullptr;
@@ -74,6 +86,7 @@ private:
     HuayanScheduler  *m_huayanScheduler = nullptr;
     Config            m_cfg;
     bool              m_lightOn      = false;
+    QHash<int, int>   m_stationMap;
 };
 
 #endif // DEVICEMANAGER_H
