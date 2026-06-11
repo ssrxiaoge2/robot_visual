@@ -16,6 +16,7 @@
 
 #include "agvcontroller.h"
 
+#include <QMetaType>
 #include <QModbusReply>
 #include <QVariant>
 
@@ -24,6 +25,8 @@
 AgvController::AgvController(QObject *parent)
     : QObject(parent)
 {
+    qRegisterMetaType<AgvMonitorData>();
+
     m_client = new QModbusTcpClient(this);
     connect(m_client, &QModbusClient::stateChanged,
             this, &AgvController::onStateChanged);
@@ -191,6 +194,7 @@ void AgvController::startMonitor(int intervalMs)
 void AgvController::stopMonitor()
 {
     m_monitorTimer->stop();
+    m_monitorBusy = false; // 防止断线重连后因标志残留导致轮询永久卡死
 }
 
 /**
@@ -202,14 +206,21 @@ void AgvController::stopMonitor()
  */
 void AgvController::pollMonitor()
 {
-    if (!isConnected()) return;
+    if (!isConnected() || m_monitorBusy) return; // 防止上一轮读取未完成时叠发请求
+    m_monitorBusy = true;
 
     auto *r1 = m_client->sendReadRequest(
         QModbusDataUnit(QModbusDataUnit::InputRegisters, pdu(REG_NAV_STATION), 7), 1);
-    if (!r1) return;
+    if (!r1) {
+        m_monitorBusy = false;
+        return;
+    }
     connect(r1, &QModbusReply::finished, this, [this, r1]() {
         r1->deleteLater();
-        if (r1->error() != QModbusDevice::NoError) return;
+        if (r1->error() != QModbusDevice::NoError) {
+            m_monitorBusy = false;
+            return;
+        }
         const QModbusDataUnit u = r1->result();
         m_monitorData.navStation = static_cast<qint16>(u.value(0));
         m_monitorData.locStatus  = u.value(1);
@@ -218,13 +229,18 @@ void AgvController::pollMonitor()
 
         auto *r2 = m_client->sendReadRequest(
             QModbusDataUnit(QModbusDataUnit::InputRegisters, pdu(REG_CUR_STATION), 10), 1);
-        if (!r2) return;
+        if (!r2) {
+            m_monitorBusy = false;
+            return;
+        }
         connect(r2, &QModbusReply::finished, this, [this, r2]() {
             r2->deleteLater();
-            if (r2->error() != QModbusDevice::NoError) return;
-            m_monitorData.curStation = static_cast<qint16>(r2->result().value(0));
-            m_monitorData.ctrlSeized = (r2->result().value(9) == 1);
-            emit monitorUpdated(m_monitorData);
+            if (r2->error() == QModbusDevice::NoError) {
+                m_monitorData.curStation = static_cast<qint16>(r2->result().value(0));
+                m_monitorData.ctrlSeized = (r2->result().value(9) == 1);
+                emit monitorUpdated(m_monitorData);
+            }
+            m_monitorBusy = false;
         });
     });
 }

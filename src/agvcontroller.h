@@ -117,6 +117,7 @@ private:
     QString           m_ip;
     int               m_port          = 502;
     int               m_targetStation = 0;
+    bool              m_monitorBusy   = false; ///< 防止上一轮读取未完成时叠发请求
 };
 
 #endif // AGVCONTROLLER_H
