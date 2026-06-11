@@ -628,6 +628,8 @@ void MainWindow::onStop()
     m_devMgr->cancelAgvNav();   // AGV 行走中一并取消，避免停止后空跑
     m_flow->setActiveStep(-1);
     m_lblStep->setText(QStringLiteral("已停止"));
+    m_btnStart->setEnabled(true);
+    m_btnStop->setEnabled(false);
 }
 
 /// 补光灯切换按钮回调
@@ -787,6 +789,8 @@ void MainWindow::onHuayanStop()
     m_huayanStopBtn->setEnabled(false);
     m_huayanStartBtn->setEnabled(true);
     m_huayanIndicator->setStatus(false, QStringLiteral("已停止"));
+    m_btnStart->setEnabled(true);
+    m_btnStop->setEnabled(false);
 }
 
 void MainWindow::onHuayanConnected()
