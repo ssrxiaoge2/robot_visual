@@ -56,6 +56,7 @@ private slots:
     void onHuayanStageStarted(const QString &stageName);
     void onHuayanStageCompleted(const QString &stageName);
     void onHuayanStageError(const QString &msg);
+    void onSdkStepChanged(int stepIdx);
 
     // ── 响应业务层信号（纯 UI 更新）────────────────────────────
     void onLightChanged(bool on, bool success);
@@ -85,6 +86,7 @@ private:
     QPushButton *m_btnStop   = nullptr;
     QLabel      *m_lblCycle  = nullptr;
     QLabel      *m_lblStep   = nullptr;
+    int          m_cycleCount = 0;
 
     // ── 设备状态指示灯 ──────────────────────────────────────
     DeviceIndicator *m_indCamera = nullptr;

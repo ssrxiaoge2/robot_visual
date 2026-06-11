@@ -124,6 +124,15 @@ MainWindow::MainWindow(QWidget *parent)
                 this, &MainWindow::onHuayanStageCompleted);
         connect(hs, &HuayanScheduler::stageError,
                 this, &MainWindow::onHuayanStageError);
+        connect(hs, &HuayanScheduler::stepChanged,
+                this, &MainWindow::onSdkStepChanged);
+        // 顶部"机械臂"指示灯跟随 SDK 连接状态
+        connect(hs, &HuayanScheduler::connected, this, [this]() {
+            m_indRobot->setStatus(true, QStringLiteral("SDK 已连接"));
+        });
+        connect(hs, &HuayanScheduler::disconnected, this, [this]() {
+            m_indRobot->setStatus(false, QStringLiteral("离线"));
+        });
     }
 
     log(QStringLiteral("===== 上位机可视化系统启动 ====="));
@@ -205,7 +214,7 @@ void MainWindow::initUI()
     auto *statusLayout = new QGridLayout(gbStatus);
     statusLayout->setSpacing(4);
     m_indCamera = new DeviceIndicator(QStringLiteral("奥比相机"));
-    m_indRobot  = new DeviceIndicator(QStringLiteral("华沿机器人"));
+    m_indRobot  = new DeviceIndicator(QStringLiteral("机械臂 SDK"));
     m_indAGV    = new DeviceIndicator(QStringLiteral("仙工AGV"));
     m_indLight  = new DeviceIndicator(QStringLiteral("补光灯"));
     statusLayout->addWidget(m_indCamera, 0, 0);
@@ -816,12 +825,23 @@ void MainWindow::onHuayanSpeedChanged(int percent)
     m_devMgr->huayanScheduler()->setSpeedOverride(percent);
 }
 
+/// SDK 调度步骤推进：高亮流程图节点并更新工具栏当前步骤标签
+void MainWindow::onSdkStepChanged(int stepIdx)
+{
+    m_flow->setActiveStep(stepIdx);
+    if (stepIdx >= 0 && stepIdx < m_flow->steps().size())
+        m_lblStep->setText(m_flow->steps()[stepIdx].name);
+}
+
 void MainWindow::onHuayanStageStarted(const QString &stageName)
 {
     m_huayanStartBtn->setEnabled(false);
     m_huayanStopBtn->setEnabled(true);
     m_huayanIndicator->setStatus(true, QStringLiteral("运行中"));
     log(QStringLiteral("[华沿] 阶段启动：%1").arg(stageName));
+
+    m_btnStart->setEnabled(false);
+    m_btnStop->setEnabled(true);
 }
 
 void MainWindow::onHuayanStageCompleted(const QString &stageName)
@@ -830,6 +850,13 @@ void MainWindow::onHuayanStageCompleted(const QString &stageName)
     m_huayanStopBtn->setEnabled(false);
     m_huayanIndicator->setStatus(true, QStringLiteral("完成"));
     log(QStringLiteral("[华沿] 阶段完成：%1").arg(stageName));
+
+    m_btnStart->setEnabled(true);
+    m_btnStop->setEnabled(false);
+    m_flow->setActiveStep(-1);
+    if (stageName.startsWith(QStringLiteral("阶段一")))
+        m_lblCycle->setText(QString::number(++m_cycleCount));
+    m_lblStep->setText(QStringLiteral("完成"));
 }
 
 void MainWindow::onHuayanStageError(const QString &msg)
@@ -838,4 +865,9 @@ void MainWindow::onHuayanStageError(const QString &msg)
     m_huayanStopBtn->setEnabled(false);
     m_huayanIndicator->setStatus(false, QStringLiteral("错误"));
     log(QStringLiteral("[华沿] 错误：%1").arg(msg));
+
+    m_btnStart->setEnabled(true);
+    m_btnStop->setEnabled(false);
+    m_flow->setActiveStep(-1);
+    m_lblStep->setText(QStringLiteral("错误"));
 }
