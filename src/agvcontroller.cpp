@@ -9,7 +9,7 @@
  *
  * 文档地址位以 00001 为起始，请求时经 pdu() 统一减 1。
  *
- * 自动重连逻辑与 RobotController 相同：
+ * 自动重连：
  *   连接成功 → 停止重连定时器
  *   连接断开 → 若 IP 非空则 5s 后重试
  */
@@ -113,7 +113,6 @@ void AgvController::sendToStation(int stationNo)
  * 一次读取 3 个寄存器：当前导航站点 / 定位状态 / 导航状态。
  * 结果通过 statusRead(NavStatus, navStation) 信号异步返回。
  * 若导航状态为 Arrived 且导航站点与本次下发的目标一致，额外 emit arrived()。
- * WorkflowEngine 在 Step2 中以 300ms 间隔调用此方法轮询。
  */
 void AgvController::readStatusRegister()
 {

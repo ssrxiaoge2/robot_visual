@@ -597,7 +597,7 @@ void MainWindow::buildConfig(DeviceManager::Config &cfg) const
     cfg.cameraPort = 8080; // 视觉服务固定端口（Flask HTTP）
     cfg.scannerIP  = m_editScannerIP->text().trimmed();
     // agvPort 默认 502，无对应 UI 控件（Modbus 标准端口）
-    // 华沿 SDK 与 Modbus 路径连到同一台机器人，复用 robotIP
+    // 机械臂 SDK 复用 robotIP（端口固定 10003）
     cfg.huayanIP   = cfg.robotIP;
     cfg.huayanPort = 10003;
 }
@@ -616,6 +616,7 @@ void MainWindow::onStart()
 void MainWindow::onStop()
 {
     m_devMgr->huayanScheduler()->stop();
+    m_devMgr->cancelAgvNav();   // AGV 行走中一并取消，避免停止后空跑
     m_flow->setActiveStep(-1);
     m_lblStep->setText(QStringLiteral("已停止"));
 }

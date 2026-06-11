@@ -224,8 +224,8 @@ void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
     const float angle = static_cast<float>(obj.value("angle").toDouble());   // 旋转角（度）
     const float conf  = static_cast<float>(obj.value("confidence").toDouble());
 
-    // 发出日志（供 WorkflowEngine 转发到 UI）
-    // 注意：此信号没有 log，由调用方（WorkflowEngine）记录
+    // 发出日志（供上层转发到 UI）
+    // 注意：此信号没有 log，由调用方记录
     Q_UNUSED(conf) // 当前仅记录 confidence，不过滤
 
     const RawCoords raw = transformToMm(cx, cy, cz, angle);

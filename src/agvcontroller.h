@@ -21,7 +21,7 @@ Q_DECLARE_METATYPE(AgvMonitorData)
  * \brief 仙工 AGV Modbus TCP 客户端
  *
  * 负责向 AGV 下发目标站点指令，并轮询导航状态直到到达/失败。
- * 接口风格与 RobotController 对称，不依赖任何 UI 组件。
+ * 不依赖任何 UI 组件。
  *
  * 寄存器映射来自仙工官方 Modbus 寄存器表（可写寄存器/只读寄存器/
  * 可写状态量/只读状态量）。文档地址位以 00001 为起始地址，
