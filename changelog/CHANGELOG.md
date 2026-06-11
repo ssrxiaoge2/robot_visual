@@ -19,6 +19,7 @@
 ### 新增
 - `AgvController::cancelNavigation()`：FC05 写 [0x]00006=1 取消导航；`WorkflowEngine::stop()` 在 Step2 行走中停止时自动调用，避免 AGV 空跑
 - `AgvController::readControlOwnership()`：FC04 读 [3x]00043 控制权状态，连接成功后自动读取一次；`DeviceManager` 将结果输出到日志（联调自检）
+- `scripts/agv_modbus_debug.py`：零依赖联调脚本（selfcheck 地址偏移自检 / status 状态解码 / send 派单轮询 / cancel / pause / resume / confirmloc / watch），已对本地模拟 AGV 验证帧格式
 
 ### 已知限制
 - 文档地址位减 1 的换算尚未在真机验证，联调时可读 [3x]00070-00073（AGV 自身 IP 四段）自检偏移是否正确
