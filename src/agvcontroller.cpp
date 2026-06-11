@@ -36,6 +36,10 @@ AgvController::AgvController(QObject *parent)
             m_client->state() == QModbusDevice::UnconnectedState)
             m_client->connectDevice();
     });
+
+    m_monitorTimer = new QTimer(this);
+    m_monitorTimer->setInterval(1000);
+    connect(m_monitorTimer, &QTimer::timeout, this, &AgvController::pollMonitor);
 }
 
 AgvController::~AgvController()
@@ -150,6 +154,81 @@ void AgvController::cancelNavigation()
     });
 }
 
+void AgvController::pauseNavigation()
+{
+    if (!isConnected()) return;
+    QModbusDataUnit unit(QModbusDataUnit::Coils, pdu(COIL_PAUSE_NAV), 1);
+    unit.setValue(0, 1);
+    auto *reply = m_client->sendWriteRequest(unit, 1);
+    if (!reply) return;
+    connect(reply, &QModbusReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QModbusDevice::NoError)
+            emit errorOccurred(QString("AGV 暂停导航失败: %1").arg(reply->errorString()));
+    });
+}
+
+void AgvController::resumeNavigation()
+{
+    if (!isConnected()) return;
+    QModbusDataUnit unit(QModbusDataUnit::Coils, pdu(COIL_RESUME_NAV), 1);
+    unit.setValue(0, 1);
+    auto *reply = m_client->sendWriteRequest(unit, 1);
+    if (!reply) return;
+    connect(reply, &QModbusReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QModbusDevice::NoError)
+            emit errorOccurred(QString("AGV 继续导航失败: %1").arg(reply->errorString()));
+    });
+}
+
+void AgvController::startMonitor(int intervalMs)
+{
+    m_monitorTimer->setInterval(intervalMs);
+    m_monitorTimer->start();
+}
+
+void AgvController::stopMonitor()
+{
+    m_monitorTimer->stop();
+}
+
+/**
+ * @brief 监控轮询：两次 FC04 读取后发布快照
+ *
+ * 第一读 [3x]00007-00013（7 个寄存器，覆盖导航站点/定位/导航状态/电量），
+ * 第二读 [3x]00034-00043（10 个寄存器，首尾分别是当前站点和控制权）。
+ * 任一读失败则跳过本轮（下轮重试），不刷错误日志避免轮询噪音。
+ */
+void AgvController::pollMonitor()
+{
+    if (!isConnected()) return;
+
+    auto *r1 = m_client->sendReadRequest(
+        QModbusDataUnit(QModbusDataUnit::InputRegisters, pdu(REG_NAV_STATION), 7), 1);
+    if (!r1) return;
+    connect(r1, &QModbusReply::finished, this, [this, r1]() {
+        r1->deleteLater();
+        if (r1->error() != QModbusDevice::NoError) return;
+        const QModbusDataUnit u = r1->result();
+        m_monitorData.navStation = static_cast<qint16>(u.value(0));
+        m_monitorData.locStatus  = u.value(1);
+        m_monitorData.navStatus  = u.value(2);
+        m_monitorData.battery    = u.value(6);
+
+        auto *r2 = m_client->sendReadRequest(
+            QModbusDataUnit(QModbusDataUnit::InputRegisters, pdu(REG_CUR_STATION), 10), 1);
+        if (!r2) return;
+        connect(r2, &QModbusReply::finished, this, [this, r2]() {
+            r2->deleteLater();
+            if (r2->error() != QModbusDevice::NoError) return;
+            m_monitorData.curStation = static_cast<qint16>(r2->result().value(0));
+            m_monitorData.ctrlSeized = (r2->result().value(9) == 1);
+            emit monitorUpdated(m_monitorData);
+        });
+    });
+}
+
 /**
  * @brief 读取控制权状态（FC04 读 [3x]00043）
  *
@@ -182,8 +261,10 @@ void AgvController::onStateChanged(QModbusDevice::State state)
         m_reconnectTimer->stop(); // 连接成功，停止重连定时器
         emit connected();
         readControlOwnership();   // 联调自检：确认控制权未被外部抢占
+        startMonitor();
         break;
     case QModbusDevice::UnconnectedState:
+        stopMonitor();
         emit disconnected();
         if (!m_ip.isEmpty())     // 若是主动连接断开，则尝试重连
             m_reconnectTimer->start();

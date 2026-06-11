@@ -6,6 +6,17 @@
 #include <QModbusDataUnit>
 #include <QTimer>
 
+/// AGV 实时监控快照（监控轮询每周期发布一次）
+struct AgvMonitorData {
+    int     navStation = 0;     ///< [3x]00007 当前导航站点
+    quint16 locStatus  = 0;     ///< [3x]00008 定位状态
+    quint16 navStatus  = 0;     ///< [3x]00009 导航状态
+    quint16 battery    = 0;     ///< [3x]00013 电池电量 0-100
+    int     curStation = 0;     ///< [3x]00034 当前所在站点（严格判定）
+    bool    ctrlSeized = false; ///< [3x]00043 控制权被外部抢占
+};
+Q_DECLARE_METATYPE(AgvMonitorData)
+
 /*!
  * \brief 仙工 AGV Modbus TCP 客户端
  *
@@ -48,6 +59,10 @@ public:
     static constexpr int REG_NAV_STATUS     = 9;  ///< [3x] 导航状态
     static constexpr int REG_CTRL_SEIZED    = 43; ///< [3x] 控制权是否被外部抢占
     static constexpr int COIL_CANCEL_NAV    = 6;  ///< [0x] 取消导航
+    static constexpr int REG_BATTERY        = 13; ///< [3x] 电池电量
+    static constexpr int REG_CUR_STATION    = 34; ///< [3x] 当前所在站点
+    static constexpr int COIL_PAUSE_NAV     = 4;  ///< [0x] 暂停导航
+    static constexpr int COIL_RESUME_NAV    = 5;  ///< [0x] 继续导航
 
     explicit AgvController(QObject *parent = nullptr);
     ~AgvController() override;
@@ -64,6 +79,13 @@ public:
     void cancelNavigation();
     /// 读 [3x]00043 控制权状态，结果通过 controlOwnershipRead 信号异步返回
     void readControlOwnership();
+    /// 写 [0x]00004=1 暂停当前导航
+    void pauseNavigation();
+    /// 写 [0x]00005=1 继续导航
+    void resumeNavigation();
+    /// 启动监控轮询（连接成功后自动调用）
+    void startMonitor(int intervalMs = 1000);
+    void stopMonitor();
 
 signals:
     void connected();
@@ -76,6 +98,8 @@ signals:
     void arrived();
     /// 控制权读取完成（true = 被外部抢占，此时 Modbus 指令可能无效）
     void controlOwnershipRead(bool externallySeized);
+    /// 监控轮询完成，发布最新快照
+    void monitorUpdated(const AgvMonitorData &data);
 
 private slots:
     void onStateChanged(QModbusDevice::State state);
@@ -84,8 +108,12 @@ private:
     /// 文档地址位（1 基）→ Modbus PDU 地址（0 基）
     static constexpr int pdu(int docAddr) { return docAddr - 1; }
 
+    void pollMonitor();
+
     QModbusTcpClient *m_client         = nullptr;
     QTimer           *m_reconnectTimer = nullptr;
+    QTimer           *m_monitorTimer   = nullptr;
+    AgvMonitorData    m_monitorData;
     QString           m_ip;
     int               m_port          = 502;
     int               m_targetStation = 0;
