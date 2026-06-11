@@ -411,8 +411,35 @@ void HuayanScheduler::advanceStep()
     }
 }
 
+/**
+ * @brief StageStep → 流程图节点索引（WorkflowWidget kDefaultSteps）
+ *
+ * 0=视觉定位 1=SDK取料 2=翻转卸料 3=AGV运输(本期不发射) 4=码垛复位
+ */
+int HuayanScheduler::stepIndexFor(StageStep step)
+{
+    switch (step) {
+    case StageStep::MoveToSurvey:
+    case StageStep::WaitForVision:           return 0;
+    case StageStep::MoveToGrab:
+    case StageStep::DescendZ:
+    case StageStep::CloseGripper:
+    case StageStep::LiftLoad:                return 1;
+    case StageStep::MoveToUnload:
+    case StageStep::FlipUnload:
+    case StageStep::ReleaseLoad:             return 2;
+    case StageStep::MoveEmptyBox:
+    case StageStep::ExecuteStackingFunction: return 4;
+    default:                                 return -1;
+    }
+}
+
 void HuayanScheduler::executeCurrentStep()
 {
+    const int stepIdx = stepIndexFor(m_stageStep);
+    if (stepIdx >= 0)
+        emit stepChanged(stepIdx);
+
     switch (m_stage) {
     case Stage::StageOne:
         switch (m_stageStep) {

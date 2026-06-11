@@ -67,6 +67,9 @@ signals:
     void logMessage(const QString &msg);
     void surveyReady();
 
+    /// 流程图步骤索引变化（0-4，对应 WorkflowWidget 节点），供 UI 高亮
+    void stepChanged(int stepIdx);
+
 private slots:
     void onPollTick();
     void onStepTimeout();
@@ -126,6 +129,7 @@ private:
     void startWaitForIdle(int timeoutMs = 30000);
 
     QString stageName(Stage stage) const;
+    static int stepIndexFor(StageStep step);
 
     QTimer *m_pollTimer    = nullptr;
     QTimer *m_timeoutTimer = nullptr;
