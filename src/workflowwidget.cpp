@@ -12,14 +12,14 @@
 #include <QPainterPath>
 #include <QFont>
 
-// ── 默认步骤定义（与 WorkflowEngine::kSteps 保持同步）────────
+// ── 默认步骤定义（SDK 调度阶段，索引与 HuayanScheduler::stepIndexFor 对应）──
 // 此处仅用于 UI 展示，不含业务逻辑
 static const QList<WorkflowStep> kDefaultSteps = {
-    {QStringLiteral("相机拍照"),   QStringLiteral("Orbbec 3D"),  QColor(65,  130, 220)},
-    {QStringLiteral("机器人抓取"), QStringLiteral("华沿TCP"),    QColor(220, 160,  50)},
-    {QStringLiteral("AGV行走"),    QStringLiteral("仙工Modbus"), QColor(60,  180, 120)},
-    {QStringLiteral("机器人放料"), QStringLiteral("翻转卸料"),   QColor(180, 110, 210)},
-    {QStringLiteral("复位等待"),   QStringLiteral("下一轮"),     QColor(130, 130, 130)},
+    {QStringLiteral("视觉定位"),  QStringLiteral("Orbbec+SAM2"), QColor(65,  130, 220)},
+    {QStringLiteral("SDK 取料"),  QStringLiteral("华沿 SDK"),    QColor(220, 160,  50)},
+    {QStringLiteral("翻转卸料"),  QStringLiteral("华沿 SDK"),    QColor(180, 110, 210)},
+    {QStringLiteral("AGV 运输"),  QStringLiteral("仙工 Modbus"), QColor(60,  180, 120)},
+    {QStringLiteral("码垛复位"),  QStringLiteral("下一轮"),      QColor(130, 130, 130)},
 };
 
 // ── 构造 ─────────────────────────────────────────────────────

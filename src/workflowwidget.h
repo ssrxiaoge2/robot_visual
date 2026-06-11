@@ -51,6 +51,9 @@ public:
      */
     void setStationMode(bool show);
 
+    /// 步骤元数据（MainWindow 用于读取步骤名显示在工具栏标签）
+    const QList<WorkflowStep> &steps() const { return m_steps; }
+
 protected:
     /// 主绘制入口：背景 → 步骤方框 → 连接箭头 → 工位条
     void paintEvent(QPaintEvent *) override;
