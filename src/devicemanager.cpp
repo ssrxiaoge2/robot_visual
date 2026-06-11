@@ -29,6 +29,12 @@ DeviceManager::DeviceManager(QObject *parent)
             this, &DeviceManager::agvModbusDisconnected);
     connect(m_agvCtrl, &AgvController::errorOccurred,
             this, &DeviceManager::agvModbusError);
+    // 连接成功后控制器自动读 [3x]00043，确认控制权未被外部调度系统抢占
+    connect(m_agvCtrl, &AgvController::controlOwnershipRead, this, [this](bool seized) {
+        emit logMessage(seized
+            ? QStringLiteral("[AGV] 控制权已被外部抢占（[3x]00043=1），Modbus 指令可能无效")
+            : QStringLiteral("[AGV] 控制权未被外部抢占（[3x]00043=0）✓"));
+    });
 
     m_visionClient = new VisionHttpClient(this);
     connect(m_visionClient, &VisionHttpClient::statusChanged,

@@ -2,9 +2,12 @@
  * @file agvcontroller.cpp
  * @brief AgvController 仙工 AGV Modbus TCP 客户端实现
  *
- * 与 RobotController 结构对称，但寄存器类型不同：
- *   写目标工位：FC16 写 Holding 1000
- *   读 AGV 状态：FC04 读 Input 1001
+ * 寄存器交互模式为"自清零触发式"：
+ *   下发站点：FC06 写 [4x]00001，AGV 收到后自动清 0 并开始路径导航
+ *   状态轮询：FC04 读 [3x]00007-00009（导航站点 / 定位状态 / 导航状态）
+ *   取消导航：FC05 写 [0x]00006=1
+ *
+ * 文档地址位以 00001 为起始，请求时经 pdu() 统一减 1。
  *
  * 自动重连逻辑与 RobotController 相同：
  *   连接成功 → 停止重连定时器
@@ -69,17 +72,19 @@ bool AgvController::isConnected() const
 // ── AGV 控制接口 ─────────────────────────────────────────────
 
 /**
- * @brief 向 AGV 写入目标工位编号，触发 AGV 自动行走
- * @param stationNo 目标工位编号（1-12），写入 AGV Holding 1000
+ * @brief 写目标站点 id 到 [4x]00001，触发 AGV 路径导航
+ * @param stationNo 目标站点 id（须 >0，且地图中存在对应数字编号的站点）
  *
- * 写入成功后 AGV 会自动开始行走，上层通过 readStatusRegister()
- * 轮询 Input 1001 直到状态变为 Arrived(2) 再进入下一步骤。
+ * AGV 收到后会将该寄存器自动清 0 并开始导航，上层通过
+ * readStatusRegister() 轮询导航状态直到 Arrived(4) 再进入下一步骤。
  */
 void AgvController::sendToStation(int stationNo)
 {
     if (!isConnected()) return;
 
-    QModbusDataUnit unit(QModbusDataUnit::HoldingRegisters, REG_TARGET_STATION, 1);
+    m_targetStation = stationNo;
+
+    QModbusDataUnit unit(QModbusDataUnit::HoldingRegisters, pdu(REG_TARGET_STATION), 1);
     unit.setValue(0, static_cast<quint16>(stationNo));
 
     auto *reply = m_client->sendWriteRequest(unit, 1);
@@ -88,18 +93,19 @@ void AgvController::sendToStation(int stationNo)
     connect(reply, &QModbusReply::finished, this, [this, reply, stationNo]() {
         reply->deleteLater();
         if (reply->error() != QModbusDevice::NoError) {
-            emit errorOccurred(QString("AGV 工位写入失败 (站=%1): %2")
+            emit errorOccurred(QString("AGV 站点写入失败 (站=%1): %2")
                                .arg(stationNo).arg(reply->errorString()));
         }
-        // 写入成功时不发信号，上层通过轮询 readStatusRegister() 跟踪行走状态
+        // 写入成功时不发信号，上层通过轮询 readStatusRegister() 跟踪导航状态
     });
 }
 
 /**
- * @brief 请求读取 AGV 当前状态（FC04 读 Input 1001）
+ * @brief 请求读取 AGV 状态（FC04 读 [3x]00007-00009）
  *
- * 结果通过 statusRead(AgvStatus) 信号异步返回。
- * 若状态为 Arrived，同时额外 emit arrived() 快捷信号。
+ * 一次读取 3 个寄存器：当前导航站点 / 定位状态 / 导航状态。
+ * 结果通过 statusRead(NavStatus, navStation) 信号异步返回。
+ * 若导航状态为 Arrived 且导航站点与本次下发的目标一致，额外 emit arrived()。
  * WorkflowEngine 在 Step2 中以 300ms 间隔调用此方法轮询。
  */
 void AgvController::readStatusRegister()
@@ -107,20 +113,63 @@ void AgvController::readStatusRegister()
     if (!isConnected()) return;
 
     auto *reply = m_client->sendReadRequest(
-        QModbusDataUnit(QModbusDataUnit::InputRegisters, REG_STATUS, 1), 1);
+        QModbusDataUnit(QModbusDataUnit::InputRegisters, pdu(REG_NAV_STATION), 3), 1);
     if (!reply) return;
 
     connect(reply, &QModbusReply::finished, this, [this, reply]() {
         reply->deleteLater();
         if (reply->error() == QModbusDevice::NoError) {
-            const quint16 raw = reply->result().value(0);
-            auto st = static_cast<AgvStatus>(raw);
-            emit statusRead(st);
-            if (st == AgvStatus::Arrived)
-                emit arrived(); // 到位快捷信号（可选连接，WorkflowEngine 用 statusRead）
+            const int  navStation = static_cast<qint16>(reply->result().value(0));
+            const auto status     = static_cast<NavStatus>(reply->result().value(2));
+            emit statusRead(status, navStation);
+            if (status == NavStatus::Arrived && navStation == m_targetStation)
+                emit arrived();
         } else {
             emit errorOccurred(QString("AGV 状态读取失败: %1").arg(reply->errorString()));
         }
+    });
+}
+
+/**
+ * @brief 取消当前导航（FC05 写 [0x]00006=1，AGV 收到后自动清 0）
+ */
+void AgvController::cancelNavigation()
+{
+    if (!isConnected()) return;
+
+    QModbusDataUnit unit(QModbusDataUnit::Coils, pdu(COIL_CANCEL_NAV), 1);
+    unit.setValue(0, 1);
+
+    auto *reply = m_client->sendWriteRequest(unit, 1);
+    if (!reply) return;
+
+    connect(reply, &QModbusReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() != QModbusDevice::NoError)
+            emit errorOccurred(QString("AGV 取消导航失败: %1").arg(reply->errorString()));
+    });
+}
+
+/**
+ * @brief 读取控制权状态（FC04 读 [3x]00043）
+ *
+ * 连接成功后自动调用一次，供联调时确认 Modbus 指令是否会被
+ * 外部调度系统抢占而失效。
+ */
+void AgvController::readControlOwnership()
+{
+    if (!isConnected()) return;
+
+    auto *reply = m_client->sendReadRequest(
+        QModbusDataUnit(QModbusDataUnit::InputRegisters, pdu(REG_CTRL_SEIZED), 1), 1);
+    if (!reply) return;
+
+    connect(reply, &QModbusReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (reply->error() == QModbusDevice::NoError)
+            emit controlOwnershipRead(reply->result().value(0) == 1);
+        else
+            emit errorOccurred(QString("AGV 控制权读取失败: %1").arg(reply->errorString()));
     });
 }
 
@@ -132,6 +181,7 @@ void AgvController::onStateChanged(QModbusDevice::State state)
     case QModbusDevice::ConnectedState:
         m_reconnectTimer->stop(); // 连接成功，停止重连定时器
         emit connected();
+        readControlOwnership();   // 联调自检：确认控制权未被外部抢占
         break;
     case QModbusDevice::UnconnectedState:
         emit disconnected();

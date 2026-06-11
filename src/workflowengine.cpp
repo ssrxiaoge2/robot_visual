@@ -21,8 +21,8 @@
  *                                                                   │ status==GRAB_DONE
  *                                                                   ▼
  *                                                             Step2_AgvMoving
- *                                                             （写 AGV Holding 1000）
- *                                                             （轮询 AGV Input 1001）
+ *                                                             （写 AGV [4x]00001）
+ *                                                             （轮询 AGV [3x]00007-00009）
  *                                                                   │ status==ARRIVED
  *                                                                   ▼
  *                                                             Step3_Unloading
@@ -132,7 +132,7 @@ void WorkflowEngine::setAgvController(AgvController *ctrl)
 
     m_agvCtrl = ctrl;
     if (ctrl) {
-        // AGV 状态读取完成 → 检查是否已到位（Input 1001）
+        // AGV 状态读取完成 → 检查是否已到达目标站点（[3x]00009）
         connect(ctrl, &AgvController::statusRead,
                 this, &WorkflowEngine::onAgvStatusRead);
     }
@@ -199,6 +199,8 @@ void WorkflowEngine::start(int simIntervalMs)
  */
 void WorkflowEngine::stop()
 {
+    const bool agvMoving = (m_state == EngineState::Step2_AgvMoving);
+
     m_running     = false;
     m_state       = EngineState::Idle;
     m_currentStep = -1;
@@ -208,6 +210,10 @@ void WorkflowEngine::stop()
     m_pollTimer->stop();
     m_stepTimer->stop();
     m_timeoutTimer->stop();
+
+    // 若停止时 AGV 正在行走，取消其导航任务（[0x]00006=1），避免空跑
+    if (agvMoving && agvReady())
+        m_agvCtrl->cancelNavigation();
 
     // 向机器人发送复位命令（CmdID=0），让机械臂回到原点等待位置
     if (robotReady())
@@ -357,17 +363,17 @@ void WorkflowEngine::enterStep1()
 /**
  * @brief Step 2 — AGV 行走
  *
- * 硬件模式：写目标工位到 AGV Holding 1000，轮询 Input 1001 直到 ARRIVED
+ * 硬件模式：写目标站点 id 到 AGV [4x]00001，轮询 [3x]00009 直到 Arrived(4)
  * 仿真模式：simTimer 超时后直接推进 Step 3
  */
 void WorkflowEngine::enterStep2()
 {
     m_state = EngineState::Step2_AgvMoving;
-    emit stepLog(QString("[步骤2] AGV 前往工位 %1").arg(m_station));
+    emit stepLog(QString("[步骤2] AGV 前往站点 %1").arg(m_station));
 
     if (agvReady()) {
-        m_agvCtrl->sendToStation(m_station); // 发送目标工位
-        startPollAndTimeout();               // 开始轮询 AGV 状态
+        m_agvCtrl->sendToStation(m_station); // 写目标站点，触发路径导航
+        startPollAndTimeout();               // 开始轮询 AGV 导航状态
     } else {
         emit stepLog(QStringLiteral("[步骤2][仿真] AGV 未连接，模拟行走等待"));
         m_stepTimer->start(m_simIntervalMs);
@@ -620,30 +626,40 @@ void WorkflowEngine::onRobotInputRegistersRead(int startAddr, const QList<quint1
 }
 
 /**
- * @brief AGV 状态读取完成回调
+ * @brief AGV 状态读取完成回调（[3x]00009 导航状态 + [3x]00007 当前导航站点）
  *
  * 仅在 Step2_AgvMoving 状态下处理。
- * Arrived(2) → 推进到 Step3
- * Fault(3)   → 立即停止所有定时器，发出 agvFaultDetected() 供 UI 更新指示灯，
+ * Arrived(4) 且站点匹配 → 推进到 Step3
+ * Failed(5)/Canceled(6)/Timeout(7) → 立即停止所有定时器，
+ *              发出 agvFaultDetected() 供 UI 更新指示灯，
  *              调用 stop()（内部写 CmdID=0 复位机械臂，防止悬臂悬停）
  */
-void WorkflowEngine::onAgvStatusRead(AgvController::AgvStatus status)
+void WorkflowEngine::onAgvStatusRead(AgvController::NavStatus status, int navStation)
 {
     if (m_state != EngineState::Step2_AgvMoving) return;
 
-    if (status == AgvController::AgvStatus::Arrived) {
-        emit stepLog(QString("[步骤2] AGV 到位（工位 %1）✓").arg(m_station));
+    switch (status) {
+    case AgvController::NavStatus::Arrived:
+        // 站点不匹配说明读到的是上一单残留的"到达"，等待本单状态刷新
+        if (navStation != m_station) break;
+        emit stepLog(QString("[步骤2] AGV 到达站点 %1 ✓").arg(m_station));
         m_pollTimer->stop();
         m_stepTimer->stop();
         m_timeoutTimer->stop();
         enterStep(3);
-    } else if (status == AgvController::AgvStatus::Fault) {
+        break;
+    case AgvController::NavStatus::Failed:
+    case AgvController::NavStatus::Canceled:
+    case AgvController::NavStatus::Timeout:
         m_pollTimer->stop();
         m_stepTimer->stop();
         m_timeoutTimer->stop();
-        emit engineError(QStringLiteral("[步骤2] AGV 故障（Input1001=3），停止流程并复位机器人"));
+        emit engineError(QString("[步骤2] AGV 导航异常（[3x]00009=%1），停止流程并复位机器人")
+                             .arg(static_cast<quint16>(status)));
         emit agvFaultDetected();  // UI 更新 AGV 指示灯为故障状态
         stop();                   // 写 CmdID=0 复位机械臂，防止悬臂悬空
+        break;
+    default:
+        break; // None/Waiting/Running/Paused：继续等待，下次轮询再判断
     }
-    // Moving(1) / Idle(0)：继续等待，下次轮询再判断
 }

@@ -5,7 +5,7 @@
 #include <QTimer>
 #include <QList>
 #include "workflowstep.h"
-#include "agvcontroller.h"   // 需要完整定义以使用 AgvController::AgvStatus
+#include "agvcontroller.h"   // 需要完整定义以使用 AgvController::NavStatus
 
 class RobotController;
 class VisionHttpClient;
@@ -20,7 +20,7 @@ class VisionHttpClient;
  * 五步流程：
  *   Step 0  就位/视觉 — 写 CmdID=8 → 轮询 Input1132==1 → 触发视觉推理 → 等待坐标回调
  *   Step 1  机器人抓取 — 写坐标(Holding 901-906) → 轮询 Input 1132 == GRAB_DONE(2)
- *   Step 2  AGV 行走  — 写目标工位(AGV Holding 1000) → 轮询 AGV Input 1001 == ARRIVED
+ *   Step 2  AGV 行走  — 写目标站点(AGV [4x]00001) → 轮询 [3x]00009 == Arrived(4)
  *   Step 3  机器人放料 — 写 CmdID=FLIP(Holding 900) → 轮询 Input 1132 == UNLOAD_DONE
  *   Step 4  复位等待  — 写 CmdID=RESET(Holding 900) → 轮询 Input 1132 == IDLE
  *
@@ -101,14 +101,14 @@ signals:
     void requestCameraCapture();
 
     // ── AGV 故障 ──────────────────────────────────────────────
-    /// AGV 报告故障（Input1001=3）时发出，供 UI 更新指示灯为故障状态
+    /// AGV 导航失败/取消/超时（[3x]00009 = 5/6/7）时发出，供 UI 更新指示灯为故障状态
     void agvFaultDetected();
 
 private slots:
     void onPollTick();
     void onStepTimeout();
     void onRobotInputRegistersRead(int startAddr, const QList<quint16> &values);
-    void onAgvStatusRead(AgvController::AgvStatus status);
+    void onAgvStatusRead(AgvController::NavStatus status, int navStation);
     void onRobotWriteCompleted();
 
 private:

@@ -5,6 +5,28 @@
 
 ---
 
+## 2026-06-11 | AGV 接入仙工真实 Modbus 寄存器映射（feature/agv-seer-modbus-dispatch）
+
+### 变更
+- `AgvController`：寄存器映射由占位假设（Holding 1000 / Input 1001）改为仙工官方 Modbus 寄存器表：
+  - 下发站点：FC06 写 [4x]00001（AGV 收到后自动清 0 并开始路径导航）
+  - 状态轮询：FC04 一次读 [3x]00007-00009（当前导航站点 / 定位状态 / 导航状态）
+  - 文档地址位以 00001 为起始，请求时经 `pdu()` 统一减 1 转为 0 基 PDU 地址
+- `AgvController`：`AgvStatus`（0-3 四态）替换为 `NavStatus`（0=无 1=等待 2=执行中 3=暂停 4=到达 5=失败 6=取消 7=超时）
+- `AgvController::statusRead` 信号携带导航状态 + 当前导航站点 id；`arrived()` 判定改为"状态==4 且站点与本次下发目标一致"，避免上一单残留的"到达"误判
+- `WorkflowEngine::onAgvStatusRead`：Failed/Canceled/Timeout 统一走故障分支（停定时器 → agvFaultDetected → stop() 复位机械臂）
+
+### 新增
+- `AgvController::cancelNavigation()`：FC05 写 [0x]00006=1 取消导航；`WorkflowEngine::stop()` 在 Step2 行走中停止时自动调用，避免 AGV 空跑
+- `AgvController::readControlOwnership()`：FC04 读 [3x]00043 控制权状态，连接成功后自动读取一次；`DeviceManager` 将结果输出到日志（联调自检）
+
+### 已知限制
+- 文档地址位减 1 的换算尚未在真机验证，联调时可读 [3x]00070-00073（AGV 自身 IP 四段）自检偏移是否正确
+- AGV 站点 id 为 uint16 数字，地图中的站点须配置数字编号（如 LM1 → 1）
+- 连续两单目标站点相同时，"残留到达"防护可能在 AGV 尚未刷新状态的极短窗口内误判（300ms 轮询周期内）
+
+---
+
 ## 2026-06-08 | 视觉引导取料功能（feature/vision-guided-pickup）
 
 ### 新增
