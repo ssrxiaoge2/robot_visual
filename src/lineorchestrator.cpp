@@ -170,7 +170,10 @@ void LineOrchestrator::onAgvMonitor(const AgvMonitorData &d)
         m_agvSeenMoving = true;
     if (!m_agvSeenMoving) return;
 
-    if (d.navStatus == 4 && d.navStation == m_expectedStation) {
+    // navStatus/navStation 只反映导航任务自身状态，可能在人工干预后残留"已到达"；
+    // 必须结合 curStation（AGV 实际所在站，独立轮询得到）确认物理位置真正到达目标站
+    if (d.navStatus == 4 && d.navStation == m_expectedStation
+        && d.curStation == m_expectedStation) {
         m_agvTimeout->stop();
         switch (m_state) {
         case LineState::AgvToPickup: enterState(LineState::ArmPicking);   break;
