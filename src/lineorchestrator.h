@@ -43,7 +43,6 @@ signals:
     void agvDispatchRequested(int workstation);
 
 private slots:
-    void onAgvArrived();
     void onAgvMonitor(const AgvMonitorData &d);
     void onArmCompleted(const QString &stageName);
     void onArmError(const QString &msg);
@@ -72,6 +71,10 @@ private:
     LineState m_state = LineState::Idle;
     AgvMonitorData m_lastMonitor;    // 最近一次 AGV 监控快照（初检读 curStation）
     QTimer *m_agvTimeout = nullptr;  // AGV 单步超时保护
+
+    int  m_expectedStation = 0;    // 本次 AGV 移动目标站，到达判定校验用
+    bool m_agvSeenMoving   = false; // 已观察到 AGV 进入导航，避免旧到达态误判
+    bool m_monitorValid    = false; // 是否已收到首帧监控（初检前置）
 
     int m_homeStation   = 1;
     int m_pickupStation = 3;

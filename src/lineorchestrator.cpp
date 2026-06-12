@@ -17,8 +17,6 @@ LineOrchestrator::LineOrchestrator(AgvController *agv,
                                    QObject *parent)
     : QObject(parent), m_agv(agv), m_arm(arm)
 {
-    connect(m_agv, &AgvController::arrived,
-            this, &LineOrchestrator::onAgvArrived);
     connect(m_agv, &AgvController::monitorUpdated,
             this, &LineOrchestrator::onAgvMonitor);
     connect(m_agv, &AgvController::errorOccurred, this, [this](const QString &msg) {
@@ -103,6 +101,10 @@ void LineOrchestrator::enterState(LineState s)
     switch (s) {
     case LineState::InitCheck:
         // AGV 在站1（真检测）+ 强制机械臂收姿态
+        if (!m_monitorValid) {
+            abort(QStringLiteral("初检失败：AGV 监控数据未就绪，请等待 AGV 连接稳定后重试"));
+            return;
+        }
         if (m_lastMonitor.curStation != m_homeStation) {
             abort(QStringLiteral("初检失败：AGV 当前站 %1 ≠ 待机站 %2，请先归位")
                       .arg(m_lastMonitor.curStation).arg(m_homeStation));
@@ -113,6 +115,8 @@ void LineOrchestrator::enterState(LineState s)
         break;
     case LineState::AgvToPickup:
         emit lineLog(QStringLiteral("[整线] AGV 前往取料站 %1").arg(m_pickupStation));
+        m_expectedStation = m_pickupStation;
+        m_agvSeenMoving = false;
         m_agvTimeout->start();
         emit agvDispatchRequested(m_pickupStation);
         break;
@@ -126,6 +130,8 @@ void LineOrchestrator::enterState(LineState s)
         break;
     case LineState::AgvToUnload:
         emit lineLog(QStringLiteral("[整线] AGV 前往倒料站 %1").arg(m_unloadStation));
+        m_expectedStation = m_unloadStation;
+        m_agvSeenMoving = false;
         m_agvTimeout->start();
         emit agvDispatchRequested(m_unloadStation);
         break;
@@ -139,6 +145,8 @@ void LineOrchestrator::enterState(LineState s)
         break;
     case LineState::AgvReturnHome:
         emit lineLog(QStringLiteral("[整线] AGV 返回待机站 %1").arg(m_homeStation));
+        m_expectedStation = m_homeStation;
+        m_agvSeenMoving = false;
         m_agvTimeout->start();
         emit agvDispatchRequested(m_homeStation);
         break;
@@ -147,29 +155,35 @@ void LineOrchestrator::enterState(LineState s)
     }
 }
 
-void LineOrchestrator::onAgvArrived()
-{
-    m_agvTimeout->stop();
-    switch (m_state) {
-    case LineState::AgvToPickup:   enterState(LineState::ArmPicking);   break;
-    case LineState::AgvToUnload:   enterState(LineState::ArmUnloading); break;
-    case LineState::AgvReturnHome:
-        emit lineLog(QStringLiteral("[整线] 回到待机站，流程完成"));
-        m_state = LineState::Idle;
-        emit lineFinished();
-        break;
-    default:
-        break;  // 非等待 AGV 的状态，忽略
-    }
-}
-
 void LineOrchestrator::onAgvMonitor(const AgvMonitorData &d)
 {
     m_lastMonitor = d;
-    // 等待 AGV 行走时，导航失败/取消/超时 → 中止
-    if ((m_state == LineState::AgvToPickup || m_state == LineState::AgvToUnload
-         || m_state == LineState::AgvReturnHome)
-        && d.navStatus >= 5 && d.navStatus <= 7) {
+    m_monitorValid = true;
+
+    const bool waitingAgv = (m_state == LineState::AgvToPickup
+                          || m_state == LineState::AgvToUnload
+                          || m_state == LineState::AgvReturnHome);
+    if (!waitingAgv) return;
+
+    // 先观察到 AGV 真正进入导航(等待1/执行2)，再判到达/失败，避免上一单残留态误判
+    if (d.navStatus == 1 || d.navStatus == 2)
+        m_agvSeenMoving = true;
+    if (!m_agvSeenMoving) return;
+
+    if (d.navStatus == 4 && d.navStation == m_expectedStation) {
+        m_agvTimeout->stop();
+        switch (m_state) {
+        case LineState::AgvToPickup: enterState(LineState::ArmPicking);   break;
+        case LineState::AgvToUnload: enterState(LineState::ArmUnloading); break;
+        case LineState::AgvReturnHome:
+            emit lineLog(QStringLiteral("[整线] 回到待机站，流程完成"));
+            m_state = LineState::Idle;
+            emit lineFinished();
+            break;
+        default:
+            break;
+        }
+    } else if (d.navStatus >= 5 && d.navStatus <= 7) {
         static const char *txt[] = {"", "", "", "", "", "失败", "取消", "超时"};
         abort(QStringLiteral("AGV 导航%1（状态 %2）")
                   .arg(QString::fromUtf8(txt[d.navStatus])).arg(d.navStatus));
