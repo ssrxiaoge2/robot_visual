@@ -330,6 +330,15 @@ void HuayanScheduler::resetAndProceed()
     });
 }
 
+void HuayanScheduler::completeStage()
+{
+    // 完成信号直连编排器，会在 emit 内同步启动下一阶段；必须先 stop() 清理本阶段，
+    // 否则 emit 返回后的 stop() 会把刚启动的下一阶段重置（m_stage 复位 None）
+    const QString done = stageName(m_stage);
+    stop();
+    emit stageCompleted(done);
+}
+
 void HuayanScheduler::stop()
 {
     m_pollTimer->stop();
@@ -538,8 +547,7 @@ void HuayanScheduler::executeCurrentStep()
             executeRunFunc(m_captureFuncName);
             break;
         case StageStep::None:
-            emit stageCompleted(stageName(m_stage));
-            stop();
+            completeStage();
             break;
         default:
             break;
@@ -566,8 +574,7 @@ void HuayanScheduler::executeCurrentStep()
                          m_emptyBoxPose.rx, m_emptyBoxPose.ry, m_emptyBoxPose.rz);
             break;
         case StageStep::None:
-            emit stageCompleted(stageName(m_stage));
-            stop();
+            completeStage();
             break;
         default:
             break;
@@ -580,8 +587,7 @@ void HuayanScheduler::executeCurrentStep()
             executeStackingFunction();
             break;
         case StageStep::None:
-            emit stageCompleted(stageName(m_stage));
-            stop();
+            completeStage();
             break;
         default:
             break;
@@ -594,8 +600,7 @@ void HuayanScheduler::executeCurrentStep()
             executeRunFunc(m_stowFuncName);
             break;
         case StageStep::None:
-            emit stageCompleted(stageName(m_stage));
-            stop();
+            completeStage();
             break;
         default:
             break;
@@ -612,8 +617,7 @@ void HuayanScheduler::executeCurrentStep()
             executeRunFunc(m_unloadFuncName);
             break;
         case StageStep::None:
-            emit stageCompleted(stageName(m_stage));
-            stop();
+            completeStage();
             break;
         default:
             break;

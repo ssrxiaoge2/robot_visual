@@ -135,6 +135,7 @@ private:
 
     void startWaitForIdle(int timeoutMs = 30000);
     void resetAndProceed();  // GrpReset 后延时再下发首条指令，避开 20018 ProgramStopped
+    void completeStage();    // 阶段收尾：先 stop() 再发完成信号，避免重置刚启动的下一阶段
 
     QString stageName(Stage stage) const;
     static int stepIndexFor(StageStep step);
