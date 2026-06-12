@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-06-11 | 界面清理与 AGV 调试面板（feature/ui-sdk-cleanup-agv-panel）
+
+### 变更
+- 移除机械臂 Modbus 路径：删除 `RobotController`、`WorkflowEngine` 及"机械臂 Modbus 控制"调试面板、机器人端口输入框、工具栏单步/步进延时
+- 工具栏开始/停止与右侧流程图改由华沿 SDK（`HuayanScheduler` 新增 `stepChanged` 信号）驱动，流程图节点更新为：视觉定位/SDK 取料/翻转卸料/AGV 运输(占位)/码垛复位
+- 顶部"机械臂"指示灯改为反映 SDK 连接状态；配置面板"机器人 IP"改"机械臂 IP"，测试按钮改 ping 10003
+- 停止时同时取消 AGV 导航，避免空跑
+
+### 新增
+- AGV 调试面板：工位派单（出发/取消/暂停/继续）、工位→站点 id 映射表（QSettings 持久化，未配置回退 id=工位号）、实时监控区（导航/站点/定位/电量/控制权，1s 轮询）
+- `AgvController`：`pauseNavigation`/`resumeNavigation`（[0x]00004/00005）、监控轮询 `monitorUpdated(AgvMonitorData)`、在途请求守卫
+- `DeviceManager`：`resolveStation`/`setStationMap` 与 AGV 转发槽 `dispatchAgv`/`cancelAgvNav`/`pauseAgvNav`/`resumeAgvNav`
+
+### 已知限制
+- AGV 自动并入 SDK 调度流程未实现（流程图 AGV 节点为占位，后续整线流程补齐）
+- `VisionHttpClient::transformToRegisters` 寄存器路径成为死代码，待后续清理
+
+---
+
 ## 2026-06-11 | AGV 接入仙工真实 Modbus 寄存器映射（feature/agv-seer-modbus-dispatch）
 
 ### 变更
