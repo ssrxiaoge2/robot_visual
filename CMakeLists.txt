@@ -21,6 +21,8 @@ set(PROJECT_SOURCES
         src/workflowstep.h
         src/huayanScheduler.cpp
         src/huayanScheduler.h
+        src/lineorchestrator.cpp
+        src/lineorchestrator.h
         src/devicemanager.cpp
         src/devicemanager.h
         src/agvcontroller.cpp
