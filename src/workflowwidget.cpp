@@ -12,14 +12,14 @@
 #include <QPainterPath>
 #include <QFont>
 
-// ── 默认步骤定义（SDK 调度阶段，索引与 HuayanScheduler::stepIndexFor 对应）──
+// ── 默认步骤定义（整线流程节点，索引与 LineOrchestrator::emitStepForState 对应）──
 // 此处仅用于 UI 展示，不含业务逻辑
 static const QList<WorkflowStep> kDefaultSteps = {
-    {QStringLiteral("视觉定位"),  QStringLiteral("Orbbec+SAM2"), QColor(65,  130, 220)},
-    {QStringLiteral("SDK 取料"),  QStringLiteral("华沿 SDK"),    QColor(220, 160,  50)},
-    {QStringLiteral("翻转卸料"),  QStringLiteral("华沿 SDK"),    QColor(180, 110, 210)},
-    {QStringLiteral("AGV 运输"),  QStringLiteral("仙工 Modbus"), QColor(60,  180, 120)},
-    {QStringLiteral("码垛复位"),  QStringLiteral("下一轮"),      QColor(130, 130, 130)},
+    {QStringLiteral("AGV→取料站"), QStringLiteral("仙工 Modbus"), QColor(60,  180, 120)},
+    {QStringLiteral("机械臂取料"), QStringLiteral("视觉夹取"),    QColor(220, 160,  50)},
+    {QStringLiteral("AGV→倒料站"), QStringLiteral("收姿态+运输"), QColor(60,  180, 120)},
+    {QStringLiteral("倒料"),       QStringLiteral("华沿 SDK"),    QColor(180, 110, 210)},
+    {QStringLiteral("回站待机"),   QStringLiteral("收姿态+返回"), QColor(130, 130, 130)},
 };
 
 // ── 构造 ─────────────────────────────────────────────────────
