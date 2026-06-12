@@ -67,6 +67,8 @@ DeviceManager::DeviceManager(QObject *parent)
     // 编排器请求派单 → 经映射表解析后下发（复用 dispatchAgv）
     connect(m_lineOrch, &LineOrchestrator::agvDispatchRequested,
             this, &DeviceManager::dispatchAgv);
+    // 注入工位→站点解析器：到达判定须与 AGV 监控回报的物理站点号同空间比较
+    m_lineOrch->setStationResolver([this](int ws) { return resolveStation(ws); });
     connect(m_lineOrch, &LineOrchestrator::lineLog,
             this, &DeviceManager::logMessage);
     connect(m_lineOrch, &LineOrchestrator::lineError, this, [this](const QString &msg) {

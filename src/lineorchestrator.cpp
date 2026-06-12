@@ -44,6 +44,11 @@ void LineOrchestrator::setStations(int home, int pickup, int unload)
     m_unloadStation = unload;
 }
 
+int LineOrchestrator::resolvedStation(int workstation) const
+{
+    return m_resolveStation ? m_resolveStation(workstation) : workstation;
+}
+
 void LineOrchestrator::start()
 {
     if (m_state != LineState::Idle) return;
@@ -105,9 +110,9 @@ void LineOrchestrator::enterState(LineState s)
             abort(QStringLiteral("初检失败：AGV 监控数据未就绪，请等待 AGV 连接稳定后重试"));
             return;
         }
-        if (m_lastMonitor.curStation != m_homeStation) {
+        if (m_lastMonitor.curStation != resolvedStation(m_homeStation)) {
             abort(QStringLiteral("初检失败：AGV 当前站 %1 ≠ 待机站 %2，请先归位")
-                      .arg(m_lastMonitor.curStation).arg(m_homeStation));
+                      .arg(m_lastMonitor.curStation).arg(resolvedStation(m_homeStation)));
             return;
         }
         emit lineLog(QStringLiteral("[整线] AGV 已在站%1，强制机械臂收姿态").arg(m_homeStation));
@@ -115,7 +120,7 @@ void LineOrchestrator::enterState(LineState s)
         break;
     case LineState::AgvToPickup:
         emit lineLog(QStringLiteral("[整线] AGV 前往取料站 %1").arg(m_pickupStation));
-        m_expectedStation = m_pickupStation;
+        m_expectedStation = resolvedStation(m_pickupStation);
         m_agvSeenMoving = false;
         m_agvTimeout->start();
         emit agvDispatchRequested(m_pickupStation);
@@ -130,7 +135,7 @@ void LineOrchestrator::enterState(LineState s)
         break;
     case LineState::AgvToUnload:
         emit lineLog(QStringLiteral("[整线] AGV 前往倒料站 %1").arg(m_unloadStation));
-        m_expectedStation = m_unloadStation;
+        m_expectedStation = resolvedStation(m_unloadStation);
         m_agvSeenMoving = false;
         m_agvTimeout->start();
         emit agvDispatchRequested(m_unloadStation);
@@ -145,7 +150,7 @@ void LineOrchestrator::enterState(LineState s)
         break;
     case LineState::AgvReturnHome:
         emit lineLog(QStringLiteral("[整线] AGV 返回待机站 %1").arg(m_homeStation));
-        m_expectedStation = m_homeStation;
+        m_expectedStation = resolvedStation(m_homeStation);
         m_agvSeenMoving = false;
         m_agvTimeout->start();
         emit agvDispatchRequested(m_homeStation);

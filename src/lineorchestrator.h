@@ -3,6 +3,7 @@
 
 #include <QObject>
 #include <QTimer>
+#include <functional>
 #include "agvcontroller.h"   // AgvMonitorData 需完整定义
 
 class HuayanScheduler;
@@ -24,6 +25,10 @@ public:
 
     /// 工位号（试测默认：待机1 / 取料3 / 倒料4），可经 setter 改
     void setStations(int home, int pickup, int unload);
+
+    /// 工位号→AGV 物理站点号解析器（注入 DeviceManager::resolveStation）。
+    /// 派单走工位号，但 AGV 监控回报的是物理站点号，到达判定须先解析为同一空间比较。
+    void setStationResolver(std::function<int(int)> resolver) { m_resolveStation = std::move(resolver); }
 
     bool isRunning() const { return m_state != LineState::Idle; }
 
@@ -64,6 +69,7 @@ private:
     void haltDevices();              // 取消 AGV 导航 + 停机械臂 + 回 Idle
     void abort(const QString &reason);
     void emitStepForState(LineState s);
+    int  resolvedStation(int workstation) const; // 工位→物理站点，未注入解析器时按原值
 
     AgvController   *m_agv = nullptr;
     HuayanScheduler *m_arm = nullptr;
@@ -79,6 +85,8 @@ private:
     int m_homeStation   = 1;
     int m_pickupStation = 3;
     int m_unloadStation = 4;
+
+    std::function<int(int)> m_resolveStation; // 工位→物理站点，DeviceManager 注入
 
     static constexpr int kAgvTimeoutMs = 120000; // AGV 单步 120s 超时
 };
