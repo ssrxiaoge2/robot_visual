@@ -51,8 +51,8 @@ public:
     void startStageOne();
     void startStageTwo();
     void startStageThree();
-    void startStow();    // 收运行姿态（func_yun_xing_zhong）
-    void startUnload();  // 倒料（func_daoliao_1_point → func_daoliao）
+    void startStow();    // 收运行姿态（Func_yun_xing_zhong）
+    void startUnload();  // 倒料（Func_daoliao_1_point → Func_daoliao）
     void stop();
 
     void setSurveyPose(const Pose &p);
@@ -172,9 +172,9 @@ private:
     QString m_gripFuncName    = QStringLiteral("Func_jiajin");
     QString m_releaseFuncName = QStringLiteral("Func_songzhua");
 
-    QString m_stowFuncName        = QStringLiteral("func_yun_xing_zhong");
-    QString m_unloadPointFuncName = QStringLiteral("func_daoliao_1_point");
-    QString m_unloadFuncName      = QStringLiteral("func_daoliao");
+    QString m_stowFuncName        = QStringLiteral("Func_yun_xing_zhong");
+    QString m_unloadPointFuncName = QStringLiteral("Func_daoliao_1_point");
+    QString m_unloadFuncName      = QStringLiteral("Func_daoliao");
 };
 
 #endif // HUAYANSCHEDULER_H
