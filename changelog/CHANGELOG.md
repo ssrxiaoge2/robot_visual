@@ -20,6 +20,7 @@
 
 ### 修复（真机试跑后）
 - 收姿态/倒料函数名首字母改为大写（`Func_yun_xing_zhong`/`Func_daoliao_1_point`/`Func_daoliao`），与机械臂控制器程序中已示教的函数名一致，修复 `func_yun_xing_zhong` 报错 20601（No such function in the program）
+- 阶段间快速衔接（取料→收姿态、倒料→收姿态）调用收姿态函数报错 20018（command prohibited in current robot state, ProgramStopped）：上一阶段完成时 `stop()` 的 `GrpStop` 使机器人进入 ProgramStopped 态，而 `GrpReset` 退出该态是异步的，复位后立即 `RunFunc` 会撞此态。`startStageOne`/`startStow`/`startUnload` 改用 `resetAndProceed`，复位后延时 `kResetSettleMs`(500ms) 再下发首条指令（机器人空闲启动无此问题，故仅延时无副作用）
 - 编排器到达判定的工位/站点号空间不一致：派单用工位号经映射表转物理站点号（如工位3→站点5），但 AGV 监控回报的是物理站点号，原先 `m_expectedStation` 存的是工位号，导致到达取料站永不命中（拍照函数不触发），且物理站点号偶然等于工位号时误判到达。新增 `setStationResolver` 注入 `DeviceManager::resolveStation`，到达判定与初检 `curStation` 比较前统一解析为物理站点号
 - `LineOrchestrator::onAgvMonitor` 到达判定增加 `curStation == m_expectedStation` 校验：`navStatus`/`navStation` 仅反映导航任务自身状态，人工干预导航后可能残留"已到达"但 AGV 实际未到目标站，导致流程提前推进到下一步
 

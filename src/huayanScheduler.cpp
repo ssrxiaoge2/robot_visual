@@ -23,6 +23,9 @@ static constexpr double kGrabTolerance     = 2.0;    // XY 偏移收敛阈值(mm
 static constexpr double kRzTolerance       = 1.0;    // Rz 旋转收敛阈值(度)
 static constexpr int    kMaxGrabIterations = 6;      // 最大矫正迭代次数（防死循环）
 static constexpr int    kVisionSettleMs    = 2000;   // 移动后等视觉出新帧(ms)
+// GrpReset 退出 ProgramStopped 态是异步的；阶段间快速衔接时（取料→收姿态、倒料→收姿态）
+// 复位后立即下发 RunFunc 会撞 20018，须等控制器状态切换。机器人空闲时无此延迟需求。
+static constexpr int    kResetSettleMs     = 500;
 
 // Z 下探参数：下探量 = 视觉深度 - kGrabZClearance，受 kMaxDescend 上限约束
 // kGrabZClearance 标定法：固定一物体，记视觉深度 D 和能夹到的下探量 H，则 = D - H
@@ -255,16 +258,12 @@ void HuayanScheduler::startStageOne()
     if (!ensureConnected())
         return;
 
-    // 上一轮 stop() 的 GrpStop 会让机器人进入 ProgramStopped 态（20018），
-    // 启动前先复位恢复可运动状态
-    HRIF_GrpReset(m_boxID, m_rbtID);
-
     m_stage = Stage::StageOne;
     m_stageStep = StageStep::MoveToSurvey;
     m_grabIterations = 0;
 
     emit stageStarted(stageName(m_stage));
-    proceedStage();
+    resetAndProceed();
 }
 
 void HuayanScheduler::startStageTwo()
@@ -301,13 +300,11 @@ void HuayanScheduler::startStow()
     if (!ensureConnected())
         return;
 
-    HRIF_GrpReset(m_boxID, m_rbtID);
-
     m_stage = Stage::Stow;
     m_stageStep = StageStep::StowArm;
 
     emit stageStarted(stageName(m_stage));
-    proceedStage();
+    resetAndProceed();
 }
 
 void HuayanScheduler::startUnload()
@@ -315,13 +312,22 @@ void HuayanScheduler::startUnload()
     if (!ensureConnected())
         return;
 
-    HRIF_GrpReset(m_boxID, m_rbtID);
-
     m_stage = Stage::Unload;
     m_stageStep = StageStep::MoveToUnloadPoint;
 
     emit stageStarted(stageName(m_stage));
-    proceedStage();
+    resetAndProceed();
+}
+
+void HuayanScheduler::resetAndProceed()
+{
+    // GrpReset 退出 ProgramStopped 是异步的，复位后延时再下发首条指令；
+    // 等待期间若被 stop() 打断（m_stage 置 None）则不再继续
+    HRIF_GrpReset(m_boxID, m_rbtID);
+    QTimer::singleShot(kResetSettleMs, this, [this] {
+        if (m_stage != Stage::None)
+            proceedStage();
+    });
 }
 
 void HuayanScheduler::stop()

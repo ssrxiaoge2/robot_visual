@@ -134,6 +134,7 @@ private:
     bool executeStackingFunction();
 
     void startWaitForIdle(int timeoutMs = 30000);
+    void resetAndProceed();  // GrpReset 后延时再下发首条指令，避开 20018 ProgramStopped
 
     QString stageName(Stage stage) const;
     static int stepIndexFor(StageStep step);
