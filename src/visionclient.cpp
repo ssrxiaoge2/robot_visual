@@ -173,6 +173,15 @@ void VisionHttpClient::checkStatus()
 
 // ── 推理结果解析 ─────────────────────────────────────────────
 
+// 目标到图像中心的平面距离平方（mm²），用于同层时择近
+static double centerDistSq(const QJsonObject &obj)
+{
+    const QJsonObject off = obj.value("offset_mm").toObject();
+    const double x = off.value("x").toDouble();
+    const double y = off.value("y").toDouble();
+    return x * x + y * y;
+}
+
 /**
  * @brief 解析 GET /inference 的 JSON 响应
  *
@@ -186,6 +195,9 @@ void VisionHttpClient::checkStatus()
  *     "confidence": 0.95                      // 置信度
  *   }]
  * }
+ *
+ * 多目标抓取优先级：深度最小（离相机最近/堆叠最上层）优先；深度差在
+ * kSameLayerTolMm 内视为并排平放同层，改取离图像中心最近者。
  */
 void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
 {
@@ -208,14 +220,25 @@ void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
         return;
     }
 
-    // 取第一个目标（置信度最高，视觉服务已按置信度排序）
     const QJsonArray objects = root.value("objects").toArray();
     if (objects.isEmpty()) {
         emit noObjectDetected();
         return;
     }
 
-    const QJsonObject obj      = objects.first().toObject();
+    // 线性挑选最优抓取目标：深度小的优先，同层（深度差 < 容差）时离中心近的优先
+    QJsonObject obj = objects.first().toObject();
+    for (int i = 1; i < objects.size(); ++i) {
+        const QJsonObject cand = objects.at(i).toObject();
+        const double dz = cand.value("depth_compensated").toDouble()
+                        - obj.value("depth_compensated").toDouble();
+        const bool prefer = (qAbs(dz) >= kSameLayerTolMm)
+                          ? dz < 0.0                                  // 不同层：候选更浅则优先
+                          : centerDistSq(cand) < centerDistSq(obj);   // 同层：候选离中心更近则优先
+        if (prefer)
+            obj = cand;
+    }
+
     const QJsonObject offsetMm = obj.value("offset_mm").toObject();
 
     const float cx    = static_cast<float>(offsetMm.value("x").toDouble());  // X 偏移（mm）

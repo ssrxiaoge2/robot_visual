@@ -16,6 +16,7 @@
 - 工具栏开始/停止改驱动整线流程编排器（原为单独机械臂取料 startStageOne）
 - 流程图节点改为整线视角：AGV→取料站 / 机械臂取料 / AGV→倒料站 / 倒料 / 回站待机
 - 初始检查：AGV 须在待机站1（真检测 curStation）、机械臂强制收姿态
+- `VisionHttpClient` 多目标抓取改为显式优先级：深度最小（离相机最近/堆叠最上层）优先，深度差小于同层容差（`kSameLayerTolMm`=20mm）时视为并排平放，改取离图像中心最近者；原为直接取数组第一个
 
 ### 修复（真机试跑后）
 - 收姿态/倒料函数名首字母改为大写（`Func_yun_xing_zhong`/`Func_daoliao_1_point`/`Func_daoliao`），与机械臂控制器程序中已示教的函数名一致，修复 `func_yun_xing_zhong` 报错 20601（No such function in the program）

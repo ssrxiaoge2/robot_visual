@@ -44,6 +44,10 @@ public:
     /// ⚠ 若机器人角度寄存器单位不同（如 0.01°），修改此值
     static constexpr float kRzScale = 1000.0f;
 
+    /// 多目标同层容差（mm）：深度差小于此值视为并排平放同层，改按离图像中心距离择近
+    /// 须远小于料箱高度（110mm），仅覆盖深度噪声；少一层即差约 110mm，会判为不同层
+    static constexpr float kSameLayerTolMm = 20.0f;
+
     explicit VisionHttpClient(QObject *parent = nullptr);
 
     // ── 服务器配置 ───────────────────────────────────────────
@@ -82,7 +86,7 @@ public slots:
     /**
      * @brief 发起一次推理结果查询（GET /inference）
      *
-     * 成功且有目标：解析第一个目标，应用手眼变换后
+     * 成功且有目标：按抓取优先级选出一个目标，应用手眼变换后
      *   emit coordinatesReady(6 个寄存器值：X Y Z Rx Ry Rz)
      * 目标数 == 0：emit noObjectDetected()
      * 网络/解析错误：emit errorOccurred(msg)
