@@ -3,7 +3,7 @@
  * @brief LineOrchestrator 整线流程编排器实现
  *
  * 推进机制：
- *   AGV 移动步 — emit agvDispatchRequested(工位号) → 等 AgvController::arrived
+ *   AGV 移动步 — emit agvDispatchRequested(工位号) → 监听 monitorUpdated 判到达
  *   机械臂步   — 调 HuayanScheduler::startXxx → 等 stageCompleted
  *   出错       — abort()：停机 + lineError
  * 完成判定靠自身 m_state（任意时刻只有一个子动作在飞），不靠 stageName 字符串。
