@@ -2,6 +2,7 @@
 #include "agvcontroller.h"
 #include "visionclient.h"
 #include "huayanScheduler.h"
+#include "lineorchestrator.h"
 
 #include <QSettings>
 #include <QTcpSocket>
@@ -60,6 +61,16 @@ DeviceManager::DeviceManager(QObject *parent)
     connect(m_huayanScheduler, &HuayanScheduler::stageError,
             this, [this](const QString &msg) {
         emit logMessage(QStringLiteral("[华沿] 错误：%1").arg(msg));
+    });
+
+    m_lineOrch = new LineOrchestrator(m_agvCtrl, m_huayanScheduler, this);
+    // 编排器请求派单 → 经映射表解析后下发（复用 dispatchAgv）
+    connect(m_lineOrch, &LineOrchestrator::agvDispatchRequested,
+            this, &DeviceManager::dispatchAgv);
+    connect(m_lineOrch, &LineOrchestrator::lineLog,
+            this, &DeviceManager::logMessage);
+    connect(m_lineOrch, &LineOrchestrator::lineError, this, [this](const QString &msg) {
+        emit logMessage(QStringLiteral("[整线错误] %1").arg(msg));
     });
 
     loadStationMap();

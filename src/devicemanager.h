@@ -9,6 +9,7 @@
 class AgvController;
 class VisionHttpClient;
 class HuayanScheduler;
+class LineOrchestrator;
 
 class DeviceManager : public QObject
 {
@@ -30,6 +31,7 @@ public:
     AgvController    *agvController()    const { return m_agvCtrl;     }
     VisionHttpClient *visionClient()     const { return m_visionClient; }
     HuayanScheduler  *huayanScheduler() const { return m_huayanScheduler; }
+    LineOrchestrator *lineOrchestrator() const { return m_lineOrch; }
     bool              lightIsOn()        const { return m_lightOn;      }
     const Config     &config()           const { return m_cfg;          }
 
@@ -74,6 +76,7 @@ private:
     AgvController    *m_agvCtrl     = nullptr;
     VisionHttpClient *m_visionClient = nullptr;
     HuayanScheduler  *m_huayanScheduler = nullptr;
+    LineOrchestrator *m_lineOrch = nullptr;
     Config            m_cfg;
     bool              m_lightOn      = false;
     QHash<int, int>   m_stationMap;
