@@ -688,10 +688,11 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
         if (qAbs(v) < 0.5) return;   // 忽略 <0.5mm 的微小偏移
         m_grabMoves.append({ poseId, v >= 0 ? 1 : 0, qAbs(v) });
     };
-    // 方向修正（联机实测）：X 方向一致直接施加，Y 方向相反需取反
-    addMove(0, x);   // X
-    addMove(1, -y);  // Y
-    addMove(5, rz);  // Rz 旋转（方向先假设不取反，联机验证后若反则改为 -rz）
+    // 方向修正（联机实测）：X 方向一致直接施加，Y 与 Rz 方向相反需取反
+    // Rz 取反：眼在手上闭环时，按 +rz 旋转会使下帧视觉角同向变大、机械臂持续旋转累积至 180°
+    addMove(0, x);    // X
+    addMove(1, -y);   // Y
+    addMove(5, -rz);  // Rz 旋转
 
     m_grabMoveIdx = 0;
     m_stageStep = StageStep::MoveToGrab;
