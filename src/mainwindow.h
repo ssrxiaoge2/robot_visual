@@ -58,7 +58,11 @@ private slots:
     void onHuayanStageStarted(const QString &stageName);
     void onHuayanStageCompleted(const QString &stageName);
     void onHuayanStageError(const QString &msg);
-    void onSdkStepChanged(int stepIdx);
+    void onLineStepChanged(int stepIdx);
+    void onLineStarted();
+    void onLineFinished();
+    void onLineStopped();
+    void onLineError(const QString &reason);
 
     // ── 响应业务层信号（纯 UI 更新）────────────────────────────
     void onLightChanged(bool on, bool success);

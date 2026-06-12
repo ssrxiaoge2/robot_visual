@@ -43,6 +43,7 @@
 
 #include "handeyedialog.h"
 #include "huayanScheduler.h"
+#include "lineorchestrator.h"
 
 // ============================================================
 //  构造 / 析构
@@ -127,8 +128,6 @@ MainWindow::MainWindow(QWidget *parent)
                 this, &MainWindow::onHuayanStageCompleted);
         connect(hs, &HuayanScheduler::stageError,
                 this, &MainWindow::onHuayanStageError);
-        connect(hs, &HuayanScheduler::stepChanged,
-                this, &MainWindow::onSdkStepChanged);
         // 顶部"机械臂"指示灯跟随 SDK 连接状态
         connect(hs, &HuayanScheduler::connected, this, [this]() {
             m_indRobot->setStatus(true, QStringLiteral("SDK 已连接"));
@@ -136,6 +135,22 @@ MainWindow::MainWindow(QWidget *parent)
         connect(hs, &HuayanScheduler::disconnected, this, [this]() {
             m_indRobot->setStatus(false, QStringLiteral("离线"));
         });
+    }
+
+    // ── 整线流程编排器信号连接 ────────────────────────────────
+    {
+        LineOrchestrator *lo = m_devMgr->lineOrchestrator();
+        Q_ASSERT(lo != nullptr);
+        connect(lo, &LineOrchestrator::stepChanged,
+                this, &MainWindow::onLineStepChanged);
+        connect(lo, &LineOrchestrator::lineStarted,
+                this, &MainWindow::onLineStarted);
+        connect(lo, &LineOrchestrator::lineFinished,
+                this, &MainWindow::onLineFinished);
+        connect(lo, &LineOrchestrator::lineStopped,
+                this, &MainWindow::onLineStopped);
+        connect(lo, &LineOrchestrator::lineError,
+                this, &MainWindow::onLineError);
     }
 
     log(QStringLiteral("===== 上位机可视化系统启动 ====="));
@@ -813,13 +828,12 @@ void MainWindow::onStart()
     buildConfig(cfg);
     m_devMgr->setConfig(cfg);
     m_devMgr->applyConfig();                       // 重连 AGV Modbus + 更新视觉 URL
-    m_devMgr->huayanScheduler()->startStageOne();  // SDK 取料流程
+    m_devMgr->lineOrchestrator()->start();         // 整线流程
 }
 
 void MainWindow::onStop()
 {
-    m_devMgr->huayanScheduler()->stop();
-    m_devMgr->cancelAgvNav();   // AGV 行走中一并取消，避免停止后空跑
+    m_devMgr->lineOrchestrator()->stop();          // 内部已含取消 AGV + 停机械臂
     m_flow->setActiveStep(-1);
     m_lblStep->setText(QStringLiteral("已停止"));
     m_btnStart->setEnabled(true);
@@ -1023,12 +1037,44 @@ void MainWindow::onHuayanSpeedChanged(int percent)
     m_devMgr->huayanScheduler()->setSpeedOverride(percent);
 }
 
-/// SDK 调度步骤推进：高亮流程图节点并更新工具栏当前步骤标签
-void MainWindow::onSdkStepChanged(int stepIdx)
+/// 整线步骤推进：高亮流程图节点并更新工具栏当前步骤标签
+void MainWindow::onLineStepChanged(int stepIdx)
 {
     m_flow->setActiveStep(stepIdx);
     if (stepIdx >= 0 && stepIdx < m_flow->steps().size())
         m_lblStep->setText(m_flow->steps()[stepIdx].name);
+}
+
+void MainWindow::onLineStarted()
+{
+    m_btnStart->setEnabled(false);
+    m_btnStop->setEnabled(true);
+}
+
+void MainWindow::onLineFinished()
+{
+    m_btnStart->setEnabled(true);
+    m_btnStop->setEnabled(false);
+    m_flow->setActiveStep(-1);
+    m_lblCycle->setText(QString::number(++m_cycleCount));
+    m_lblStep->setText(QStringLiteral("完成"));
+}
+
+void MainWindow::onLineStopped()
+{
+    m_btnStart->setEnabled(true);
+    m_btnStop->setEnabled(false);
+    m_flow->setActiveStep(-1);
+    m_lblStep->setText(QStringLiteral("已停止"));
+}
+
+void MainWindow::onLineError(const QString &reason)
+{
+    m_btnStart->setEnabled(true);
+    m_btnStop->setEnabled(false);
+    m_flow->setActiveStep(-1);
+    m_lblStep->setText(QStringLiteral("错误"));
+    log(QStringLiteral("整线流程中止：%1").arg(reason));
 }
 
 void MainWindow::onHuayanStageStarted(const QString &stageName)
