@@ -16,7 +16,9 @@ public:
         None,
         StageOne,
         StageTwo,
-        StageThree
+        StageThree,
+        Stow,
+        Unload
     };
 
     struct Pose {
@@ -49,6 +51,8 @@ public:
     void startStageOne();
     void startStageTwo();
     void startStageThree();
+    void startStow();    // 收运行姿态（func_yun_xing_zhong）
+    void startUnload();  // 倒料（func_daoliao_1_point → func_daoliao）
     void stop();
 
     void setSurveyPose(const Pose &p);
@@ -88,7 +92,10 @@ private:
         FlipUnload,
         ReleaseLoad,
         MoveEmptyBox,
-        ExecuteStackingFunction
+        ExecuteStackingFunction,
+        StowArm,
+        MoveToUnloadPoint,
+        RunUnloadFunc
     };
 
     // 工具坐标系单轴相对运动（HRIF_MoveRelL），用于视觉偏移的分轴串联微调
@@ -164,6 +171,10 @@ private:
     QString m_captureFuncName = QStringLiteral("Func_capture");
     QString m_gripFuncName    = QStringLiteral("Func_jiajin");
     QString m_releaseFuncName = QStringLiteral("Func_songzhua");
+
+    QString m_stowFuncName        = QStringLiteral("func_yun_xing_zhong");
+    QString m_unloadPointFuncName = QStringLiteral("func_daoliao_1_point");
+    QString m_unloadFuncName      = QStringLiteral("func_daoliao");
 };
 
 #endif // HUAYANSCHEDULER_H

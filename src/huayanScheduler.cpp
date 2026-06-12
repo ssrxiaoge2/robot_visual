@@ -52,6 +52,10 @@ QString stageName(HuayanScheduler::Stage stage)
         return QStringLiteral("阶段二：卸料");
     case HuayanScheduler::Stage::StageThree:
         return QStringLiteral("阶段三：码垛");
+    case HuayanScheduler::Stage::Stow:
+        return QStringLiteral("收姿态");
+    case HuayanScheduler::Stage::Unload:
+        return QStringLiteral("倒料");
     default:
         return QStringLiteral("未知阶段");
     }
@@ -292,6 +296,34 @@ void HuayanScheduler::startStageThree()
     proceedStage();
 }
 
+void HuayanScheduler::startStow()
+{
+    if (!ensureConnected())
+        return;
+
+    HRIF_GrpReset(m_boxID, m_rbtID);
+
+    m_stage = Stage::Stow;
+    m_stageStep = StageStep::StowArm;
+
+    emit stageStarted(stageName(m_stage));
+    proceedStage();
+}
+
+void HuayanScheduler::startUnload()
+{
+    if (!ensureConnected())
+        return;
+
+    HRIF_GrpReset(m_boxID, m_rbtID);
+
+    m_stage = Stage::Unload;
+    m_stageStep = StageStep::MoveToUnloadPoint;
+
+    emit stageStarted(stageName(m_stage));
+    proceedStage();
+}
+
 void HuayanScheduler::stop()
 {
     m_pollTimer->stop();
@@ -373,6 +405,8 @@ void HuayanScheduler::proceedStage()
     case Stage::StageOne:
     case Stage::StageTwo:
     case Stage::StageThree:
+    case Stage::Stow:
+    case Stage::Unload:
         executeCurrentStep();
         break;
     default:
@@ -405,6 +439,15 @@ void HuayanScheduler::advanceStep()
         break;
     case Stage::StageThree:
         m_stageStep = StageStep::None;
+        break;
+    case Stage::Stow:
+        m_stageStep = StageStep::None;
+        break;
+    case Stage::Unload:
+        if (m_stageStep == StageStep::MoveToUnloadPoint)
+            m_stageStep = StageStep::RunUnloadFunc;
+        else
+            m_stageStep = StageStep::None;
         break;
     default:
         m_stageStep = StageStep::None;
@@ -529,6 +572,38 @@ void HuayanScheduler::executeCurrentStep()
         case StageStep::ExecuteStackingFunction:
             emit logMessage(QStringLiteral("[阶段三] 执行码垛脚本函数"));
             executeStackingFunction();
+            break;
+        case StageStep::None:
+            emit stageCompleted(stageName(m_stage));
+            stop();
+            break;
+        default:
+            break;
+        }
+        break;
+    case Stage::Stow:
+        switch (m_stageStep) {
+        case StageStep::StowArm:
+            emit logMessage(QStringLiteral("[收姿态] 调用 %1").arg(m_stowFuncName));
+            executeRunFunc(m_stowFuncName);
+            break;
+        case StageStep::None:
+            emit stageCompleted(stageName(m_stage));
+            stop();
+            break;
+        default:
+            break;
+        }
+        break;
+    case Stage::Unload:
+        switch (m_stageStep) {
+        case StageStep::MoveToUnloadPoint:
+            emit logMessage(QStringLiteral("[倒料] 移动到倒料点位 %1").arg(m_unloadPointFuncName));
+            executeRunFunc(m_unloadPointFuncName);
+            break;
+        case StageStep::RunUnloadFunc:
+            emit logMessage(QStringLiteral("[倒料] 执行倒料 %1").arg(m_unloadFuncName));
+            executeRunFunc(m_unloadFuncName);
             break;
         case StageStep::None:
             emit stageCompleted(stageName(m_stage));
