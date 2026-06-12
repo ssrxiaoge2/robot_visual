@@ -9,13 +9,17 @@
 
 ### 新增
 - `LineOrchestrator`：整线流程编排器，单次串起 AGV取料站→机械臂取料→收姿态→AGV倒料站→倒料→收姿态→AGV回站1；纯协调层，AGV 移动调 `dispatchAgv` 经 `monitorUpdated` 判到达，机械臂调 `startStageOne`/`startStow`/`startUnload` 等 `stageCompleted`；任一步出错就地停机（取消 AGV + 停机械臂）
-- `HuayanScheduler`：新增 `Stage::Stow`（func_yun_xing_zhong 收姿态）、`Stage::Unload`（func_daoliao_1_point → func_daoliao），`startStow`/`startUnload` 公开方法
+- `HuayanScheduler`：新增 `Stage::Stow`（Func_yun_xing_zhong 收姿态）、`Stage::Unload`（Func_daoliao_1_point → Func_daoliao），`startStow`/`startUnload` 公开方法
 - `DeviceManager`：持有 `LineOrchestrator`，接线 `agvDispatchRequested → dispatchAgv`
 
 ### 变更
 - 工具栏开始/停止改驱动整线流程编排器（原为单独机械臂取料 startStageOne）
 - 流程图节点改为整线视角：AGV→取料站 / 机械臂取料 / AGV→倒料站 / 倒料 / 回站待机
 - 初始检查：AGV 须在待机站1（真检测 curStation）、机械臂强制收姿态
+
+### 修复（真机试跑后）
+- 收姿态/倒料函数名首字母改为大写（`Func_yun_xing_zhong`/`Func_daoliao_1_point`/`Func_daoliao`），与机械臂控制器程序中已示教的函数名一致，修复 `func_yun_xing_zhong` 报错 20601（No such function in the program）
+- `LineOrchestrator::onAgvMonitor` 到达判定增加 `curStation == m_expectedStation` 校验：`navStatus`/`navStation` 仅反映导航任务自身状态，人工干预导航后可能残留"已到达"但 AGV 实际未到目标站，导致流程提前推进到下一步
 
 ### 已知限制
 - 单次单站点试测，无连续循环、无多站点；初检不过不自动归位（人工处理）
