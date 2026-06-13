@@ -23,6 +23,12 @@ Makefile
 *.a
 *.lib
 
+# N-ScanHub 厂商 SDK 整包需要随源码提交（包含 Linux/Windows 动态库）
+!3rd/NScanHubSdk/
+!3rd/NScanHubSdk/**
+# 排除 SDK 压缩包中遗留的 Office 临时锁文件
+3rd/NScanHubSdk/**/~$*.docx
+
 # ── 编译中间产物 ──────────────────────────────────────────────
 *.o
 *.obj

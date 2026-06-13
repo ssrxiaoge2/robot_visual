@@ -45,6 +45,10 @@ private slots:
     void onTestCamera();
     void onTestCameraOpen();
     void onTestScanner();
+    void onNScanTrigger();
+    void onNScanClear();
+    void onNScanFinished(const NScanScheduler::ScanResult &result);
+    void onNScanIdle();
     void onHandEyeCalib();
     void onHuayanConnect();
     void onHuayanDisconnect();
@@ -73,12 +77,14 @@ private:
     void initConfigPanel(QVBoxLayout *leftPanel);
     void initCameraPanel(QVBoxLayout *leftPanel);
     void initScannerPanel(QVBoxLayout *leftPanel);
+    void initNScanPanel(QVBoxLayout *leftPanel);
     void initHuayanPanel(QVBoxLayout *leftPanel);
     void initAgvPanel(QVBoxLayout *leftPanel);
     void loadStationMapToTable();
     void rebuildStationMapFromTable();
     void refreshResolvedLabel();
     void updateAgvMonitor(const AgvMonitorData &d);
+    void setNScanInputsEnabled(bool enabled);
 
     void log(const QString &msg);
     /// 应用主题（true=深色，false=浅色），同时刷新所有有内联样式的控件
@@ -124,6 +130,22 @@ private:
     QLineEdit       *m_editScannerIP  = nullptr;
     QPushButton     *m_btnTestScanner = nullptr;
     DeviceIndicator *m_indScanner     = nullptr;
+
+    // ── N-ScanHub SDK 验证面板 ──────────────────────────────
+    QLineEdit       *m_nscanIpEdit            = nullptr;
+    QLineEdit       *m_nscanPortEdit          = nullptr;
+    QLineEdit       *m_nscanTimeoutEdit       = nullptr;
+    QLineEdit       *m_nscanAttemptsEdit      = nullptr;
+    QLineEdit       *m_nscanRetryIntervalEdit = nullptr;
+    QPushButton     *m_nscanTriggerBtn        = nullptr;
+    QPushButton     *m_nscanClearBtn          = nullptr;
+    DeviceIndicator *m_nscanIndicator         = nullptr;
+    QLineEdit       *m_nscanResultEdit        = nullptr;
+    QLabel          *m_nscanAttemptsLabel     = nullptr;
+    QLabel          *m_nscanRawLabel          = nullptr;
+    QLabel          *m_nscanSuccessLabel      = nullptr;
+    int              m_nscanSuccessCount      = 0;
+    QString          m_nscanVisualState       = QStringLiteral("idle");
 
     // ── 华沿 SDK 调试面板 ───────────────────────────────────────
     QPushButton     *m_huayanConnectBtn    = nullptr;

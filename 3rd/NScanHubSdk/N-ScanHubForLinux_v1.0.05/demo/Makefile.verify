@@ -1,0 +1,17 @@
+CXX ?= g++
+CXXFLAGS ?= -O2 -std=c++17 -Wall -Wextra -Wpedantic
+LDLIBS := -ldl -pthread
+
+TARGET := NScanNetworkVerify
+SOURCE := NScanNetworkVerify.cpp
+INCLUDE_DIR := ../include
+
+.PHONY: all clean
+
+all: $(TARGET)
+
+$(TARGET): $(SOURCE)
+	$(CXX) $(CXXFLAGS) -I$(INCLUDE_DIR) $< -o $@ $(LDLIBS)
+
+clean:
+	rm -f $(TARGET)

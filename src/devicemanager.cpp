@@ -3,9 +3,14 @@
 #include "visionclient.h"
 #include "huayanScheduler.h"
 #include "lineorchestrator.h"
+#include "nscanscheduler.h"
 
+#include <QDebug>
 #include <QSettings>
 #include <QTcpSocket>
+#include <QThread>
+
+#include <utility>
 #ifdef Q_OS_LINUX
 #  include <QProcess>  // fill_light GPIO 控制（仅 Linux 编译）
 #endif
@@ -15,9 +20,81 @@ static const char *kSettingsOrg  = "wh-robot";
 static const char *kSettingsApp  = "robot-visual";
 static const char *kStationMapKey = "agv/stationMap";
 
-DeviceManager::DeviceManager(QObject *parent)
-    : QObject(parent)
+namespace {
+class NScanTestWorker : public QObject
 {
+    Q_OBJECT
+
+public:
+    explicit NScanTestWorker(std::shared_ptr<NScanScheduler> scheduler)
+        : m_scheduler(std::move(scheduler))
+    {
+    }
+
+public slots:
+    void scan(const NScanScheduler::ScanOptions &options)
+    {
+        emit finished(m_scheduler->scan(options));
+    }
+
+signals:
+    void finished(const NScanScheduler::ScanResult &result);
+
+private:
+    std::shared_ptr<NScanScheduler> m_scheduler;
+};
+
+QString rawDataSummary(const QByteArray &rawData)
+{
+    constexpr qsizetype kSummaryBytes = 64;
+    const QByteArray prefix = rawData.left(kSummaryBytes).toHex(' ');
+    const QString suffix = rawData.size() > kSummaryBytes
+        ? QStringLiteral(" ...")
+        : QString();
+    return QString::fromLatin1(prefix) + suffix;
+}
+}
+
+DeviceManager::DeviceManager(QObject *parent)
+    : QObject(parent),
+      m_nscanScheduler(std::make_shared<NScanScheduler>())
+{
+    qRegisterMetaType<NScanScheduler::ScanResult>("NScanScheduler::ScanResult");
+    qRegisterMetaType<NScanScheduler::ScanOptions>("NScanScheduler::ScanOptions");
+
+    // 高频扫码复用一个工作线程；空闲时仅等待事件，不轮询、不消耗 CPU。
+    auto *nscanThread = new QThread;
+    auto *nscanWorker = new NScanTestWorker(m_nscanScheduler);
+    nscanWorker->moveToThread(nscanThread);
+    m_nscanTestThread = nscanThread;
+    m_nscanTestWorker = nscanWorker;
+
+    connect(this, &DeviceManager::nscanScanRequested,
+            nscanWorker, &NScanTestWorker::scan, Qt::QueuedConnection);
+    connect(nscanWorker, &NScanTestWorker::finished, this,
+            [this](const NScanScheduler::ScanResult &result) {
+        const QString summary = rawDataSummary(result.rawData);
+        const QString finalLog = QStringLiteral(
+            "[N-ScanHub] 扫码结束：状态=%1，尝试=%2，条码字节=%3，原始数据=%4%5")
+            .arg(NScanScheduler::statusText(result.status))
+            .arg(result.attempts)
+            .arg(result.rawData.size())
+            .arg(summary.isEmpty() ? QStringLiteral("<empty>") : summary)
+            .arg(result.errorMessage.isEmpty()
+                     ? QString()
+                     : QStringLiteral("，错误=%1").arg(result.errorMessage));
+        m_nscanTestRunning = false;
+        emit nscanTestLog(finalLog);
+        emit logMessage(finalLog);
+        emit nscanTestFinished(result);
+        emit nscanTestIdle();
+    });
+    connect(nscanThread, &QThread::finished,
+            nscanWorker, &QObject::deleteLater);
+    connect(nscanThread, &QThread::finished,
+            nscanThread, &QObject::deleteLater);
+    nscanThread->start();
+
     m_agvCtrl = new AgvController(this);
     connect(m_agvCtrl, &AgvController::connected,
             this, &DeviceManager::agvModbusConnected);
@@ -76,6 +153,26 @@ DeviceManager::DeviceManager(QObject *parent)
     });
 
     loadStationMap();
+}
+
+DeviceManager::~DeviceManager()
+{
+    QThread *thread = m_nscanTestThread.data();
+    if (!thread || !thread->isRunning())
+        return;
+
+    // scan() cannot be interrupted safely; wait only for its configured upper bound.
+    const qint64 attempts = qMax(1, m_nscanTestOptions.maxAttempts);
+    const qint64 scanWaitMs = static_cast<qint64>(qMax(0, m_nscanTestOptions.timeoutMs))
+            * attempts
+        + static_cast<qint64>(qMax(0, m_nscanTestOptions.retryIntervalMs))
+            * (attempts - 1)
+        + 2000;
+    const unsigned long boundedWaitMs = static_cast<unsigned long>(
+        qBound<qint64>(qint64{2000}, scanWaitMs, qint64{60000}));
+    thread->quit();
+    if (!thread->wait(boundedWaitMs))
+        qWarning() << "N-ScanHub test thread did not finish before shutdown timeout";
 }
 
 void DeviceManager::applyConfig()
@@ -175,6 +272,40 @@ void DeviceManager::testScanner()
         emit logMessage(QString("[扫码器] %1:8080 连接失败 ✗").arg(m_cfg.scannerIP));
         emit scannerStatusChanged(false, QStringLiteral("不可达"));
     }
+}
+
+void DeviceManager::startNScanTest(const NScanScheduler::ScanOptions &options)
+{
+    if (m_nscanTestRunning) {
+        const QString message = QStringLiteral("[N-ScanHub] 扫码测试正在运行，忽略重复请求");
+        emit nscanTestLog(message);
+        emit logMessage(message);
+        return;
+    }
+
+    if (!m_nscanTestThread || !m_nscanTestThread->isRunning()
+        || !m_nscanTestWorker) {
+        const QString message = QStringLiteral("[N-ScanHub] 扫码工作线程不可用");
+        emit nscanTestLog(message);
+        emit logMessage(message);
+        return;
+    }
+
+    m_nscanTestRunning = true;
+    m_nscanTestOptions = options;
+
+    const QString startLog = QStringLiteral(
+        "[N-ScanHub] 开始扫码：%1:%2，超时=%3ms，最大尝试=%4，重试间隔=%5ms，触发=%6")
+        .arg(options.ip.trimmed())
+        .arg(options.port)
+        .arg(options.timeoutMs)
+        .arg(options.maxAttempts)
+        .arg(options.retryIntervalMs)
+        .arg(QString::fromLatin1(options.triggerCommand.toHex(' ')));
+    emit nscanTestLog(startLog);
+    emit logMessage(startLog);
+    emit nscanTestStarted();
+    emit nscanScanRequested(options);
 }
 
 void DeviceManager::toggleLight()
@@ -283,3 +414,5 @@ void DeviceManager::resumeAgvNav()
     m_agvCtrl->resumeNavigation();
     emit logMessage(QStringLiteral("[AGV] 已发送继续导航"));
 }
+
+#include "devicemanager.moc"

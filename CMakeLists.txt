@@ -12,6 +12,7 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 add_compile_definitions(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network SerialBus)
+include(GNUInstallDirs)
 
 set(PROJECT_SOURCES
         src/main.cpp
@@ -39,6 +40,8 @@ set(PROJECT_SOURCES
         src/workflowwidget.h
         src/themeswitch.cpp
         src/themeswitch.h
+        src/nscanscheduler.cpp
+        src/nscanscheduler.h
 )
 
 qt_add_executable(wh-robot-visual
@@ -61,6 +64,87 @@ if(UNIX)
         BUILD_RPATH "${ORBBEC_SDK_ROOT}/lib"
         INSTALL_RPATH "${ORBBEC_SDK_ROOT}/lib"
     )
+endif()
+
+# ── N-ScanHub 扫码枪 SDK（网络扫码，Linux / Windows MSVC）──
+set(NSCAN_SDK_ROOT "${CMAKE_SOURCE_DIR}/3rd/NScanHubSdk")
+
+if(UNIX AND NOT APPLE)
+    set(NSCAN_PLATFORM_ROOT "${NSCAN_SDK_ROOT}/N-ScanHubForLinux_v1.0.05")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(NSCAN_ARCH x64)
+    else()
+        set(NSCAN_ARCH x32)
+    endif()
+
+    set(NSCAN_LIBRARY_SOURCE "${NSCAN_PLATFORM_ROOT}/lib/${NSCAN_ARCH}/N-ScanHub.so")
+    set(NSCAN_LIBUSB_SOURCE "${NSCAN_PLATFORM_ROOT}/libusb/${NSCAN_ARCH}/libusb-1.0.so")
+    set(NSCAN_RUNTIME_DIR "${CMAKE_CURRENT_BINARY_DIR}/nscan-runtime")
+
+    if(NOT EXISTS "${NSCAN_LIBRARY_SOURCE}" OR NOT EXISTS "${NSCAN_LIBUSB_SOURCE}")
+        message(FATAL_ERROR "N-ScanHub Linux ${NSCAN_ARCH} SDK files are incomplete")
+    endif()
+
+    # SDK 依赖的 SONAME 是 libusb-1.0.so.0，但厂商包文件名缺少末尾 .0；
+    # 在构建目录暂存正确名称，避免修改 3rd 下的原始 SDK 文件。
+    file(MAKE_DIRECTORY "${NSCAN_RUNTIME_DIR}")
+    configure_file("${NSCAN_LIBRARY_SOURCE}"
+                   "${NSCAN_RUNTIME_DIR}/libN-ScanHub.so" COPYONLY)
+    configure_file("${NSCAN_LIBUSB_SOURCE}"
+                   "${NSCAN_RUNTIME_DIR}/libusb-1.0.so.0" COPYONLY)
+
+    target_include_directories(wh-robot-visual PRIVATE "${NSCAN_PLATFORM_ROOT}/include")
+    target_link_libraries(wh-robot-visual PRIVATE
+        "-Wl,--no-as-needed"
+        "${NSCAN_RUNTIME_DIR}/libN-ScanHub.so"
+        "${NSCAN_RUNTIME_DIR}/libusb-1.0.so.0"
+        "-Wl,--as-needed"
+    )
+    target_compile_definitions(wh-robot-visual PRIVATE NSCAN_SDK_AVAILABLE=1)
+
+    # 使用 APPEND，保留前面已经配置的 Orbbec SDK RPATH。
+    set_property(TARGET wh-robot-visual APPEND PROPERTY BUILD_RPATH
+        "${NSCAN_RUNTIME_DIR}"
+    )
+    set_property(TARGET wh-robot-visual APPEND PROPERTY INSTALL_RPATH
+        "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+    )
+
+    install(FILES
+        "${NSCAN_RUNTIME_DIR}/libN-ScanHub.so"
+        "${NSCAN_RUNTIME_DIR}/libusb-1.0.so.0"
+        DESTINATION "${CMAKE_INSTALL_LIBDIR}"
+    )
+elseif(WIN32 AND MSVC)
+    set(NSCAN_PLATFORM_ROOT
+        "${NSCAN_SDK_ROOT}/N-ScanHubForWindows_v1.0.05/N-ScanHubForWindows")
+    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        set(NSCAN_ARCH x64)
+    else()
+        set(NSCAN_ARCH x86)
+    endif()
+
+    set(NSCAN_LIBRARY "${NSCAN_PLATFORM_ROOT}/lib/${NSCAN_ARCH}/N-ScanHub.lib")
+    set(NSCAN_RUNTIME "${NSCAN_PLATFORM_ROOT}/lib/${NSCAN_ARCH}/N-ScanHub.dll")
+    if(NOT EXISTS "${NSCAN_LIBRARY}" OR NOT EXISTS "${NSCAN_RUNTIME}")
+        message(FATAL_ERROR "N-ScanHub Windows ${NSCAN_ARCH} SDK files are incomplete")
+    endif()
+
+    target_include_directories(wh-robot-visual PRIVATE "${NSCAN_PLATFORM_ROOT}/include")
+    target_link_libraries(wh-robot-visual PRIVATE "${NSCAN_LIBRARY}")
+    target_compile_definitions(wh-robot-visual PRIVATE NSCAN_SDK_AVAILABLE=1)
+
+    add_custom_command(TARGET wh-robot-visual POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                "${NSCAN_RUNTIME}"
+                "$<TARGET_FILE_DIR:wh-robot-visual>/N-ScanHub.dll"
+        COMMENT "Copying N-ScanHub runtime DLL"
+    )
+    install(FILES "${NSCAN_RUNTIME}" DESTINATION "${CMAKE_INSTALL_BINDIR}")
+elseif(WIN32 AND MINGW)
+    message(STATUS "N-ScanHub SDK disabled: vendor package has no MinGW import library")
+else()
+    message(STATUS "N-ScanHub SDK disabled on this platform")
 endif()
 
 # ── 华沿机械臂 SDK（Linux/Windows 均可配置）──
@@ -95,7 +179,6 @@ if(APPLE)
     )
 endif()
 
-include(GNUInstallDirs)
 install(TARGETS wh-robot-visual
     BUNDLE DESTINATION .
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}

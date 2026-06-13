@@ -36,7 +36,9 @@
 #include <QFont>
 #include <QFormLayout>
 #include <QHeaderView>
+#include <QIntValidator>
 #include <QScrollArea>
+#include <QSizePolicy>
 #include <QTextStream>
 
 #include <algorithm>
@@ -92,6 +94,17 @@ MainWindow::MainWindow(QWidget *parent)
             this, [this](bool ok, const QString &s) { m_indCameraDebug->setStatus(ok, s); });
     connect(m_devMgr, &DeviceManager::scannerStatusChanged,
             this, [this](bool ok, const QString &s) { m_indScanner->setStatus(ok, s); });
+    connect(m_devMgr, &DeviceManager::nscanTestStarted, this, [this] {
+        setNScanInputsEnabled(false);
+        m_nscanVisualState = QStringLiteral("running");
+        m_nscanIndicator->setStatus(false, QStringLiteral("扫码中..."));
+        m_nscanResultEdit->setText(QStringLiteral("等待扫码结果..."));
+        applyTheme(m_darkTheme);
+    });
+    connect(m_devMgr, &DeviceManager::nscanTestFinished,
+            this, &MainWindow::onNScanFinished);
+    connect(m_devMgr, &DeviceManager::nscanTestIdle,
+            this, &MainWindow::onNScanIdle);
 
     // 补光灯切换结果 / 配置应用结果
     connect(m_devMgr, &DeviceManager::lightChanged,
@@ -245,6 +258,7 @@ void MainWindow::initUI()
     initConfigPanel(leftPanel);   // 网络配置 + 补光灯
     initCameraPanel(leftPanel);   // 相机调试
     initScannerPanel(leftPanel);  // 扫码器调试
+    initNScanPanel(leftPanel);    // N-ScanHub SDK 主动扫码验证
     initAgvPanel(leftPanel);      // AGV 调试
     initHuayanPanel(leftPanel);   // 华沿 SDK 调试
 
@@ -438,6 +452,103 @@ void MainWindow::initScannerPanel(QVBoxLayout *leftPanel)
     m_indScanner->setFixedSize(180, 48);
     form->addRow(m_indScanner);
     leftPanel->addWidget(gbScanner);
+}
+
+/**
+ * @brief 初始化独立的 N-ScanHub 网络扫码验证面板。
+ *
+ * 该面板只通过 DeviceManager 的异步测试入口发起任务，不直接调用 SDK。
+ */
+void MainWindow::initNScanPanel(QVBoxLayout *leftPanel)
+{
+    auto *group = new QGroupBox(QStringLiteral("N-ScanHub SDK 调试"));
+    group->setObjectName(QStringLiteral("nscanPanel"));
+    auto *layout = new QVBoxLayout(group);
+    layout->setSpacing(5);
+
+    auto *addressRow = new QHBoxLayout();
+    m_nscanIpEdit = new QLineEdit(QStringLiteral("192.168.1.12"));
+    m_nscanIpEdit->setObjectName(QStringLiteral("nscanIpEdit"));
+    m_nscanIpEdit->setPlaceholderText(QStringLiteral("扫码枪 IP"));
+    m_nscanPortEdit = new QLineEdit(QStringLiteral("30000"));
+    m_nscanPortEdit->setObjectName(QStringLiteral("nscanPortEdit"));
+    m_nscanPortEdit->setValidator(new QIntValidator(1, 65535, m_nscanPortEdit));
+    m_nscanPortEdit->setAlignment(Qt::AlignRight);
+    m_nscanPortEdit->setFixedWidth(82);
+    addressRow->addWidget(new QLabel(QStringLiteral("IP:")));
+    addressRow->addWidget(m_nscanIpEdit, 1);
+    addressRow->addWidget(new QLabel(QStringLiteral("端口:")));
+    addressRow->addWidget(m_nscanPortEdit);
+    layout->addLayout(addressRow);
+
+    auto *parameterGrid = new QGridLayout();
+    parameterGrid->setHorizontalSpacing(5);
+    parameterGrid->setVerticalSpacing(4);
+    m_nscanTimeoutEdit = new QLineEdit(QStringLiteral("2000"));
+    m_nscanTimeoutEdit->setObjectName(QStringLiteral("nscanTimeoutEdit"));
+    m_nscanTimeoutEdit->setValidator(new QIntValidator(1, 60000, m_nscanTimeoutEdit));
+    m_nscanTimeoutEdit->setAlignment(Qt::AlignRight);
+    m_nscanAttemptsEdit = new QLineEdit(QStringLiteral("3"));
+    m_nscanAttemptsEdit->setObjectName(QStringLiteral("nscanAttemptsEdit"));
+    m_nscanAttemptsEdit->setValidator(new QIntValidator(1, 20, m_nscanAttemptsEdit));
+    m_nscanAttemptsEdit->setAlignment(Qt::AlignRight);
+    m_nscanRetryIntervalEdit = new QLineEdit(QStringLiteral("500"));
+    m_nscanRetryIntervalEdit->setObjectName(QStringLiteral("nscanRetryIntervalEdit"));
+    m_nscanRetryIntervalEdit->setValidator(new QIntValidator(0, 10000, m_nscanRetryIntervalEdit));
+    m_nscanRetryIntervalEdit->setAlignment(Qt::AlignRight);
+    parameterGrid->addWidget(new QLabel(QStringLiteral("单次超时(ms):")), 0, 0);
+    parameterGrid->addWidget(m_nscanTimeoutEdit, 0, 1);
+    parameterGrid->addWidget(new QLabel(QStringLiteral("最大尝试:")), 1, 0);
+    parameterGrid->addWidget(m_nscanAttemptsEdit, 1, 1);
+    parameterGrid->addWidget(new QLabel(QStringLiteral("重试间隔(ms):")), 2, 0);
+    parameterGrid->addWidget(m_nscanRetryIntervalEdit, 2, 1);
+    parameterGrid->setColumnStretch(1, 1);
+    layout->addLayout(parameterGrid);
+
+    auto *actionRow = new QHBoxLayout();
+    m_nscanTriggerBtn = new QPushButton(QStringLiteral("主动扫码"));
+    m_nscanClearBtn = new QPushButton(QStringLiteral("清空结果"));
+    m_nscanTriggerBtn->setObjectName(QStringLiteral("btnNScanTrigger"));
+    m_nscanClearBtn->setObjectName(QStringLiteral("btnNScanClear"));
+    m_nscanTriggerBtn->setFixedHeight(28);
+    m_nscanClearBtn->setFixedHeight(28);
+    actionRow->addWidget(m_nscanTriggerBtn, 1);
+    actionRow->addWidget(m_nscanClearBtn);
+    layout->addLayout(actionRow);
+
+    m_nscanIndicator = new DeviceIndicator(QStringLiteral("N-ScanHub"));
+    m_nscanIndicator->setStatus(false, QStringLiteral("待测试"));
+    m_nscanIndicator->setFixedSize(180, 48);
+    layout->addWidget(m_nscanIndicator, 0, Qt::AlignHCenter);
+
+    auto *resultForm = new QFormLayout();
+    resultForm->setLabelAlignment(Qt::AlignRight | Qt::AlignTop);
+    m_nscanResultEdit = new QLineEdit();
+    m_nscanResultEdit->setObjectName(QStringLiteral("nscanResultEdit"));
+    m_nscanResultEdit->setReadOnly(true);
+    m_nscanResultEdit->setPlaceholderText(QStringLiteral("尚未扫码"));
+    m_nscanAttemptsLabel = new QLabel(QStringLiteral("0"));
+    m_nscanAttemptsLabel->setObjectName(QStringLiteral("nscanAttemptsLabel"));
+    m_nscanRawLabel = new QLabel(QStringLiteral("<empty>"));
+    m_nscanRawLabel->setObjectName(QStringLiteral("nscanRawLabel"));
+    m_nscanRawLabel->setWordWrap(true);
+    m_nscanRawLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_nscanRawLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_nscanRawLabel->setMaximumHeight(48);
+    m_nscanSuccessLabel = new QLabel(QStringLiteral("0"));
+    m_nscanSuccessLabel->setObjectName(QStringLiteral("nscanSuccessLabel"));
+    resultForm->addRow(QStringLiteral("最新条码:"), m_nscanResultEdit);
+    resultForm->addRow(QStringLiteral("实际尝试:"), m_nscanAttemptsLabel);
+    resultForm->addRow(QStringLiteral("原始数据:"), m_nscanRawLabel);
+    resultForm->addRow(QStringLiteral("成功计数:"), m_nscanSuccessLabel);
+    layout->addLayout(resultForm);
+
+    connect(m_nscanTriggerBtn, &QPushButton::clicked,
+            this, &MainWindow::onNScanTrigger);
+    connect(m_nscanClearBtn, &QPushButton::clicked,
+            this, &MainWindow::onNScanClear);
+
+    leftPanel->addWidget(group);
 }
 
 /**
@@ -796,6 +907,46 @@ void MainWindow::applyTheme(bool dark)
     m_lblStep->setStyleSheet(dark
         ? "font-size:13px; color:#aaa;"
         : "font-size:13px; color:#666;");
+
+    // N-ScanHub 面板包含状态色，主题切换时必须重新计算，避免颜色粘滞。
+    if (m_nscanTriggerBtn) {
+        m_nscanTriggerBtn->setStyleSheet(dark
+            ? "#btnNScanTrigger { background:#2f8fdd; color:white; font-weight:bold; }"
+              "#btnNScanTrigger:hover { background:#49a3e8; }"
+              "#btnNScanTrigger:disabled { background:#444; color:#888; }"
+            : "#btnNScanTrigger { background:#0078d4; color:white; font-weight:bold; }"
+              "#btnNScanTrigger:hover { background:#106ebe; }"
+              "#btnNScanTrigger:disabled { background:#ccc; color:#777; }");
+        m_nscanClearBtn->setStyleSheet(dark
+            ? "#btnNScanClear { background:#555; color:#ddd; }"
+              "#btnNScanClear:hover { background:#666; }"
+            : "#btnNScanClear { background:#666; color:white; }"
+              "#btnNScanClear:hover { background:#555; }");
+
+        QString stateColor = dark ? QStringLiteral("#b8b8b8")
+                                  : QStringLiteral("#444444");
+        if (m_nscanVisualState == QStringLiteral("running"))
+            stateColor = dark ? QStringLiteral("#66b7ff") : QStringLiteral("#0067b8");
+        else if (m_nscanVisualState == QStringLiteral("success"))
+            stateColor = dark ? QStringLiteral("#65d887") : QStringLiteral("#107c10");
+        else if (m_nscanVisualState == QStringLiteral("timeout"))
+            stateColor = dark ? QStringLiteral("#f3c969") : QStringLiteral("#9a6700");
+        else if (m_nscanVisualState == QStringLiteral("error"))
+            stateColor = dark ? QStringLiteral("#ff7b72") : QStringLiteral("#c42b1c");
+
+        m_nscanResultEdit->setStyleSheet(QStringLiteral(
+            "QLineEdit { color:%1; font-weight:bold; }").arg(stateColor));
+        m_nscanAttemptsLabel->setStyleSheet(QStringLiteral(
+            "color:%1; font-weight:bold;").arg(stateColor));
+        m_nscanSuccessLabel->setStyleSheet(dark
+            ? "color:#65d887; font-weight:bold;"
+            : "color:#107c10; font-weight:bold;");
+        m_nscanRawLabel->setStyleSheet(dark
+            ? "color:#9fc5e8; background:#202226; border:1px solid #444;"
+              "border-radius:3px; padding:3px; font-family:monospace; font-size:10px;"
+            : "color:#35536f; background:#f7f7f7; border:1px solid #ccc;"
+              "border-radius:3px; padding:3px; font-family:monospace; font-size:10px;");
+    }
 }
 
 // ── 读取 UI 控件 → Config 结构体 ────────────────────────────
@@ -908,6 +1059,143 @@ void MainWindow::onTestScanner()
     DeviceManager::Config cfg; buildConfig(cfg);
     m_devMgr->setConfig(cfg);
     m_devMgr->testScanner();
+}
+
+void MainWindow::onNScanTrigger()
+{
+    bool portOk = false;
+    bool timeoutOk = false;
+    bool attemptsOk = false;
+    bool retryIntervalOk = false;
+    const int port = m_nscanPortEdit->text().trimmed().toInt(&portOk);
+    const int timeoutMs = m_nscanTimeoutEdit->text().trimmed().toInt(&timeoutOk);
+    const int maxAttempts = m_nscanAttemptsEdit->text().trimmed().toInt(&attemptsOk);
+    const int retryIntervalMs = m_nscanRetryIntervalEdit->text().trimmed().toInt(&retryIntervalOk);
+
+    QString parameterError;
+    if (!portOk || port < 1 || port > 65535)
+        parameterError = QStringLiteral("端口必须是 1-65535 的整数");
+    else if (!timeoutOk || timeoutMs < 1 || timeoutMs > 60000)
+        parameterError = QStringLiteral("单次超时必须是 1-60000 ms 的整数");
+    else if (!attemptsOk || maxAttempts < 1 || maxAttempts > 20)
+        parameterError = QStringLiteral("最大尝试必须是 1-20 的整数");
+    else if (!retryIntervalOk || retryIntervalMs < 0 || retryIntervalMs > 10000)
+        parameterError = QStringLiteral("重试间隔必须是 0-10000 ms 的整数");
+
+    if (!parameterError.isEmpty()) {
+        m_nscanVisualState = QStringLiteral("error");
+        m_nscanResultEdit->setText(QStringLiteral("配置错误：%1").arg(parameterError));
+        m_nscanResultEdit->setToolTip(parameterError);
+        m_nscanIndicator->setStatus(false, QStringLiteral("配置错误"));
+        log(QStringLiteral("[N-ScanHub] 配置错误：%1").arg(parameterError));
+        applyTheme(m_darkTheme);
+        return;
+    }
+
+    NScanScheduler::ScanOptions options;
+    options.ip = m_nscanIpEdit->text().trimmed();
+    options.port = static_cast<quint16>(port);
+    options.timeoutMs = timeoutMs;
+    options.maxAttempts = maxAttempts;
+    options.retryIntervalMs = retryIntervalMs;
+    m_devMgr->startNScanTest(options);
+}
+
+void MainWindow::onNScanClear()
+{
+    const bool running = m_devMgr->nscanTestRunning();
+    m_nscanSuccessCount = 0;
+    m_nscanSuccessLabel->setText(QStringLiteral("0"));
+    m_nscanResultEdit->clear();
+    m_nscanResultEdit->setToolTip(QString());
+    m_nscanAttemptsLabel->setText(QStringLiteral("0"));
+    m_nscanRawLabel->setText(QStringLiteral("<empty>"));
+    m_nscanRawLabel->setToolTip(QString());
+    m_nscanVisualState = running ? QStringLiteral("running") : QStringLiteral("idle");
+    m_nscanIndicator->setStatus(
+        false, running ? QStringLiteral("扫码中...") : QStringLiteral("待测试"));
+    applyTheme(m_darkTheme);
+}
+
+void MainWindow::onNScanFinished(const NScanScheduler::ScanResult &result)
+{
+    const QByteArray fullHex = result.rawData.toHex(' ');
+    constexpr qsizetype kRawSummaryBytes = 64;
+    QString rawSummary = QString::fromLatin1(
+        result.rawData.left(kRawSummaryBytes).toHex(' '));
+    if (result.rawData.size() > kRawSummaryBytes)
+        rawSummary += QStringLiteral(" ...");
+    if (rawSummary.isEmpty())
+        rawSummary = QStringLiteral("<empty>");
+
+    m_nscanAttemptsLabel->setText(QString::number(result.attempts));
+    m_nscanRawLabel->setText(rawSummary);
+    m_nscanRawLabel->setToolTip(
+        fullHex.isEmpty() ? QStringLiteral("无原始数据") : QString::fromLatin1(fullHex));
+
+    QString displayText;
+    bool success = false;
+    switch (result.status) {
+    case NScanScheduler::ScanResult::Status::Success:
+        success = true;
+        ++m_nscanSuccessCount;
+        displayText = result.code;
+        m_nscanVisualState = QStringLiteral("success");
+        m_nscanIndicator->setStatus(true, QStringLiteral("扫码成功"));
+        break;
+    case NScanScheduler::ScanResult::Status::Timeout:
+        displayText = QStringLiteral("扫码超时（已尝试 %1 次）").arg(result.attempts);
+        if (!result.errorMessage.isEmpty())
+            displayText += QStringLiteral("：%1").arg(result.errorMessage);
+        m_nscanVisualState = QStringLiteral("timeout");
+        m_nscanIndicator->setStatus(false, QStringLiteral("扫码超时"));
+        break;
+    case NScanScheduler::ScanResult::Status::ConnectError:
+        displayText = QStringLiteral("连接失败：%1").arg(result.errorMessage);
+        m_nscanVisualState = QStringLiteral("error");
+        m_nscanIndicator->setStatus(false, QStringLiteral("连接失败"));
+        break;
+    case NScanScheduler::ScanResult::Status::SendError:
+        displayText = QStringLiteral("触发失败：%1").arg(result.errorMessage);
+        m_nscanVisualState = QStringLiteral("error");
+        m_nscanIndicator->setStatus(false, QStringLiteral("触发失败"));
+        break;
+    case NScanScheduler::ScanResult::Status::ReadError:
+        displayText = QStringLiteral("读取失败：%1").arg(result.errorMessage);
+        m_nscanVisualState = QStringLiteral("error");
+        m_nscanIndicator->setStatus(false, QStringLiteral("读取失败"));
+        break;
+    case NScanScheduler::ScanResult::Status::InvalidConfig:
+        displayText = QStringLiteral("配置错误：%1").arg(result.errorMessage);
+        m_nscanVisualState = QStringLiteral("error");
+        m_nscanIndicator->setStatus(false, QStringLiteral("配置错误"));
+        break;
+    case NScanScheduler::ScanResult::Status::SdkUnavailable:
+        displayText = QStringLiteral("SDK 不可用：%1").arg(result.errorMessage);
+        m_nscanVisualState = QStringLiteral("error");
+        m_nscanIndicator->setStatus(false, QStringLiteral("SDK 不可用"));
+        break;
+    }
+
+    m_nscanResultEdit->setText(displayText);
+    m_nscanResultEdit->setToolTip(displayText);
+    m_nscanSuccessLabel->setText(QString::number(m_nscanSuccessCount));
+    applyTheme(m_darkTheme);
+}
+
+void MainWindow::onNScanIdle()
+{
+    setNScanInputsEnabled(true);
+}
+
+void MainWindow::setNScanInputsEnabled(bool enabled)
+{
+    m_nscanIpEdit->setEnabled(enabled);
+    m_nscanPortEdit->setEnabled(enabled);
+    m_nscanTimeoutEdit->setEnabled(enabled);
+    m_nscanAttemptsEdit->setEnabled(enabled);
+    m_nscanRetryIntervalEdit->setEnabled(enabled);
+    m_nscanTriggerBtn->setEnabled(enabled);
 }
 
 /// "手眼标定矩阵"按钮回调：打开向导，用户确认后将矩阵写入视觉系统
