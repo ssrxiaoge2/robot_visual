@@ -23,6 +23,15 @@ Makefile
 *.a
 *.lib
 
+# HuaYan SDK 库文件需要上传到仓库
+!3rd/HuaYansdk/HuayanRobotLibrary-C++-V1.0.15.0/
+!3rd/HuaYansdk/HuayanRobotLibrary-C++-V1.0.15.0/**
+
+# Orbbec SDK Linux 运行库需要随源码提交
+!3rd/OrbbecSdk/
+!3rd/OrbbecSdk/lib/
+!3rd/OrbbecSdk/lib/**
+
 # N-ScanHub 厂商 SDK 整包需要随源码提交（包含 Linux/Windows 动态库）
 !3rd/NScanHubSdk/
 !3rd/NScanHubSdk/**

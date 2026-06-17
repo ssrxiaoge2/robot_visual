@@ -4,6 +4,7 @@
 #include "huayanScheduler.h"
 #include "lineorchestrator.h"
 #include "nscanscheduler.h"
+#include "customSysScheduler.h"
 
 #include <QDebug>
 #include <QSettings>
@@ -61,6 +62,7 @@ DeviceManager::DeviceManager(QObject *parent)
 {
     qRegisterMetaType<NScanScheduler::ScanResult>("NScanScheduler::ScanResult");
     qRegisterMetaType<NScanScheduler::ScanOptions>("NScanScheduler::ScanOptions");
+    qRegisterMetaType<CustomSysScheduler::DayRecord>("CustomSysScheduler::DayRecord");
 
     // 高频扫码复用一个工作线程；空闲时仅等待事件，不轮询、不消耗 CPU。
     auto *nscanThread = new QThread;
@@ -115,6 +117,21 @@ DeviceManager::DeviceManager(QObject *parent)
         emit logMessage(QString("[视觉] %1").arg(msg));
         emit cameraStatusChanged(ok, msg);
     });
+
+    // 客户系统通信测试只验证 REST API 可达性和 actualQty 读取，暂不进入整线流程。
+    m_customSysScheduler = new CustomSysScheduler(this);
+    connect(m_customSysScheduler, &CustomSysScheduler::logMessage,
+            this, &DeviceManager::logMessage);
+    connect(m_customSysScheduler, &CustomSysScheduler::connectivityChecked,
+            this, [this](bool ok, const QString &statusText, int) {
+        emit customSystemStatusChanged(ok, statusText);
+    });
+    connect(m_customSysScheduler, &CustomSysScheduler::dayDataReady,
+            this, &DeviceManager::customSystemDayDataReady);
+    connect(m_customSysScheduler, &CustomSysScheduler::requestStarted,
+            this, &DeviceManager::customSystemRequestStarted);
+    connect(m_customSysScheduler, &CustomSysScheduler::requestFailed,
+            this, &DeviceManager::customSystemRequestFailed);
 
     m_huayanScheduler = new HuayanScheduler(this);
 
@@ -197,6 +214,7 @@ void DeviceManager::applyConfig()
         m_visionClient->setServerUrl(m_cfg.cameraIP, m_cfg.cameraPort);
 
     m_huayanScheduler->setConnectionParams(m_cfg.huayanIP, m_cfg.huayanPort);
+    m_customSysScheduler->setEndpoint(QUrl(m_cfg.customSysEndpoint.trimmed()));
 }
 
 void DeviceManager::testRobot()
@@ -272,6 +290,20 @@ void DeviceManager::testScanner()
         emit logMessage(QString("[扫码器] %1:8080 连接失败 ✗").arg(m_cfg.scannerIP));
         emit scannerStatusChanged(false, QStringLiteral("不可达"));
     }
+}
+
+void DeviceManager::testCustomSystem()
+{
+    // 客户现场只要求验证 HTTP 接口可达，WiFi 连接由操作系统负责。
+    m_customSysScheduler->setEndpoint(QUrl(m_cfg.customSysEndpoint.trimmed()));
+    m_customSysScheduler->testConnectivity();
+}
+
+void DeviceManager::fetchCustomSystemDayData()
+{
+    // 读取日统计接口并提取 actualQty，其余字段仅用于现场调试展示。
+    m_customSysScheduler->setEndpoint(QUrl(m_cfg.customSysEndpoint.trimmed()));
+    m_customSysScheduler->fetchDayData();
 }
 
 void DeviceManager::startNScanTest(const NScanScheduler::ScanOptions &options)

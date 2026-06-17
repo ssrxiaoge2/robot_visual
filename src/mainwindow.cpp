@@ -24,6 +24,7 @@
 #include "mainwindow.h"
 #include "./ui_mainwindow.h"
 #include "camerawindow.h"
+#include "customSysScheduler.h"
 
 #include <QDate>
 #include <QDir>
@@ -105,6 +106,25 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::onNScanFinished);
     connect(m_devMgr, &DeviceManager::nscanTestIdle,
             this, &MainWindow::onNScanIdle);
+
+    connect(m_devMgr, &DeviceManager::customSystemRequestStarted,
+            this, &MainWindow::onCustomSystemRequestStarted);
+    connect(m_devMgr, &DeviceManager::customSystemStatusChanged,
+            this, [this](bool ok, const QString &statusText) {
+        m_customSysVisualState = ok ? QStringLiteral("success") : QStringLiteral("error");
+        m_customSysIndicator->setStatus(
+            ok, ok ? QStringLiteral("连接正常") : statusText);
+        m_customSysInfoLabel->setText(
+            ok ? QStringLiteral("连接正常；HTTP 为无状态请求，读取数据会再次访问接口")
+               : QStringLiteral("连接失败：%1").arg(statusText));
+        m_customSysRawLabel->setText(QStringLiteral("原始 JSON 将打印到日志区"));
+        setCustomSystemInputsEnabled(true);
+        applyTheme(m_darkTheme);
+    });
+    connect(m_devMgr, &DeviceManager::customSystemDayDataReady,
+            this, &MainWindow::onCustomSystemDayDataReady);
+    connect(m_devMgr, &DeviceManager::customSystemRequestFailed,
+            this, &MainWindow::onCustomSystemRequestFailed);
 
     // 补光灯切换结果 / 配置应用结果
     connect(m_devMgr, &DeviceManager::lightChanged,
@@ -259,6 +279,7 @@ void MainWindow::initUI()
     initCameraPanel(leftPanel);   // 相机调试
     initScannerPanel(leftPanel);  // 扫码器调试
     initNScanPanel(leftPanel);    // N-ScanHub SDK 主动扫码验证
+    initCustomSystemPanel(leftPanel); // 客户系统 REST API 通信测试
     initAgvPanel(leftPanel);      // AGV 调试
     initHuayanPanel(leftPanel);   // 华沿 SDK 调试
 
@@ -547,6 +568,68 @@ void MainWindow::initNScanPanel(QVBoxLayout *leftPanel)
             this, &MainWindow::onNScanTrigger);
     connect(m_nscanClearBtn, &QPushButton::clicked,
             this, &MainWindow::onNScanClear);
+
+    leftPanel->addWidget(group);
+}
+
+/**
+ * @brief 初始化客户系统 REST API 通信测试面板。
+ *
+ * 面板只通过 DeviceManager 发起请求；HTTP 和 JSON 解析由 CustomSysScheduler 处理。
+ */
+void MainWindow::initCustomSystemPanel(QVBoxLayout *leftPanel)
+{
+    auto *group = new QGroupBox(QStringLiteral("客户系统通信测试"));
+    auto *layout = new QVBoxLayout(group);
+    layout->setSpacing(5);
+
+    auto *row1 = new QHBoxLayout();
+    m_customSysConnectBtn = new QPushButton(QStringLiteral("测试连接"));
+    m_customSysFetchBtn = new QPushButton(QStringLiteral("读取数据"));
+    m_customSysIndicator = new DeviceIndicator(QStringLiteral("客户系统"));
+    m_customSysIndicator->setStatus(false, QStringLiteral("待测试"));
+    m_customSysConnectBtn->setFixedHeight(28);
+    m_customSysFetchBtn->setFixedHeight(28);
+    row1->addWidget(m_customSysConnectBtn);
+    row1->addWidget(m_customSysFetchBtn);
+    row1->addStretch();
+    row1->addWidget(m_customSysIndicator);
+    layout->addLayout(row1);
+
+    auto *line = new QFrame();
+    line->setFrameShape(QFrame::HLine);
+    line->setFrameShadow(QFrame::Sunken);
+    layout->addWidget(line);
+
+    auto *form = new QFormLayout();
+    form->setLabelAlignment(Qt::AlignRight | Qt::AlignTop);
+    m_customSysEndpointEdit = new QLineEdit(
+        CustomSysScheduler::defaultEndpoint().toString());
+    m_customSysEndpointEdit->setPlaceholderText(QStringLiteral("客户系统接口 URL"));
+    m_customSysEndpointEdit->setToolTip(QStringLiteral(
+        "现场电脑需先连接 WiFi WDAS_PA01；程序只验证该 HTTP 接口。"));
+
+    m_customSysActualQtyEdit = new QLineEdit();
+    m_customSysActualQtyEdit->setReadOnly(true);
+    m_customSysActualQtyEdit->setPlaceholderText(QStringLiteral("尚未读取"));
+    m_customSysInfoLabel = new QLabel(QStringLiteral("未读取"));
+    m_customSysInfoLabel->setWordWrap(true);
+    m_customSysRawLabel = new QLabel(QStringLiteral("原始 JSON 将打印到日志区"));
+    m_customSysRawLabel->setWordWrap(true);
+    m_customSysRawLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_customSysRawLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_customSysRawLabel->setMaximumHeight(58);
+
+    form->addRow(QStringLiteral("接口:"), m_customSysEndpointEdit);
+    form->addRow(QStringLiteral("actualQty:"), m_customSysActualQtyEdit);
+    form->addRow(QStringLiteral("解析:"), m_customSysInfoLabel);
+    form->addRow(QStringLiteral("日志:"), m_customSysRawLabel);
+    layout->addLayout(form);
+
+    connect(m_customSysConnectBtn, &QPushButton::clicked,
+            this, &MainWindow::onCustomSystemConnect);
+    connect(m_customSysFetchBtn, &QPushButton::clicked,
+            this, &MainWindow::onCustomSystemFetch);
 
     leftPanel->addWidget(group);
 }
@@ -947,6 +1030,27 @@ void MainWindow::applyTheme(bool dark)
             : "color:#35536f; background:#f7f7f7; border:1px solid #ccc;"
               "border-radius:3px; padding:3px; font-family:monospace; font-size:10px;");
     }
+
+    if (m_customSysActualQtyEdit) {
+        QString stateColor = dark ? QStringLiteral("#b8b8b8")
+                                  : QStringLiteral("#444444");
+        if (m_customSysVisualState == QStringLiteral("running"))
+            stateColor = dark ? QStringLiteral("#66b7ff") : QStringLiteral("#0067b8");
+        else if (m_customSysVisualState == QStringLiteral("success"))
+            stateColor = dark ? QStringLiteral("#65d887") : QStringLiteral("#107c10");
+        else if (m_customSysVisualState == QStringLiteral("error"))
+            stateColor = dark ? QStringLiteral("#ff7b72") : QStringLiteral("#c42b1c");
+
+        m_customSysActualQtyEdit->setStyleSheet(QStringLiteral(
+            "QLineEdit { color:%1; font-weight:bold; }").arg(stateColor));
+        m_customSysInfoLabel->setStyleSheet(QStringLiteral(
+            "color:%1; font-weight:bold;").arg(stateColor));
+        m_customSysRawLabel->setStyleSheet(dark
+            ? "color:#9fc5e8; background:#202226; border:1px solid #444;"
+              "border-radius:3px; padding:3px; font-family:monospace; font-size:10px;"
+            : "color:#35536f; background:#f7f7f7; border:1px solid #ccc;"
+              "border-radius:3px; padding:3px; font-family:monospace; font-size:10px;");
+    }
 }
 
 // ── 读取 UI 控件 → Config 结构体 ────────────────────────────
@@ -964,6 +1068,8 @@ void MainWindow::buildConfig(DeviceManager::Config &cfg) const
     cfg.cameraIP   = m_editCameraIP->text().trimmed();
     cfg.cameraPort = 8080; // 视觉服务固定端口（Flask HTTP）
     cfg.scannerIP  = m_editScannerIP->text().trimmed();
+    if (m_customSysEndpointEdit)
+        cfg.customSysEndpoint = m_customSysEndpointEdit->text().trimmed();
     // agvPort 默认 502，无对应 UI 控件（Modbus 标准端口）
     // 机械臂 SDK 复用 robotIP（端口固定 10003）
     cfg.huayanIP   = cfg.robotIP;
@@ -1196,6 +1302,94 @@ void MainWindow::setNScanInputsEnabled(bool enabled)
     m_nscanAttemptsEdit->setEnabled(enabled);
     m_nscanRetryIntervalEdit->setEnabled(enabled);
     m_nscanTriggerBtn->setEnabled(enabled);
+}
+
+void MainWindow::onCustomSystemConnect()
+{
+    DeviceManager::Config cfg;
+    buildConfig(cfg);
+    m_devMgr->setConfig(cfg);
+    m_devMgr->testCustomSystem();
+}
+
+void MainWindow::onCustomSystemFetch()
+{
+    DeviceManager::Config cfg;
+    buildConfig(cfg);
+    m_devMgr->setConfig(cfg);
+    m_devMgr->fetchCustomSystemDayData();
+}
+
+void MainWindow::onCustomSystemRequestStarted(const QString &operation)
+{
+    setCustomSystemInputsEnabled(false);
+    m_customSysVisualState = QStringLiteral("running");
+    m_customSysIndicator->setStatus(false, operation + QStringLiteral("中..."));
+    m_customSysInfoLabel->setText(QStringLiteral("等待客户系统返回..."));
+    m_customSysRawLabel->setText(QStringLiteral("原始 JSON 将打印到日志区"));
+    m_customSysRawLabel->setToolTip(QString());
+    if (operation.contains(QStringLiteral("读取")))
+        m_customSysActualQtyEdit->setPlaceholderText(QStringLiteral("读取中..."));
+    applyTheme(m_darkTheme);
+}
+
+void MainWindow::onCustomSystemDayDataReady(const CustomSysScheduler::DayRecord &record,
+                                            const QString &rawJson)
+{
+    setCustomSystemInputsEnabled(true);
+    m_customSysVisualState = QStringLiteral("success");
+    m_customSysIndicator->setStatus(true, QStringLiteral("读取成功"));
+    m_customSysActualQtyEdit->setText(QString::number(record.actualQty));
+    m_customSysActualQtyEdit->setToolTip(QStringLiteral("客户接口 actualQty 字段"));
+
+    const QString line = record.lineName.isEmpty() ? record.lineId : record.lineName;
+    const QString dateText = record.statDate.isValid()
+        ? record.statDate.toString(QStringLiteral("yyyy-MM-dd"))
+        : QStringLiteral("-");
+    const QString parsedSummary = QStringLiteral("line=%1 date=%2 plan=%3 ok=%4 ng=%5")
+                                      .arg(line.isEmpty() ? QStringLiteral("-") : line)
+                                      .arg(dateText)
+                                      .arg(record.planQty)
+                                      .arg(record.okQty)
+                                      .arg(record.ngQty);
+    m_customSysInfoLabel->setText(parsedSummary);
+
+    m_customSysRawLabel->setText(QStringLiteral("完整原始 JSON 已打印到日志区"));
+    m_customSysRawLabel->setToolTip(rawJson.isEmpty() ? QStringLiteral("无原始返回") : rawJson);
+    log(QStringLiteral("[客户系统] 解析摘要：actualQty=%1，%2")
+            .arg(record.actualQty)
+            .arg(parsedSummary));
+    log(QStringLiteral("[客户系统] 原始返回：%1")
+            .arg(rawJson.isEmpty() ? QStringLiteral("<empty>") : rawJson));
+    applyTheme(m_darkTheme);
+}
+
+void MainWindow::onCustomSystemRequestFailed(const QString &operation,
+                                             const QString &errorMessage,
+                                             const QString &rawJson)
+{
+    setCustomSystemInputsEnabled(true);
+    m_customSysVisualState = QStringLiteral("error");
+    m_customSysIndicator->setStatus(false, QStringLiteral("请求失败"));
+    m_customSysInfoLabel->setText(QStringLiteral("%1失败：%2").arg(operation, errorMessage));
+    m_customSysInfoLabel->setToolTip(errorMessage);
+    // 失败时不覆盖旧 actualQty，避免把上一次成功数据误认为本次结果。
+    m_customSysActualQtyEdit->setPlaceholderText(QStringLiteral("读取失败"));
+    m_customSysRawLabel->setText(rawJson.isEmpty()
+        ? QStringLiteral("无原始 JSON，错误详见日志")
+        : QStringLiteral("失败时原始返回已打印到日志区"));
+    m_customSysRawLabel->setToolTip(rawJson.isEmpty() ? errorMessage : rawJson);
+    log(QStringLiteral("[客户系统] %1失败：%2").arg(operation, errorMessage));
+    if (!rawJson.isEmpty())
+        log(QStringLiteral("[客户系统] 失败原始返回：%1").arg(rawJson));
+    applyTheme(m_darkTheme);
+}
+
+void MainWindow::setCustomSystemInputsEnabled(bool enabled)
+{
+    m_customSysEndpointEdit->setEnabled(enabled);
+    m_customSysConnectBtn->setEnabled(enabled);
+    m_customSysFetchBtn->setEnabled(enabled);
 }
 
 /// "手眼标定矩阵"按钮回调：打开向导，用户确认后将矩阵写入视觉系统

@@ -42,6 +42,8 @@ set(PROJECT_SOURCES
         src/themeswitch.h
         src/nscanscheduler.cpp
         src/nscanscheduler.h
+        src/customSysScheduler.cpp
+        src/customSysScheduler.h
 )
 
 qt_add_executable(wh-robot-visual

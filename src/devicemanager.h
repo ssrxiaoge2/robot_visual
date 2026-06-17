@@ -9,6 +9,7 @@
 
 #include <memory>
 
+#include "customSysScheduler.h"
 #include "nscanscheduler.h"
 
 class AgvController;
@@ -33,6 +34,7 @@ public:
         QString scannerIP  = QStringLiteral("192.168.1.12");
         QString huayanIP   = QStringLiteral("192.168.1.11");
         quint16 huayanPort = 10003;
+        QString customSysEndpoint = QStringLiteral("http://192.168.115.229:5084/api/MesData/day");
     };
 
     explicit DeviceManager(QObject *parent = nullptr);
@@ -43,6 +45,7 @@ public:
     HuayanScheduler  *huayanScheduler() const { return m_huayanScheduler; }
     LineOrchestrator *lineOrchestrator() const { return m_lineOrch; }
     NScanScheduler   *nscanScheduler() const { return m_nscanScheduler.get(); }
+    CustomSysScheduler *customSysScheduler() const { return m_customSysScheduler; }
     bool              lightIsOn()        const { return m_lightOn;      }
     bool              nscanTestRunning() const { return m_nscanTestRunning; }
     const Config     &config()           const { return m_cfg;          }
@@ -60,6 +63,8 @@ public slots:
     void testAgv();
     void testCamera();
     void testScanner();
+    void testCustomSystem();
+    void fetchCustomSystemDayData();
     void startNScanTest(const NScanScheduler::ScanOptions &options);
     void toggleLight();
     void applyHandEyeMatrix(const float m[16]);
@@ -78,6 +83,13 @@ signals:
     void nscanTestIdle();
     void nscanTestLog(const QString &message);
     void nscanScanRequested(const NScanScheduler::ScanOptions &options);
+    void customSystemStatusChanged(bool ok, const QString &statusText);
+    void customSystemDayDataReady(const CustomSysScheduler::DayRecord &record,
+                                  const QString &rawJson);
+    void customSystemRequestStarted(const QString &operation);
+    void customSystemRequestFailed(const QString &operation,
+                                   const QString &errorMessage,
+                                   const QString &rawJson);
     void lightChanged(bool on, bool success);
     void configApplied(const QString &robotIP, const QString &agvIP);
     void agvModbusConnected();
@@ -95,6 +107,7 @@ private:
     VisionHttpClient *m_visionClient = nullptr;
     HuayanScheduler  *m_huayanScheduler = nullptr;
     LineOrchestrator *m_lineOrch = nullptr;
+    CustomSysScheduler *m_customSysScheduler = nullptr;
     std::shared_ptr<NScanScheduler> m_nscanScheduler;
     QPointer<QThread> m_nscanTestThread;
     QPointer<QObject> m_nscanTestWorker;

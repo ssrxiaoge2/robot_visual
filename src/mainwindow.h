@@ -49,6 +49,14 @@ private slots:
     void onNScanClear();
     void onNScanFinished(const NScanScheduler::ScanResult &result);
     void onNScanIdle();
+    void onCustomSystemConnect();
+    void onCustomSystemFetch();
+    void onCustomSystemRequestStarted(const QString &operation);
+    void onCustomSystemDayDataReady(const CustomSysScheduler::DayRecord &record,
+                                    const QString &rawJson);
+    void onCustomSystemRequestFailed(const QString &operation,
+                                     const QString &errorMessage,
+                                     const QString &rawJson);
     void onHandEyeCalib();
     void onHuayanConnect();
     void onHuayanDisconnect();
@@ -78,6 +86,7 @@ private:
     void initCameraPanel(QVBoxLayout *leftPanel);
     void initScannerPanel(QVBoxLayout *leftPanel);
     void initNScanPanel(QVBoxLayout *leftPanel);
+    void initCustomSystemPanel(QVBoxLayout *leftPanel);
     void initHuayanPanel(QVBoxLayout *leftPanel);
     void initAgvPanel(QVBoxLayout *leftPanel);
     void loadStationMapToTable();
@@ -85,6 +94,7 @@ private:
     void refreshResolvedLabel();
     void updateAgvMonitor(const AgvMonitorData &d);
     void setNScanInputsEnabled(bool enabled);
+    void setCustomSystemInputsEnabled(bool enabled);
 
     void log(const QString &msg);
     /// 应用主题（true=深色，false=浅色），同时刷新所有有内联样式的控件
@@ -146,6 +156,16 @@ private:
     QLabel          *m_nscanSuccessLabel      = nullptr;
     int              m_nscanSuccessCount      = 0;
     QString          m_nscanVisualState       = QStringLiteral("idle");
+
+    // ── 客户系统通信测试面板 ────────────────────────────────
+    QLineEdit       *m_customSysEndpointEdit  = nullptr;
+    QPushButton     *m_customSysConnectBtn    = nullptr;
+    QPushButton     *m_customSysFetchBtn      = nullptr;
+    DeviceIndicator *m_customSysIndicator     = nullptr;
+    QLineEdit       *m_customSysActualQtyEdit = nullptr;
+    QLabel          *m_customSysInfoLabel     = nullptr;
+    QLabel          *m_customSysRawLabel      = nullptr;
+    QString          m_customSysVisualState   = QStringLiteral("idle");
 
     // ── 华沿 SDK 调试面板 ───────────────────────────────────────
     QPushButton     *m_huayanConnectBtn    = nullptr;
