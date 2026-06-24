@@ -47,6 +47,8 @@
 #include "handeyedialog.h"
 #include "huayanScheduler.h"
 #include "lineorchestrator.h"
+#include "palletparamdialog.h"
+#include "palletscheduler.h"
 
 // ============================================================
 //  构造 / 析构
@@ -77,6 +79,7 @@ MainWindow::MainWindow(QWidget *parent)
 
     // ── 1. 先构造业务层 ─────────────────────────────────────
     m_devMgr = new DeviceManager(this);
+    m_palletScheduler = new PalletScheduler(this);
 
     // ── 2. 构建所有 UI 控件 ─────────────────────────────────
     initUI();
@@ -280,6 +283,7 @@ void MainWindow::initUI()
     initScannerPanel(leftPanel);  // 扫码器调试
     initNScanPanel(leftPanel);    // N-ScanHub SDK 主动扫码验证
     initCustomSystemPanel(leftPanel); // 客户系统 REST API 通信测试
+    initPalletPanel(leftPanel);   // 空箱码垛配置
     initAgvPanel(leftPanel);      // AGV 调试
     initHuayanPanel(leftPanel);   // 华沿 SDK 调试
 
@@ -634,6 +638,19 @@ void MainWindow::initCustomSystemPanel(QVBoxLayout *leftPanel)
     leftPanel->addWidget(group);
 }
 
+
+void MainWindow::initPalletPanel(QVBoxLayout *leftPanel)
+{
+    auto *group = new QGroupBox(QStringLiteral("码垛配置"));
+    auto *layout = new QVBoxLayout(group);
+    m_btnPalletConfig = new QPushButton(QStringLiteral("打开码垛配置"));
+    m_btnPalletConfig->setFixedHeight(28);
+    layout->addWidget(m_btnPalletConfig);
+    connect(m_btnPalletConfig, &QPushButton::clicked,
+            this, &MainWindow::onPalletConfig);
+    leftPanel->addWidget(group);
+}
+
 /**
  * @brief 初始化"AGV 调试"面板
  *
@@ -647,14 +664,15 @@ void MainWindow::initAgvPanel(QVBoxLayout *leftPanel)
 
     // ── 派单行 ───────────────────────────────────────────────
     auto *dispatchRow = new QHBoxLayout();
-    m_spinWorkstation = new QSpinBox();
-    m_spinWorkstation->setRange(1, 65535);
-    m_spinWorkstation->setFixedWidth(70);
+    m_editWorkstation = new QLineEdit(QStringLiteral("1"));
+    m_editWorkstation->setValidator(new QIntValidator(1, 65535, m_editWorkstation));
+    m_editWorkstation->setAlignment(Qt::AlignRight);
+    m_editWorkstation->setFixedWidth(70);
     m_lblResolved = new QLabel();
     m_btnAgvGo = new QPushButton(QStringLiteral("出发"));
     m_btnAgvGo->setFixedSize(56, 24);
     dispatchRow->addWidget(new QLabel(QStringLiteral("工位:")));
-    dispatchRow->addWidget(m_spinWorkstation);
+    dispatchRow->addWidget(m_editWorkstation);
     dispatchRow->addWidget(m_lblResolved);
     dispatchRow->addStretch();
     dispatchRow->addWidget(m_btnAgvGo);
@@ -709,15 +727,20 @@ void MainWindow::initAgvPanel(QVBoxLayout *leftPanel)
 
     // ── 信号连接 ─────────────────────────────────────────────
     connect(m_btnAgvGo, &QPushButton::clicked, this, [this]() {
-        const int ws = m_spinWorkstation->value();
+        bool ok = false;
+        const int ws = m_editWorkstation->text().trimmed().toInt(&ok);
+        if (!ok || ws < 1 || ws > 65535) {
+            log(QStringLiteral("[AGV] 工位号必须是 1-65535 的整数"));
+            return;
+        }
         m_devMgr->dispatchAgv(ws);
         m_flow->setStationHighlight(ws);
     });
     connect(m_btnAgvCancel, &QPushButton::clicked, m_devMgr, &DeviceManager::cancelAgvNav);
     connect(m_btnAgvPause,  &QPushButton::clicked, m_devMgr, &DeviceManager::pauseAgvNav);
     connect(m_btnAgvResume, &QPushButton::clicked, m_devMgr, &DeviceManager::resumeAgvNav);
-    connect(m_spinWorkstation, &QSpinBox::valueChanged,
-            this, [this](int) { refreshResolvedLabel(); });
+    connect(m_editWorkstation, &QLineEdit::textChanged,
+            this, [this](const QString &) { refreshResolvedLabel(); });
 
     connect(m_btnMapAdd, &QPushButton::clicked, this, [this]() {
         const int row = m_tblStationMap->rowCount();
@@ -776,8 +799,10 @@ void MainWindow::rebuildStationMapFromTable()
 
 void MainWindow::refreshResolvedLabel()
 {
-    const int ws = m_spinWorkstation->value();
-    m_lblResolved->setText(QString("→ 站点 %1").arg(m_devMgr->resolveStation(ws)));
+    bool ok = false;
+    const int ws = m_editWorkstation ? m_editWorkstation->text().trimmed().toInt(&ok) : 0;
+    m_lblResolved->setText(ok ? QString("→ 站点 %1").arg(m_devMgr->resolveStation(ws))
+                              : QStringLiteral("→ 站点 -"));
 }
 
 /// 监控快照 → 五行标签；导航状态着色：到达=绿 失败/取消/超时=红
@@ -929,8 +954,6 @@ void MainWindow::applyTheme(bool dark)
         "QLabel             { color:#ccc; background:transparent; }"
         "QLineEdit          { background:#3a3d44; color:#ddd; border:1px solid #555;"
         "                     border-radius:4px; padding:3px 6px; font-size:12px; }"
-        "QSpinBox           { background:#3a3d44; color:#ddd; border:1px solid #555;"
-        "                     border-radius:4px; padding:3px; }"
         "QPushButton        { background:#3a8fd4; color:white; border:none;"
         "                     border-radius:4px; padding:4px 16px; font-size:13px; }"
         "QPushButton:hover  { background:#4da3e8; }"
@@ -958,8 +981,6 @@ void MainWindow::applyTheme(bool dark)
         "QLabel             { color:#333; background:transparent; }"
         "QLineEdit          { background:#ffffff; color:#222; border:1px solid #bbb;"
         "                     border-radius:4px; padding:3px 6px; font-size:12px; }"
-        "QSpinBox           { background:#ffffff; color:#222; border:1px solid #bbb;"
-        "                     border-radius:4px; padding:3px; }"
         "QPushButton        { background:#0078d4; color:white; border:none;"
         "                     border-radius:4px; padding:4px 16px; font-size:13px; }"
         "QPushButton:hover  { background:#106ebe; }"
@@ -1310,6 +1331,28 @@ void MainWindow::onCustomSystemConnect()
     buildConfig(cfg);
     m_devMgr->setConfig(cfg);
     m_devMgr->testCustomSystem();
+}
+
+
+void MainWindow::onPalletConfig()
+{
+    if (m_palletDialog) {
+        m_palletDialog->raise();
+        m_palletDialog->activateWindow();
+        return;
+    }
+
+    // 仅打开配置/仿真窗口；本期不接入整线流程，也不会自动提交机械臂放置完成。
+    auto *dialog = new PalletParamDialog(
+        m_palletScheduler,
+        m_devMgr ? m_devMgr->visionClient() : nullptr,
+        this);
+    m_palletDialog = dialog;
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &QObject::destroyed, this, [this] { m_palletDialog = nullptr; });
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 void MainWindow::onCustomSystemFetch()

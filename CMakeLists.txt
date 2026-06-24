@@ -44,6 +44,10 @@ set(PROJECT_SOURCES
         src/nscanscheduler.h
         src/customSysScheduler.cpp
         src/customSysScheduler.h
+        src/palletscheduler.cpp
+        src/palletscheduler.h
+        src/palletparamdialog.cpp
+        src/palletparamdialog.h
 )
 
 qt_add_executable(wh-robot-visual

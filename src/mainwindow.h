@@ -6,9 +6,9 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QPlainTextEdit>
+#include <QPointer>
 #include <QPushButton>
 #include <QSlider>
-#include <QSpinBox>
 #include <QTableWidget>
 #include <QTextStream>
 #include <QVBoxLayout>
@@ -21,6 +21,8 @@
 
 class HandEyeDialog;
 class HuayanScheduler;
+class PalletParamDialog;
+class PalletScheduler;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -51,6 +53,8 @@ private slots:
     void onNScanIdle();
     void onCustomSystemConnect();
     void onCustomSystemFetch();
+    // 打开空箱码垛配置窗口；窗口只做配置/仿真，不启动真实机械臂流程。
+    void onPalletConfig();
     void onCustomSystemRequestStarted(const QString &operation);
     void onCustomSystemDayDataReady(const CustomSysScheduler::DayRecord &record,
                                     const QString &rawJson);
@@ -87,6 +91,8 @@ private:
     void initScannerPanel(QVBoxLayout *leftPanel);
     void initNScanPanel(QVBoxLayout *leftPanel);
     void initCustomSystemPanel(QVBoxLayout *leftPanel);
+    // 在左侧控制面板添加空箱码垛配置入口。
+    void initPalletPanel(QVBoxLayout *leftPanel);
     void initHuayanPanel(QVBoxLayout *leftPanel);
     void initAgvPanel(QVBoxLayout *leftPanel);
     void loadStationMapToTable();
@@ -107,6 +113,7 @@ private:
 
     // ── 业务层（不含 UI 逻辑）──────────────────────────────────
     DeviceManager  *m_devMgr = nullptr;
+    PalletScheduler *m_palletScheduler = nullptr;
 
     // ── 工具栏控件 ───────────────────────────────────────────
     QPushButton *m_btnStart  = nullptr;
@@ -167,6 +174,10 @@ private:
     QLabel          *m_customSysRawLabel      = nullptr;
     QString          m_customSysVisualState   = QStringLiteral("idle");
 
+    // ── 空箱码垛配置面板：只持有配置入口和当前打开的单例对话框 ─────────
+    QPushButton *m_btnPalletConfig = nullptr;
+    QPointer<PalletParamDialog> m_palletDialog;
+
     // ── 华沿 SDK 调试面板 ───────────────────────────────────────
     QPushButton     *m_huayanConnectBtn    = nullptr;
     QPushButton     *m_huayanDisconnectBtn = nullptr;
@@ -178,7 +189,7 @@ private:
     QLabel          *m_huayanSpeedLabel    = nullptr;
 
     // ── AGV 调试面板 ────────────────────────────────────────
-    QSpinBox     *m_spinWorkstation = nullptr;
+    QLineEdit    *m_editWorkstation = nullptr;
     QLabel       *m_lblResolved     = nullptr;
     QPushButton  *m_btnAgvGo        = nullptr;
     QPushButton  *m_btnAgvCancel    = nullptr;

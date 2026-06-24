@@ -105,6 +105,66 @@ void VisionHttpClient::fetchInference()
     });
 }
 
+
+/**
+ * @brief GET /inference — 码垛区占用检测
+ *
+ * 只解析 object_count/objects/confidence，供码垛状态校验使用。
+ * 不调用 parseInferenceReply()，因此不会 emit rawCoordinatesReady / coordinatesReady，
+ * 也不会触发现有机械臂抓取偏移闭环。
+ */
+void VisionHttpClient::fetchPalletOccupancy(const QString &requestId)
+{
+    if (!isConfigured()) {
+        emit palletOccupancyError(requestId, QStringLiteral("[视觉] 服务器地址未配置"));
+        return;
+    }
+
+    QNetworkRequest req(QUrl(
+        QString("http://%1:%2/inference").arg(m_ip).arg(m_port)));
+    req.setTransferTimeout(5000);
+
+    QNetworkReply *reply = m_nam->get(req);
+    reply->setParent(this);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId]() {
+        if (reply->error() != QNetworkReply::NoError) {
+            emit palletOccupancyError(
+                requestId,
+                QStringLiteral("[视觉] 码垛占用检测网络错误: %1")
+                    .arg(reply->errorString()));
+            reply->deleteLater();
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        if (doc.isNull() || !doc.isObject()) {
+            emit palletOccupancyError(
+                requestId,
+                QStringLiteral("[视觉] 码垛占用检测 JSON 解析失败"));
+            reply->deleteLater();
+            return;
+        }
+
+        const QJsonObject root = doc.object();
+        const int objCount = root.value("object_count").toInt(0);
+        const QJsonArray objects = root.value("objects").toArray();
+        double bestConfidence = 0.0;
+        for (const QJsonValue &v : objects) {
+            if (v.isObject())
+                bestConfidence = qMax(bestConfidence,
+                                      v.toObject().value("confidence").toDouble(0.0));
+        }
+
+        const bool occupied = objCount > 0 && !objects.isEmpty();
+        const QString summary = QStringLiteral("object_count=%1, objects=%2, best_confidence=%3")
+            .arg(objCount)
+            .arg(objects.size())
+            .arg(bestConfidence, 0, 'f', 3);
+        emit palletOccupancyReady(requestId, occupied, objCount, bestConfidence, summary);
+        reply->deleteLater();
+    });
+}
+
 /**
  * @brief GET /frame/annotated — 获取带标注的 JPEG 图像
  *
