@@ -87,6 +87,7 @@ private slots:
 
 private:
     void initUI();
+    /// 创建客户/现场使用的 12 工位任务看板；不替代下方设备调试面板。
     void initLineDispatchPanel(QVBoxLayout *leftPanel);
     void initConfigPanel(QVBoxLayout *leftPanel);
     void initCameraPanel(QVBoxLayout *leftPanel);
@@ -103,9 +104,9 @@ private:
     void updateAgvMonitor(const AgvMonitorData &d);
     void setNScanInputsEnabled(bool enabled);
     void setCustomSystemInputsEnabled(bool enabled);
-    void updateLineSystemState(LineSystemState state, const QString &text);
-    void updateLineQueue(const QList<Task> &tasks);
-    void updateLineCurrentTask(const Task &task);
+    void updateLineSystemState(LineSystemState state, const QString &text); ///< 只更新状态/报警控件。
+    void updateLineQueue(const QList<Task> &tasks);                         ///< 只展示未完成任务快照。
+    void updateLineCurrentTask(const Task &task);                           ///< 更新当前任务和最近结果文案。
     bool lineManagerOwnsTopLevelWorkflowUi() const;
 
     void log(const QString &msg);
@@ -136,7 +137,7 @@ private:
     DeviceIndicator *m_indAGV    = nullptr;
     DeviceIndicator *m_indLight  = nullptr;
 
-    // ── 调度监控看板 ────────────────────────────────────────
+    // ── 调度监控看板：所有成员只保存 UI 状态，业务真值在 LineManager ─────────
     QLabel       *m_lineStateLabel      = nullptr;
     QLabel       *m_lineCurrentLabel    = nullptr;
     QLabel       *m_lineQueueCountLabel = nullptr;
@@ -147,8 +148,8 @@ private:
     QPushButton  *m_lineStartBtn        = nullptr;
     QPushButton  *m_lineStopBtn         = nullptr;
     QPushButton  *m_lineResetBtn        = nullptr;
-    QList<QPushButton *> m_stationButtons;
-    quint64       m_lastLineTaskId      = 0;
+    QList<QPushButton *> m_stationButtons; ///< 12 个模拟缺料入口，property 保存 stationId。
+    quint64       m_lastLineTaskId      = 0; ///< 用于抑制同一任务文案重复记录。
     TaskStep      m_lastLineTaskStep    = TaskStep::Waiting;
     TaskState     m_lastLineTaskState   = TaskState::Pending;
     bool          m_hasLastLineTask     = false;

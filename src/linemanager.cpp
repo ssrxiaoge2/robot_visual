@@ -83,6 +83,7 @@ void LineManager::start()
         return;
     }
 
+    // Running 同时表示“执行任务”和“已启动但等待任务”；是否忙碌由 executor 区分。
     setState(LineSystemState::Running, QStringLiteral("等待缺料"));
 
     if (m_queue.hasPending()) {
@@ -162,6 +163,7 @@ void LineManager::reportShortage(int stationId)
         return;
     }
 
+    // 每次点击都生成独立任务，不按工位去重；客户可能连续需要多个料箱。
     const Task task = m_queue.enqueue(stationId, TaskSource::UiMock);
     Q_UNUSED(task);
 
@@ -173,6 +175,7 @@ void LineManager::reportShortage(int stationId)
     }
 
     if (m_state == LineSystemState::ReturningHome) {
+        // 新任务优先于空闲回站；取消回 LM1 是正常调度切换，不属于 AGV 故障。
         cancelReturnHomeForNewTask();
         tryStartNext();
         return;
@@ -206,6 +209,7 @@ void LineManager::onExecutorTaskSucceeded(const Task &task)
 
     emit logMessage(QStringLiteral("工位%1送料完成").arg(task.stationId));
 
+    // 连续任务之间不回 LM1，直接启动队首可减少无效往返。
     if (m_queue.hasPending()) {
         tryStartNext();
         return;
@@ -224,6 +228,7 @@ void LineManager::onExecutorTaskFailed(const Task &task, const QString &reason)
     // 任务失败只影响当前单，不影响后续 FIFO 调度；后面有单就继续，没有单再回 LM1。
     emit logMessage(QStringLiteral("工位%1送料失败：%2").arg(task.stationId).arg(reason));
 
+    // 能走到此信号说明 TaskExecutor 已成功完成安全收姿态，因此允许继续队列。
     if (m_queue.hasPending()) {
         tryStartNext();
         return;
@@ -268,6 +273,7 @@ void LineManager::onAgvMonitorUpdated(const AgvMonitorData &data)
         return;
     }
 
+    // 与任务导航相同：必须先看到本次回站开始运动，不能消费上一单残留 Arrived。
     if (!m_returnHomeSeenMoving) {
         return;
     }
@@ -339,6 +345,7 @@ void LineManager::tryStartNext()
 
     setState(LineSystemState::Running, QStringLiteral("正在送料"));
 
+    // takeNext() 严格取 FIFO 队首，并把该副本标记为 Running。
     Task nextTask = m_queue.takeNext();
     emit logMessage(QStringLiteral("工位%1开始送料").arg(nextTask.stationId));
     m_executor->start(nextTask);
@@ -359,6 +366,7 @@ void LineManager::returnHomeIfNeeded()
         return;
     }
 
+    // 已经物理位于 LM1 且没有活动导航时无需重复派单，直接保持等待缺料。
     if (m_hasAgvMonitor
         && m_lastAgvMonitor.curStation == kHomeLm
         && m_lastAgvMonitor.navStatus != static_cast<quint16>(AgvController::NavStatus::Waiting)
@@ -400,6 +408,7 @@ void LineManager::stopReturnHomeTracking()
 
 void LineManager::enterError(const QString &reason)
 {
+    // 整线 Error 是设备安全边界：先停止所有在途动作，再清 Pending，最后通知 UI。
     stopReturnHomeTracking();
 
     if (m_agv) {

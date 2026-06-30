@@ -67,7 +67,8 @@ void VisionHttpClient::setServerUrl(const QString &ip, int port)
 
 void VisionHttpClient::setHandEyeMatrix(const float m[16])
 {
-    // 将平铺的 16 个浮点数填入 4×4 数组（行主序）
+    // 将平铺的 16 个浮点数填入 4×4 数组（行主序）。矩阵错误会使后续机械臂
+    // 相对运动方向/距离整体错误，因此它属于现场标定的安全关键输入。
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c)
             m_T[r][c] = m[r * 4 + c];

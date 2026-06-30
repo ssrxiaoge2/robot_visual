@@ -25,6 +25,7 @@ static const char *kSettingsApp  = "robot-visual";
 static const char *kStationMapKey = "agv/stationMap";
 
 namespace {
+/// 同步扫码 SDK 的 worker 包装；moveToThread 后 scan() 在工作线程执行。
 class NScanWorker : public QObject
 {
     Q_OBJECT
@@ -85,7 +86,7 @@ DeviceManager::DeviceManager(QObject *parent)
     qRegisterMetaType<QList<Task>>("QList<Task>");
     qRegisterMetaType<LineSystemState>("LineSystemState");
 
-    // 高频扫码复用一个工作线程；空闲时仅等待事件，不轮询、不消耗 CPU。
+    // UI 测试扫码使用独立线程；空闲时仅等待事件，不轮询、不消耗 CPU。
     auto *nscanThread = new QThread;
     auto *nscanWorker = new NScanWorker(m_nscanScheduler, &m_nscanScanMutex);
     nscanWorker->moveToThread(nscanThread);
@@ -174,6 +175,8 @@ DeviceManager::DeviceManager(QObject *parent)
 
     m_palletScheduler = new PalletScheduler(this);
 
+    // 主调度另建 worker，避免测试扫码完成信号误推进任务；两个 worker 通过同一
+    // mutex 串行进入非线程安全的厂商 SDK。
     auto *lineScanThread = new QThread;
     auto *lineScanWorker = new NScanWorker(m_nscanScheduler, &m_nscanScanMutex);
     lineScanWorker->moveToThread(lineScanThread);
@@ -188,6 +191,7 @@ DeviceManager::DeviceManager(QObject *parent)
             lineScanThread, &QObject::deleteLater);
     lineScanThread->start();
 
+    // 主调度引用上面创建的唯一设备对象，不另建第二套 AGV/机械臂/码垛缓存。
     m_lineManager = new LineManager(m_agvCtrl,
                                     m_huayanScheduler,
                                     m_nscanScheduler.get(),
@@ -218,6 +222,7 @@ DeviceManager::DeviceManager(QObject *parent)
 
         emit lineScanRequested(options);
     });
+    // 扫码结果排队回到 UI 主线程，再由 LineManager 推进任务状态机。
     connect(lineScanWorker, &NScanWorker::finished,
             m_lineManager, &LineManager::onScanFinished, Qt::QueuedConnection);
 

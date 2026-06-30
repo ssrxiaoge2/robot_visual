@@ -14,7 +14,7 @@ namespace {
 // 机器人运动和位姿常量，参考原有取料 / 卸料场景坐标
 // 默认位姿仍保留示例值，真实场景下可通过 set*Pose 接口注入
 
-// 运动参数，使用简单速度/加速度示例值
+// 运动参数：现场调速优先使用 speed override；未核对负载和安全空间前不要放大基础值。
 static constexpr double kMoveVelocity = 50.0;
 static constexpr double kMoveAcceleration = 100.0;
 static constexpr double kMoveRadius = 0.0;
@@ -24,8 +24,8 @@ static constexpr double kGrabTolerance     = 2.0;    // XY 偏移收敛阈值(mm
 static constexpr double kRzTolerance       = 1.0;    // Rz 旋转收敛阈值(度)
 static constexpr int    kMaxGrabIterations = 10;      // 最大矫正迭代次数（防死循环）
 static constexpr int    kVisionSettleMs    = 2000;   // 移动后等视觉出新帧(ms)
-static constexpr double kSearchDescendStep = 20.0;
-static constexpr double kMaxSearchDescend  = 80.0;
+static constexpr double kSearchDescendStep = 20.0; // 未识别目标时每轮搜索下移量(mm)
+static constexpr double kMaxSearchDescend  = 80.0; // 搜索累计安全上限(mm)
 // GrpReset 退出 ProgramStopped 态是异步的；阶段间快速衔接时（取料→收姿态、倒料→收姿态）
 // 复位后立即下发 RunFunc 会撞 20018，须等控制器状态切换。机器人空闲时无此延迟需求。
 static constexpr int    kResetSettleMs     = 1000;
@@ -36,9 +36,9 @@ static constexpr int    kResetSettleMs     = 1000;
 static constexpr double kGrabZClearance = 425.0;   // 视觉深度与实际下探量的标定差(mm)
 static constexpr double kMaxDescend     = 1078.0;  // 下探安全上限(mm)，正常不应触发截断
 static constexpr bool   kZDescendInvert = false;   // Z 下探方向；若实际朝反方向，改 true
-static constexpr double kOffsetIgnoreDistance = 0.5;
-static constexpr double kOffsetIgnoreAngle = 0.5;
-static constexpr double kRotateToolAngle = 180.0;
+static constexpr double kOffsetIgnoreDistance = 0.5; // 码垛平移死区(mm)
+static constexpr double kOffsetIgnoreAngle = 0.5;    // 码垛旋转死区(deg)
+static constexpr double kRotateToolAngle = 180.0;    // 扫码补救的工具系 Rz 角(deg)
 
 // 华研机器人默认 TCP/UCS 名称
 static const QString kTcpName = QStringLiteral("TCP");
@@ -287,6 +287,7 @@ void HuayanScheduler::setPreGripScanEnabled(bool enabled)
 
 void HuayanScheduler::continueAfterPreGripScan()
 {
+    // 扫码结果可能在 Stop/状态切换后迟到，必须同时核对阶段、步骤和等待标志。
     if (m_action != Action::None)
         return;
     if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitPreGripScan || !m_waitingPreGripScan)
@@ -313,6 +314,7 @@ void HuayanScheduler::rotateToolRz180()
     }
 
     // 用于扫码枪扫不到有码面时，让箱体侧面二维码对准扫码枪。
+    // Action 与 Stage 分离，旋转结束后仍保留 StageOne 的扫码暂停上下文。
     m_action = Action::RotateTool;
     m_actionStep = ActionStep::RotateTool;
     if (!ensureConnected())
@@ -508,6 +510,8 @@ void HuayanScheduler::startWaitForIdle(int timeoutMs)
 
 void HuayanScheduler::onPollTick()
 {
+    // SDK 无统一的单动作完成回调，因此轮询运动状态推进步骤；必须先观察到运动
+    // 再观察到空闲，避免命令启动延迟被误判为已经完成。
     int nMovingState, nEnableState, nErrorState, nErrorCode, nErrorAxis, nBreaking, nPause, nBlendingDone;
     int nRet = HRIF_ReadRobotFlags(m_boxID, m_rbtID,
                                     nMovingState, nEnableState, nErrorState,
@@ -594,7 +598,7 @@ void HuayanScheduler::proceedStage()
 
 void HuayanScheduler::advanceStep()
 {
-    // 进入下一阶段步骤，当前阶段完成后继续工作流
+    // Stage 状态机唯一的顺序定义；新增步骤时须同步更新 executeCurrentStep()。
     switch (m_stage) {
     case Stage::StageOne:
         switch (m_stageStep) {
@@ -663,6 +667,7 @@ int HuayanScheduler::stepIndexFor(StageStep step)
 
 void HuayanScheduler::executeCurrentStep()
 {
+    // 每个分支只下发一条动作或进入一个等待点，严禁阻塞 UI 线程等待设备完成。
     const int stepIdx = stepIndexFor(m_stageStep);
     if (stepIdx >= 0)
         emit stepChanged(stepIdx);

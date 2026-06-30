@@ -28,10 +28,17 @@ Q_DECLARE_METATYPE(Task)
 Q_DECLARE_METATYPE(QList<Task>)
 Q_DECLARE_METATYPE(LineSystemState)
 
+/**
+ * @brief 所有设备对象和跨线程 worker 的唯一所有者/接线中心。
+ *
+ * MainWindow 只通过 getter/槽访问设备；LineManager 与测试面板复用同一批控制器。
+ * 调度扫码和 UI 测试扫码使用不同 worker，结果必须保持隔离。
+ */
 class DeviceManager : public QObject
 {
     Q_OBJECT
 public:
+    /// 现场网络配置；端口单位为 TCP 端口号，修改后需调用 applyConfig()。
     struct Config {
         QString robotIP    = QStringLiteral("192.168.1.11");
         QString agvIP      = QStringLiteral("192.168.1.100");
@@ -113,19 +120,19 @@ private:
     void loadStationMap();
     void saveStationMap() const;
 
-    AgvController    *m_agvCtrl     = nullptr;
-    VisionHttpClient *m_visionClient = nullptr;
-    HuayanScheduler  *m_huayanScheduler = nullptr;
-    LineOrchestrator *m_lineOrch = nullptr;
-    LineManager      *m_lineManager = nullptr;
-    PalletScheduler  *m_palletScheduler = nullptr;
+    AgvController    *m_agvCtrl     = nullptr;       ///< QObject 子对象，唯一 AGV 通信实例。
+    VisionHttpClient *m_visionClient = nullptr;      ///< QObject 子对象，视觉 HTTP 与坐标转换。
+    HuayanScheduler  *m_huayanScheduler = nullptr;  ///< QObject 子对象，唯一机械臂状态机。
+    LineOrchestrator *m_lineOrch = nullptr;          ///< 旧单工位参考流程，不是新调度主线。
+    LineManager      *m_lineManager = nullptr;       ///< 12 工位连续补料主调度。
+    PalletScheduler  *m_palletScheduler = nullptr;   ///< 主流程和配置 UI 共用的码垛缓存。
     CustomSysScheduler *m_customSysScheduler = nullptr;
     std::shared_ptr<NScanScheduler> m_nscanScheduler;
-    QMutex            m_nscanScanMutex;
+    QMutex            m_nscanScanMutex;      ///< 厂商扫码 SDK 串行保护，两个 worker 共用。
     QPointer<QThread> m_nscanTestThread;
     QPointer<QObject> m_nscanTestWorker;
-    QPointer<QThread> m_lineScanThread;
-    QPointer<QObject> m_lineScanWorker;
+    QPointer<QThread> m_lineScanThread;       ///< 主调度专用扫码线程。
+    QPointer<QObject> m_lineScanWorker;       ///< 只把结果送回 LineManager。
     NScanScheduler::ScanOptions m_nscanTestOptions;
     NScanScheduler::ScanOptions m_lineScanOptions;
     Config            m_cfg;

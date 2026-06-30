@@ -632,6 +632,7 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
         auto *button = new QPushButton(QStringLiteral("工位%1").arg(stationId));
         button->setProperty("stationId", stationId);
         button->setMinimumHeight(28);
+        // 按钮只上报一次缺料事件；任务编号、FIFO 入队和执行时机由 LineManager 决定。
         connect(button, &QPushButton::clicked, this, [this, button]() {
             LineManager *lm = m_devMgr ? m_devMgr->lineManager() : nullptr;
             if (!lm) {
@@ -648,6 +649,7 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
     auto *queueTitle = new QLabel(QStringLiteral("FIFO 队列"));
     layout->addWidget(queueTitle);
 
+    // 仅展示 Running + Pending；长期历史写日志，避免表格随运行时间无限增长。
     m_lineQueueTable = new QTableWidget(0, 4, gbLine);
     m_lineQueueTable->setHorizontalHeaderLabels(
         {QStringLiteral("任务号"), QStringLiteral("工位"), QStringLiteral("状态"), QStringLiteral("入队时间")});
@@ -1454,11 +1456,13 @@ void MainWindow::buildConfig(DeviceManager::Config &cfg) const
 
 void MainWindow::onStart()
 {
+    // 顶部与看板 Start 统一进入新 LineManager，不再启动旧 LineOrchestrator。
     m_devMgr->lineManager()->start();
 }
 
 void MainWindow::onStop()
 {
+    // Stop 是清队列并进入 Error 的急停语义，不是可恢复暂停。
     m_devMgr->lineManager()->stop();
 }
 

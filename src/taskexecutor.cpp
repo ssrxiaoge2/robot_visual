@@ -68,6 +68,8 @@ Task TaskExecutor::currentTask() const
 
 void TaskExecutor::start(const Task &task)
 {
+    // 单 AGV + 单机械臂只能串行执行；忙碌时再次 start 属于调度层不变量被破坏，
+    // 因而不是普通任务失败，而是需要停止整线检查的系统级错误。
     if (isBusy()) {
         Task rejected = task;
         rejected.state = TaskState::Failed;
@@ -109,6 +111,7 @@ void TaskExecutor::start(const Task &task)
     m_arm->setPalletFunctions(palletFuncs);
     m_arm->setPreGripScanEnabled(true);
 
+    // 任务启动时清除上一次可能残留的“正在码垛”标志，避免 UI/配置窗口误判。
     clearPalletStackingFlag();
 
     emit logMessage(prefix(QStringLiteral("TASK"))
@@ -134,6 +137,8 @@ void TaskExecutor::stopForSystemError(const QString &reason)
 
 void TaskExecutor::onScanFinished(const NScanScheduler::ScanResult &result)
 {
+    // worker 结果通过排队连接返回，可能在 Stop 或状态切换后迟到；只有当前确实
+    // 等待扫码时才能消费，防止测试扫码或旧请求误推进机械臂。
     if (!isBusy() || m_state != ExecState::PreGripScan) {
         return;
     }
@@ -161,6 +166,7 @@ void TaskExecutor::onScanFinished(const NScanScheduler::ScanResult &result)
     }
 
     if (m_scanAttempt <= 1) {
+        // 首轮失败先做独立 Rz 旋转，不结束被暂停的 StageOne；旋转完成后再发第二轮请求。
         m_scanAttempt = 2;
         m_state = ExecState::RotateForScan;
         setTaskRunning(TaskStep::PreGripScan,
@@ -191,6 +197,7 @@ void TaskExecutor::onAgvMonitor(const AgvMonitorData &data)
 
     if (data.navStatus >= static_cast<quint16>(AgvController::NavStatus::Failed)
         && data.navStatus <= static_cast<quint16>(AgvController::NavStatus::Timeout)) {
+        // 忽略其他/上一导航任务残留的失败状态，只处理当前 expectedLm 对应任务。
         if (data.navStation != m_expectedLm) {
             return;
         }
@@ -203,6 +210,8 @@ void TaskExecutor::onAgvMonitor(const AgvMonitorData &data)
         return;
     }
 
+    // 禁止直接消费启动前残留的 Arrived(4)。本次必须先真实出现 Waiting/Running，
+    // 才能证明后续 Arrived 属于刚刚发出的导航命令。
     if (!m_agvSeenMoving) {
         return;
     }
@@ -241,6 +250,8 @@ void TaskExecutor::onArmStageCompleted(const QString &stageName)
     emit logMessage(prefix(QStringLiteral("ARM"))
                     + QStringLiteral(" %1 已完成").arg(stageName));
 
+    // HuayanScheduler 的完成信号是通用信号；业务推进只依赖当前 ExecState，
+    // 不解析可变的中文 stageName，从而避免文案变化破坏状态机。
     switch (m_state) {
     case ExecState::ArmPickup:
     case ExecState::PreGripScan:
@@ -277,6 +288,8 @@ void TaskExecutor::onArmStageError(const QString &reason)
         return;
     }
 
+    // CleanupStow 已是任务失败后的最后安全恢复手段；它再失败说明无法保证机械臂
+    // 处于可运输姿态，必须升级为系统级 ERROR，禁止继续下一任务。
     if (m_state == ExecState::CleanupStow) {
         emit logMessage(prefix(QStringLiteral("ERROR"))
                         + QStringLiteral(" CLEANUP 安全收姿态失败，需升级为系统级 ERROR：%1")
@@ -326,6 +339,7 @@ void TaskExecutor::onPalletPlaceCompleted()
         return;
     }
 
+    // 先显式进入 CommitPallet，使日志/UI 能区分“机械臂已放好”和“缓存已推进”。
     m_state = ExecState::CommitPallet;
     setTaskRunning(TaskStep::CommitPallet, QStringLiteral("机械臂放置完成，提交码垛缓存"));
 
@@ -364,6 +378,7 @@ void TaskExecutor::onAgvTimeout()
 
 void TaskExecutor::resetRuntimeState()
 {
+    // 只重置运行期字段；调用方会在 reset 后设置 m_task 终态并发送最终信号。
     m_agvTimeout->stop();
     m_state = ExecState::Idle;
     m_stationCfg = nullptr;
@@ -507,6 +522,8 @@ bool TaskExecutor::resolveTaskConfigs()
 
 void TaskExecutor::enterState(ExecState state, const QString &statusText)
 {
+    // 先发布任务状态，再启动设备动作；这样即使设备立即同步报错，日志/UI 也能
+    // 准确显示错误发生在哪个业务步骤。
     m_state = state;
     setTaskRunning(taskStepForState(state), statusText);
 
@@ -559,6 +576,7 @@ void TaskExecutor::enterState(ExecState state, const QString &statusText)
 
 void TaskExecutor::startAgvStep(ExecState state, int lm, const QString &statusText)
 {
+    // 每次导航都重新清除 SeenMoving，避免沿用上一段导航的运动证据。
     m_expectedLm = lm;
     m_agvSeenMoving = false;
     m_state = state;
@@ -571,6 +589,7 @@ void TaskExecutor::startAgvStep(ExecState state, int lm, const QString &statusTe
 
 void TaskExecutor::requestScan(const QString &statusText)
 {
+    // ScanOptions 只包含协议参数；scannerIP 由 DeviceManager 在跨线程转发时填入。
     m_state = ExecState::PreGripScan;
     setTaskRunning(TaskStep::PreGripScan, statusText);
 
@@ -608,6 +627,7 @@ void TaskExecutor::beginPalletPreparation()
                         + QStringLiteral(" 配置建议：%1").arg(suggestions.join(QStringLiteral("；"))));
     }
 
+    // nextRelativeOffset 只预览下一点，不改变 placedCount；真正提交在机械臂成功松爪后。
     QString error;
     if (!m_pallet->nextRelativeOffset(m_stationCfg->palletArea, &m_pendingPalletOffset, &error)) {
         raiseSystemError(QStringLiteral("码垛区无可用点位：%1").arg(error));
@@ -693,6 +713,8 @@ void TaskExecutor::finishTaskSuccess()
 
 void TaskExecutor::raiseSystemError(const QString &reason)
 {
+    // 系统级错误必须同时停 AGV、停机械臂并清理运行期状态；LineManager 收到
+    // systemError 后负责清空 Pending 和阻止新任务入队。
     emit logMessage(prefix(QStringLiteral("ERROR"))
                     + QStringLiteral(" 系统级 ERROR：%1").arg(reason));
     clearPalletStackingFlag();

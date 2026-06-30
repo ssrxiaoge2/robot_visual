@@ -14,6 +14,8 @@ add_compile_definitions(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network SerialBus)
 include(GNUInstallDirs)
 
+# 调度文件职责：lineconfig/taskqueue 定义模型，taskexecutor 执行单任务，
+# linemanager 管理整线状态和 FIFO；它们与设备控制器编译进同一 Qt 程序。
 set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
