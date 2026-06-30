@@ -40,6 +40,12 @@ set(PROJECT_SOURCES
         src/workflowwidget.h
         src/themeswitch.cpp
         src/themeswitch.h
+        src/lineconfig.h
+        src/taskqueue.h
+        src/taskexecutor.cpp
+        src/taskexecutor.h
+        src/linemanager.cpp
+        src/linemanager.h
         src/nscanscheduler.cpp
         src/nscanscheduler.h
         src/customSysScheduler.cpp

@@ -3,6 +3,7 @@
 
 #include <QHash>
 #include <QList>
+#include <QMutex>
 #include <QObject>
 #include <QPointer>
 #include <QString>
@@ -10,16 +11,22 @@
 #include <memory>
 
 #include "customSysScheduler.h"
+#include "lineconfig.h"
+#include "linemanager.h"
 #include "nscanscheduler.h"
 
 class AgvController;
 class VisionHttpClient;
 class HuayanScheduler;
 class LineOrchestrator;
+class PalletScheduler;
 class QThread;
 
 Q_DECLARE_METATYPE(NScanScheduler::ScanResult)
 Q_DECLARE_METATYPE(NScanScheduler::ScanOptions)
+Q_DECLARE_METATYPE(Task)
+Q_DECLARE_METATYPE(QList<Task>)
+Q_DECLARE_METATYPE(LineSystemState)
 
 class DeviceManager : public QObject
 {
@@ -44,7 +51,9 @@ public:
     VisionHttpClient *visionClient()     const { return m_visionClient; }
     HuayanScheduler  *huayanScheduler() const { return m_huayanScheduler; }
     LineOrchestrator *lineOrchestrator() const { return m_lineOrch; }
+    LineManager      *lineManager()     const { return m_lineManager; }
     NScanScheduler   *nscanScheduler() const { return m_nscanScheduler.get(); }
+    PalletScheduler  *palletScheduler() const { return m_palletScheduler; }
     CustomSysScheduler *customSysScheduler() const { return m_customSysScheduler; }
     bool              lightIsOn()        const { return m_lightOn;      }
     bool              nscanTestRunning() const { return m_nscanTestRunning; }
@@ -83,6 +92,7 @@ signals:
     void nscanTestIdle();
     void nscanTestLog(const QString &message);
     void nscanScanRequested(const NScanScheduler::ScanOptions &options);
+    void lineScanRequested(const NScanScheduler::ScanOptions &options);
     void customSystemStatusChanged(bool ok, const QString &statusText);
     void customSystemDayDataReady(const CustomSysScheduler::DayRecord &record,
                                   const QString &rawJson);
@@ -107,11 +117,17 @@ private:
     VisionHttpClient *m_visionClient = nullptr;
     HuayanScheduler  *m_huayanScheduler = nullptr;
     LineOrchestrator *m_lineOrch = nullptr;
+    LineManager      *m_lineManager = nullptr;
+    PalletScheduler  *m_palletScheduler = nullptr;
     CustomSysScheduler *m_customSysScheduler = nullptr;
     std::shared_ptr<NScanScheduler> m_nscanScheduler;
+    QMutex            m_nscanScanMutex;
     QPointer<QThread> m_nscanTestThread;
     QPointer<QObject> m_nscanTestWorker;
+    QPointer<QThread> m_lineScanThread;
+    QPointer<QObject> m_lineScanWorker;
     NScanScheduler::ScanOptions m_nscanTestOptions;
+    NScanScheduler::ScanOptions m_lineScanOptions;
     Config            m_cfg;
     bool              m_lightOn      = false;
     bool              m_nscanTestRunning = false;

@@ -40,6 +40,7 @@ private slots:
     // ── 转发用户操作到业务层 ──────────────────────────────────
     void onStart();
     void onStop();
+    void onReset();
     void onLightToggle();
     void onApplyConfig();
     void onTestRobot();
@@ -86,6 +87,7 @@ private slots:
 
 private:
     void initUI();
+    void initLineDispatchPanel(QVBoxLayout *leftPanel);
     void initConfigPanel(QVBoxLayout *leftPanel);
     void initCameraPanel(QVBoxLayout *leftPanel);
     void initScannerPanel(QVBoxLayout *leftPanel);
@@ -101,6 +103,10 @@ private:
     void updateAgvMonitor(const AgvMonitorData &d);
     void setNScanInputsEnabled(bool enabled);
     void setCustomSystemInputsEnabled(bool enabled);
+    void updateLineSystemState(LineSystemState state, const QString &text);
+    void updateLineQueue(const QList<Task> &tasks);
+    void updateLineCurrentTask(const Task &task);
+    bool lineManagerOwnsTopLevelWorkflowUi() const;
 
     void log(const QString &msg);
     /// 应用主题（true=深色，false=浅色），同时刷新所有有内联样式的控件
@@ -112,12 +118,14 @@ private:
     Ui::MainWindow *ui = nullptr;
 
     // ── 业务层（不含 UI 逻辑）──────────────────────────────────
-    DeviceManager  *m_devMgr = nullptr;
+    DeviceManager   *m_devMgr = nullptr;
+    // 码垛参数 UI 与主流程共用 DeviceManager 内的同一个调度器，避免参数不同步。
     PalletScheduler *m_palletScheduler = nullptr;
 
     // ── 工具栏控件 ───────────────────────────────────────────
     QPushButton *m_btnStart  = nullptr;
     QPushButton *m_btnStop   = nullptr;
+    QPushButton *m_btnReset  = nullptr;
     QLabel      *m_lblCycle  = nullptr;
     QLabel      *m_lblStep   = nullptr;
     int          m_cycleCount = 0;
@@ -127,6 +135,23 @@ private:
     DeviceIndicator *m_indRobot  = nullptr;
     DeviceIndicator *m_indAGV    = nullptr;
     DeviceIndicator *m_indLight  = nullptr;
+
+    // ── 调度监控看板 ────────────────────────────────────────
+    QLabel       *m_lineStateLabel      = nullptr;
+    QLabel       *m_lineCurrentLabel    = nullptr;
+    QLabel       *m_lineQueueCountLabel = nullptr;
+    QLabel       *m_lineAlarmLabel      = nullptr;
+    QLabel       *m_lineLastDoneLabel   = nullptr;
+    QLabel       *m_lineLastFailedLabel = nullptr;
+    QTableWidget *m_lineQueueTable      = nullptr;
+    QPushButton  *m_lineStartBtn        = nullptr;
+    QPushButton  *m_lineStopBtn         = nullptr;
+    QPushButton  *m_lineResetBtn        = nullptr;
+    QList<QPushButton *> m_stationButtons;
+    quint64       m_lastLineTaskId      = 0;
+    TaskStep      m_lastLineTaskStep    = TaskStep::Waiting;
+    TaskState     m_lastLineTaskState   = TaskState::Pending;
+    bool          m_hasLastLineTask     = false;
 
     // ── 网络配置面板 ────────────────────────────────────────
     QLineEdit   *m_editRobotIP   = nullptr;

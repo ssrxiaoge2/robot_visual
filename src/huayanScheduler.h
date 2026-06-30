@@ -6,6 +6,7 @@
 #include <QStringList>
 
 class QTimer;
+struct PalletPose;
 
 class HuayanScheduler : public QObject
 {
@@ -30,6 +31,17 @@ public:
         double rz = 0;
     };
 
+    struct StationArmFunctions {
+        QString captureFunc;
+        QString unloadPointFunc;
+        QString unloadFunc;
+    };
+
+    struct PalletArmFunctions {
+        QString palletBaseFunc;
+        QString releaseFunc;
+    };
+
     explicit HuayanScheduler(QObject *parent = nullptr);
     ~HuayanScheduler() override;
 
@@ -48,6 +60,13 @@ public:
     bool startRobotScript();
     bool stopRobotScript();
 
+    void setStationFunctions(const StationArmFunctions &funcs);
+    void setPalletFunctions(const PalletArmFunctions &funcs);
+    void setPreGripScanEnabled(bool enabled);
+    void continueAfterPreGripScan();
+    void rotateToolRz180();
+    void startPalletPlace(const PalletPose &offset);
+
     void startStageOne();
     void startStageTwo();
     void startStageThree();
@@ -58,9 +77,12 @@ public:
     void setSurveyPose(const Pose &p);
     void releaseGripper();           // 手动松开夹爪（UI 按钮调用）
     void setSpeedOverride(int percent);  // 运动速度倍率 1~100(%)，可经 UI 实时调整
+    void resetArm();                     // 机械臂复位（调用 Func_fuwei）
 
 public slots:
     void setGrabOffset(double x, double y, double z, double rz);
+    void onVisionNoObject();
+    void onVisionErrorForPickup(const QString &msg);
 
 signals:
     void connected();
@@ -70,6 +92,11 @@ signals:
     void stageError(const QString &msg);
     void logMessage(const QString &msg);
     void surveyReady();
+    void preGripScanRequested();
+    void toolRotationCompleted();
+    void toolRotationError(const QString &reason);
+    void palletPlaceCompleted();
+    void palletPlaceError(const QString &reason);
 
     /// 流程图步骤索引变化（0-4，对应 WorkflowWidget 节点），供 UI 高亮
     void stepChanged(int stepIdx);
@@ -83,8 +110,10 @@ private:
         None,
         MoveToSurvey,
         WaitForVision,
+        SearchDescend,
         MoveToGrab,
         DescendZ,
+        WaitPreGripScan,
         MoveToPickup,
         CloseGripper,
         LiftLoad,
@@ -105,10 +134,34 @@ private:
         double distance;
     };
 
+    enum class Action {
+        None,
+        RotateTool,
+        PalletPlace
+    };
+
+    enum class ActionStep {
+        None,
+        RotateTool,
+        RunPalletBase,
+        MovePalletOffset,
+        ReleasePallet
+    };
+
     void proceedStage();
     void advanceStep();
     void executeCurrentStep();
     bool executeNextGrabMove();
+    void proceedAction();
+    void advanceActionStep();
+    bool executeNextPalletMove();
+    bool rejectStageStartWhileActionRunning(const QString &stageName);
+    void clearActionState();
+    void finishAction();
+    void actionError(const QString &msg, bool stopRobot = false);
+    void stopPollingAndTimers();
+    void requestRobotStop();
+    void emitOperationError(const QString &msg);
 
     void setPickupPose(const Pose &p);
     Pose pickupPose() const;
@@ -153,10 +206,18 @@ private:
     QList<RelMove> m_grabMoves;
     int m_grabMoveIdx = 0;
     int m_grabIterations = 0;   // 闭环视觉矫正的迭代计数
+    int m_searchDescendCount = 0;   // 找目标保护搜索的次数，不参与抓取闭环迭代
+    double m_searchDescendedMm = 0.0;  // 找目标累计下移量(mm)，不是抓取 Z 下探量
+    bool m_preGripScanEnabled = false;
+    bool m_waitingPreGripScan = false;
     Pose m_pickupPose;
     Pose m_pickupLiftPose;
     Pose m_unloadPose;
     Pose m_emptyBoxPose;
+    QList<RelMove> m_palletMoves;
+    int m_palletMoveIdx = 0;
+    Action m_action = Action::None;
+    ActionStep m_actionStep = ActionStep::None;
 
     QString m_ip;
     unsigned short m_port = 10003;
@@ -173,6 +234,7 @@ private:
     QString m_captureFuncName = QStringLiteral("Func_capture");
     QString m_gripFuncName    = QStringLiteral("Func_jiajin");
     QString m_releaseFuncName = QStringLiteral("Func_songzhua");
+    QString m_palletBaseFuncName;
 
     QString m_stowFuncName        = QStringLiteral("Func_yun_xing_zhong");
     QString m_unloadPointFuncName = QStringLiteral("Func_daoliao_1_point");
