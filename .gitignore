@@ -56,7 +56,8 @@ Log/
 Thumbs.db
 desktop.ini
 # 党欢本地环境文件
-docs/
+docs/dh_code_style.md
+docs/dh_project.md
 AGENTS.md
 .vscode/
 
