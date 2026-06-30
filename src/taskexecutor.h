@@ -74,7 +74,7 @@ private:
         AgvToPickup,        ///< 等待 AGV 到取料 LM。
         ArmPickup,          ///< 机械臂视觉定位、下探、夹取和抬升。
         PreGripScan,        ///< 机械臂停在夹紧前安全点，等待扫码结果。
-        RotateForScan,      ///< 首轮扫码失败后的 180° 独立补救动作。
+        RotateForScan,      ///< 安全开关开启时，首轮扫码失败后的 180° 独立补救动作。
         StowAfterPickup,    ///< 取料完成后等待机械臂收姿态。
         AgvToUnload,        ///< 等待 AGV 到倒料 LM。
         ArmUnload,          ///< 等待倒料准备点和倒料函数完成。
@@ -88,6 +88,15 @@ private:
     };
 
     static constexpr int kAgvTimeoutMs = 120000; ///< 每个 AGV 导航步骤上限，单位 ms。
+
+    /**
+     * @brief 是否允许扫码首轮失败后执行工具 Rz 旋转 180° 的补救动作。
+     *
+     * 默认必须保持 false：现场实测表明该旋转可能撞击机械臂旁边的人员或物体。
+     * 只有完成旋转空间清理、人员隔离和现场安全确认后，才允许改为 true，并须
+     * 重新编译部署。此开关只影响扫码失败补救，不影响扫码成功后的正常夹取流程。
+     */
+    static constexpr bool kEnableScanFailureRotationRecovery = false;
 
     /// 清除单任务运行字段并回 Idle；不会清除 m_task，以便随后发送终态快照。
     void resetRuntimeState();
@@ -129,7 +138,7 @@ private:
     const PalletAreaTaskConfig *m_palletCfg = nullptr;///< 指向静态码垛区配置。
     PalletPose m_pendingPalletOffset;                  ///< 本次放置尚未 commit 的相对偏移。
     int m_expectedLm = 0;                             ///< 当前 AGV 步骤必须到达的数字 LM。
-    int m_scanAttempt = 0;                            ///< 0=未扫码，1=首轮，2=旋转后第二轮。
+    int m_scanAttempt = 0;                            ///< 0=未扫码，1=首轮；仅安全开关开启时使用 2=旋转后第二轮。
     bool m_agvSeenMoving = false;                     ///< 已观察到本次导航进入 Waiting/Running。
     bool m_cleanupAfterTaskFailure = false;           ///< 当前收姿态是否属于失败清理路径。
     QString m_pendingTaskFailureReason;               ///< 清理成功后写入 taskFailed 的原始原因。

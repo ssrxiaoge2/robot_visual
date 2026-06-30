@@ -166,7 +166,18 @@ void TaskExecutor::onScanFinished(const NScanScheduler::ScanResult &result)
     }
 
     if (m_scanAttempt <= 1) {
-        // 首轮失败先做独立 Rz 旋转，不结束被暂停的 StageOne；旋转完成后再发第二轮请求。
+        // 安全策略：默认禁止首轮失败后的 180° 旋转，避免机械臂碰撞旁边人员或物体。
+        // 此时按普通任务失败收尾并收安全姿态，不得先切换旋转状态或下发旋转命令。
+        if (!kEnableScanFailureRotationRecovery) {
+            emit logMessage(prefix(QStringLiteral("SCAN"))
+                            + QStringLiteral(" 首轮失败：%1；扫码旋转补救开关已关闭，禁止旋转")
+                                  .arg(failureDetail));
+            beginCleanupAfterTaskFailure(
+                QStringLiteral("首轮扫码失败且旋转补救已关闭：%1").arg(failureDetail));
+            return;
+        }
+
+        // 仅在现场安全确认并显式开启开关后，才保留暂停中的 StageOne，执行旋转并发起第二轮扫码。
         m_scanAttempt = 2;
         m_state = ExecState::RotateForScan;
         setTaskRunning(TaskStep::PreGripScan,

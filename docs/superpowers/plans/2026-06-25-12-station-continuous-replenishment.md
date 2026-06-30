@@ -1389,6 +1389,13 @@ void TaskExecutor::onScanFinished(const NScanScheduler::ScanResult &result)
     }
 
     if (!m_scanAfterRotation) {
+        if (!kEnableScanFailureRotationRecovery) {
+            emit logMessage(formatTaskPrefix(m_task, QStringLiteral("SCAN"))
+                            + QStringLiteral(" 首轮扫码失败或空码，旋转补救已关闭"));
+            failTask(QStringLiteral("扫码失败或空码"));
+            return;
+        }
+
         emit logMessage(formatTaskPrefix(m_task, QStringLiteral("SCAN"))
                         + QStringLiteral(" 首轮扫码失败或空码，准备旋转180度"));
         enterState(ExecState::RotateForScan);
@@ -1402,8 +1409,8 @@ void TaskExecutor::onScanFinished(const NScanScheduler::ScanResult &result)
 验证点：
 
 - 空码不能通过。
-- 第一轮失败必须旋转。
-- 第二轮失败才任务失败。
+- 默认开关关闭时，第一轮失败直接任务失败且不得旋转。
+- 仅当 `kEnableScanFailureRotationRecovery` 开启时，第一轮失败旋转、第二轮失败才任务失败。
 
 ### 14.7 码垛点准备伪代码
 
@@ -1565,8 +1572,9 @@ Error -> "系统报警"
 | V2 | 视觉超限 | 连续无目标超 80mm | 当前任务失败 | 视觉搜索超限 | 收姿态后继续 |
 | V3 | 视觉错误 | HTTP/解析错误 | 当前任务失败 | 视觉服务错误 | 不下移 |
 | S1 | 扫码成功 | 返回非空 code | 继续夹紧 | 扫码成功 code | 不旋转 |
-| S2 | 扫码空码 | Success 但 code 空 | 旋转或失败 | 空码失败 | 第一轮旋转，第二轮失败 |
-| S3 | 扫码首轮失败 | 返回 Timeout | 旋转180 | SCAN 失败 | 第二轮发起 |
+| S2 | 默认开关关闭时扫码空码 | Success 但 code 空 | 当前任务失败 | 旋转补救已关闭 | 不下发旋转动作 |
+| S3 | 默认开关关闭时扫码超时 | 返回 Timeout | 当前任务失败 | 旋转补救已关闭 | 不发起第二轮扫码 |
+| S4 | 开关开启时首轮失败 | 返回 Timeout | 旋转180 | SCAN 失败 | 第二轮发起 |
 | P1 | 码垛正常 | next offset 成功 | 正在放空箱 | offset 日志 | 松爪后 commit |
 | P2 | 码垛满 | placedCount 到容量 | 系统报警 | 码垛区满 | 不调用放箱 |
 | P3 | commit 失败 | commitPlaced false | 系统报警 | commit 失败 | Pending 清空 |
@@ -1739,3 +1747,58 @@ Bug 修复或新功能完成并验证后，按以下顺序执行：
 - [ ] 未执行 `git push`；后续 push 由用户人工完成。
 
 未满足任一门禁项时，代码可以保留在工作区继续检查，但不得提交，也不得声称已经完成十二工位现场验收。
+
+---
+
+## 20. 现场 Bug 修复
+
+### 任务 15：Bug 1——默认禁止扫码失败后的 180 度旋转
+
+**问题与根因：** `TaskExecutor::onScanFinished()` 在首轮扫码失败或空码时无条件进入 `RotateForScan`，存在碰撞人员和物体的风险。
+
+**确认方案：**
+
+- 在 `TaskExecutor` 集中常量区增加布尔代码开关，默认 `false`。
+- 默认关闭时直接进入任务级失败收尾，不旋转、不进行第二轮扫码。
+- 开关改为 `true` 后保留原有“旋转 180 度 → 第二轮扫码”流程。
+- 不新增 UI，不使用 `QSettings`；开启需修改常量并重新编译。
+
+**已确认文件范围：**
+
+- 新增文件：无。
+- 修改：`src/taskexecutor.h`、`src/taskexecutor.cpp`、唯一设计文档和本实施文档。
+- 明确不修改：`huayanScheduler.*`、`linemanager.*`、`mainwindow.*`、`devicemanager.*`、扫码 SDK 和其他设备模块。
+
+**实施与验证：**
+
+1. 新增默认关闭的安全常量，并在首轮失败分支于旋转调用前判断。
+2. 静态检查扫码成功、默认关闭失败、开启后旋转补救、第二轮失败四条路径。
+3. 完整构建，执行 `git diff --check` 和文件范围检查。
+4. 现场制造一次扫码失败，确认日志显示旋转补救关闭，机械臂不旋转并进入安全收姿态。
+
+**源码注释要求：**
+
+- 开关名称直接表达“扫码失败后是否允许旋转补救”。
+- 注释说明默认 `false`、碰撞风险、开启前必须完成现场安全隔离、修改后需重新编译。
+- 首轮失败分支说明关闭时直接任务失败属于安全策略。
+- 更新 `m_scanAttempt`、`RotateForScan` 等相邻注释，使其只描述开关开启时的路径。
+
+**注释验收清单：**
+
+- [x] 新增常量和失败分支具有准确中文安全注释。
+- [x] 相邻状态、字段和接口注释与“默认不旋转”一致。
+- [x] spec、plan、头文件和实现文件的默认值及行为一致。
+- [x] 无过期文案继续声称“首轮失败必须旋转”。
+
+**范围扩大门禁：**
+
+- [x] 实际差异仅包含上述四个已确认文件。
+- [ ] 如需新增测试文件或修改构建文件，先暂停并获得用户确认。
+
+**实施结果（2026-07-01）：**
+
+- 已增加 `kEnableScanFailureRotationRecovery = false`，保护判断位于旋转状态切换和 `rotateToolRz180()` 调用之前。
+- 默认关闭时记录明确安全日志，并调用 `beginCleanupAfterTaskFailure()` 进入收安全姿态流程。
+- `cmake --build build --target wh-robot-visual -j$(nproc)` 通过。
+- `ctest --test-dir build --output-on-failure`：2/2 通过，0 失败。
+- 当前状态：代码和离线验证完成，待现场扫码失败复测；十二工位整体验收仍未完成。
