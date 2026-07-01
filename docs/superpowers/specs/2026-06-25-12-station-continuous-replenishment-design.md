@@ -215,7 +215,8 @@ StowAfterPickup
   机械臂收安全姿态
 
 AgvToUnload
-  AGV -> unloadLm
+  pickupLm == unloadLm -> 不下发导航、不启动导航超时，直接进入 ArmUnload
+  pickupLm != unloadLm -> AGV 导航到 unloadLm，严格等待本次任务先运动再到达
 
 ArmUnload
   机械臂调用 unloadPointFunc
@@ -569,6 +570,7 @@ v1 不做：
 1. 工位 1-11 完成取料、扫码、倒料、共享码垛区放空箱、回 LM1 或下一任务。
 2. 工位 12 完成取料、扫码、倒料、工位12独立码垛区放空箱、回 LM1 或下一任务。
 3. 有连续任务时，任务间不回 LM1，直接去下一任务取料点。
+4. 取料 LM 与倒料 LM 相同的工位（当前为 1、2、11、12）在取料后收姿态完成时跳过 AGV 导航，直接启动机械臂倒料。
 
 异常流程：
 
@@ -672,3 +674,20 @@ Git 交付门禁：
 预计修改：`src/taskexecutor.h`、`src/taskexecutor.cpp`、本设计文档及唯一实施文档；不修改机械臂底层、UI、扫码 SDK 或其他设备模块。
 
 实施结果（2026-07-01）：已增加 `kEnableScanFailureRotationRecovery = false`，首轮扫码失败或空码时会在进入旋转状态及下发旋转命令前直接转入任务失败安全收尾。完整构建和现有策略测试已通过；尚待现场制造扫码失败并确认机械臂无旋转动作。
+
+### Bug 2：取料位与倒料位相同时调度停在倒料导航
+
+现场现象：工位 2 完成取料和收安全姿态后，日志显示再次请求导航到 LM4，但不再进入机械臂倒料流程。
+
+根因：工位 2 的 `pickupLm` 与 `unloadLm` 均为 4。`startAgvStep()` 把同站点当作新导航并清除 `m_agvSeenMoving`；AGV 已在目标站时通常不会再次产生 Waiting/Running，导致严格到站逻辑拒绝消费保持不变的 Arrived，调度只能等待 120 秒超时。现场日志已验证“收姿态完成 → 请求 LM4 → 无新到达事件”的链路。
+
+确认设计：
+
+- `StowAfterPickup` 完成后比较当前工位的 `pickupLm` 与 `unloadLm`。
+- 两者相同：不调用 `startAgvStep()`、不发 `agvDispatchRequested`、不启动导航超时，记录跳过日志并直接 `enterState(ArmUnload)`。
+- 两者不同：保持现有严格导航逻辑，不放宽 `m_agvSeenMoving` 和三条件到站校验。
+- 当前同站工位为 1、2、11、12，均适用该规则。
+
+预计修改：`src/taskexecutor.cpp`、本设计文档及唯一实施文档；不修改 `AgvController`、工位配置、机械臂、UI 或其他模块。
+
+实施结果（2026-07-01）：`StowAfterPickup` 已增加 `pickupLm == unloadLm` 判断；同站时记录日志并直接进入 `ArmUnload`，不会下发导航或启动导航超时，异站逻辑保持不变。完整构建和现有策略测试已通过；尚待工位 2 同站流程及异站工位回归现场复测。

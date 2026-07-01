@@ -365,9 +365,9 @@ enum class ExecState {
 4. 调 `HuayanScheduler::startStageOne()`。
 5. 收到 `preGripScanRequested()` 后发扫码请求。
 6. 扫码非空成功则调用 `continueAfterPreGripScan()`。
-7. 首轮扫码失败/空码则调用 `rotateToolRz180()`，旋转完成后第二轮扫码。
-8. 两轮仍失败则任务 Failed，进入 `CleanupStow`。
-9. 取料完成后收姿态，再去 `unloadLm`。
+7. 首轮扫码失败/空码默认直接任务 Failed；仅安全开关开启时调用 `rotateToolRz180()` 并进行第二轮扫码。
+8. 默认失败或开启补救后的第二轮失败进入 `CleanupStow`。
+9. 取料完成后收姿态；若 `pickupLm == unloadLm`，跳过导航直接进入倒料，否则导航到 `unloadLm`。
 10. 调 `startUnload()` 倒料，倒料后收姿态。
 11. 去码垛区 `palletLm`。
 12. 调 `PalletScheduler::validateConfig()` 和 `nextRelativeOffset()`。
@@ -382,6 +382,7 @@ enum class ExecState {
 - 到站必须同时满足 `navStatus == 4`、`navStation == expectedLm`、`curStation == expectedLm`。
 - `navStatus == 5/6/7` 在任务导航中都是系统级 ERROR。
 - 单步超时 `120s`。
+- 取料位与倒料位相同不属于导航任务，必须在发命令前直接推进，不得放宽上述严格到站条件。
 
 **扫码配置要求：**
 
@@ -1291,6 +1292,7 @@ void TaskExecutor::enterState(ExecState state)
         m_arm->startStow();
         break;
     case ExecState::AgvToUnload:
+        // pickupLm == unloadLm 时不进入本状态；收姿态完成槽直接推进 ArmUnload。
         dispatchAgvTo(m_stationConfig->unloadLm,
                       TaskStep::AgvToUnload,
                       QStringLiteral("工位%1正在送料").arg(m_task.stationId));
@@ -1568,6 +1570,7 @@ Error -> "系统报警"
 | A1 | AGV 到站 | 任务导航到目标 LM | 进入下一阶段 | AGV 到站日志 | navStation/curStation 都匹配 |
 | A2 | AGV 失败 | 导航返回 5/7 | 系统报警 | AGV ERROR | Pending 清空 |
 | A3 | AGV 取消 | 任务导航返回 6 | 系统报警 | AGV 取消异常 | Pending 清空 |
+| A4 | 取料/倒料同站 | 工位1、2、11、12取料后收姿态完成 | 直接进入倒料 | 跳过同站导航 | 不发 AGV 命令、不等待运动态 |
 | V1 | 视觉无目标 | noObjectDetected | 仍在取料 | 下移 20mm | 未超 80mm 重试 |
 | V2 | 视觉超限 | 连续无目标超 80mm | 当前任务失败 | 视觉搜索超限 | 收姿态后继续 |
 | V3 | 视觉错误 | HTTP/解析错误 | 当前任务失败 | 视觉服务错误 | 不下移 |
@@ -1802,3 +1805,40 @@ Bug 修复或新功能完成并验证后，按以下顺序执行：
 - `cmake --build build --target wh-robot-visual -j$(nproc)` 通过。
 - `ctest --test-dir build --output-on-failure`：2/2 通过，0 失败。
 - 当前状态：代码和离线验证完成，待现场扫码失败复测；十二工位整体验收仍未完成。
+
+### 任务 16：Bug 2——取料位与倒料位相同时跳过 AGV 导航
+
+**问题与根因：** 同站导航会清除 `m_agvSeenMoving`，但 AGV 已在目标站时通常不再产生 Waiting/Running，严格到站判定因此永远不推进。工位 2 现场日志确认收姿态完成后请求 LM4，但没有新的到达事件。
+
+**确认方案：** `StowAfterPickup` 完成后，若 `pickupLm == unloadLm`，记录日志并直接进入 `ArmUnload`；否则沿用 `startAgvStep(AgvToUnload, unloadLm, ...)`。不修改或放宽正常导航的严格到站规则。
+
+**已确认文件范围：**
+
+- 新增文件：无。
+- 修改：`src/taskexecutor.cpp`、唯一设计文档和本实施文档。
+- 明确不修改：`taskexecutor.h`、`agvcontroller.*`、`lineconfig.h`、机械臂、UI、构建文件和其他模块。
+
+**测试与验证：**
+
+1. RED：源码回归检查要求 `StowAfterPickup` 包含同站判断、跳过日志和直接进入 `ArmUnload`，当前实现应失败。
+2. GREEN：实现最小条件分支，再运行相同检查确认通过。
+3. 完整构建并运行现有 CTest；执行 `git diff --check` 和文件范围检查。
+4. 现场验证工位 2 收姿态后不发 LM4 导航，直接调用倒料点位；再用取倒料不同站工位回归正常导航。
+
+**源码注释要求：** 同站分支必须说明不能等待 Waiting/Running 的原因、直接推进的安全前提，以及不同站导航仍保持严格判定。
+
+**注释验收清单：**
+
+- [x] 同站判断、直接推进和日志具有准确中文注释。
+- [x] 原有严格导航注释未被削弱。
+- [x] spec、plan 与代码行为一致。
+- [x] 当前同站工位 1、2、11、12 已纳入验收范围。
+
+**实施结果（2026-07-01）：**
+
+- RED 源码回归检查先确认同站分支缺失；实现后同一检查转为 PASS。
+- `StowAfterPickup` 同站时直接进入 `ArmUnload`，不会调用 `startAgvStep()`、不会发 AGV 命令或启动 120 秒超时。
+- 异站时仍调用原 `startAgvStep(AgvToUnload, unloadLm, ...)`，严格到站规则未修改。
+- `cmake --build build --target wh-robot-visual -j$(nproc)` 通过。
+- `ctest --test-dir build --output-on-failure`：2/2 通过，0 失败。
+- 当前状态：代码和离线验证完成，待工位 2 同站流程及异站工位现场复测；十二工位整体验收仍未完成。

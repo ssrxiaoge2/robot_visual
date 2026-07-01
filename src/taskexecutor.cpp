@@ -270,6 +270,18 @@ void TaskExecutor::onArmStageCompleted(const QString &stageName)
         enterState(ExecState::StowAfterPickup, QStringLiteral("取料完成，机械臂收姿态"));
         break;
     case ExecState::StowAfterPickup:
+        // 取料位与倒料位相同表示 AGV 在机械臂取料期间始终停留于目标站。
+        // 若仍下发同站导航，AGV 通常不会重新出现 Waiting/Running，而严格到站
+        // 判定又不会接受残留 Arrived，调度将一直等待。因此这里不创建导航任务、
+        // 不启动导航超时，直接推进机械臂倒料；不同站点仍沿用严格导航校验。
+        if (m_stationCfg->pickupLm == m_stationCfg->unloadLm) {
+            emit logMessage(prefix(QStringLiteral("AGV"))
+                            + QStringLiteral(" 取料位与倒料位同为 LM%1，跳过 AGV 导航，直接开始倒料")
+                                  .arg(m_stationCfg->unloadLm));
+            enterState(ExecState::ArmUnload, QStringLiteral("取料位与倒料位相同，机械臂开始倒料"));
+            break;
+        }
+
         startAgvStep(ExecState::AgvToUnload,
                      m_stationCfg->unloadLm,
                      QStringLiteral("AGV 前往倒料位 LM%1").arg(m_stationCfg->unloadLm));
