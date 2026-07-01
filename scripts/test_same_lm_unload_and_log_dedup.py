@@ -18,7 +18,10 @@ def main() -> int:
     changelog = read_text("changelog/CHANGELOG.md")
 
     arm_pickup_block = re.search(
-        r"case ExecState::ArmPickup:(.*?)case ExecState::StowAfterPickup:",
+        r"case ExecState::ArmPickup:\s*"
+        r"case ExecState::PreGripScan:\s*"
+        r"case ExecState::RotateForScan:(.*?)"
+        r"case ExecState::StowAfterPickup:",
         task_cpp,
         re.S,
     )
@@ -27,9 +30,10 @@ def main() -> int:
     checks = [
         (
             "same-LM pickup completion must start unload after capture safety height",
-            "pickupLm == m_stationCfg->unloadLm" in arm_pickup_text
+            bool(arm_pickup_block)
+            and "pickupLm == m_stationCfg->unloadLm" in arm_pickup_text
             and "enterState(ExecState::ArmUnload" in arm_pickup_text
-            and "StowAfterPickup" not in arm_pickup_text,
+            and "enterState(ExecState::StowAfterPickup" in arm_pickup_text,
         ),
         (
             "TaskExecutor must not relay raw arm logs with task prefix",

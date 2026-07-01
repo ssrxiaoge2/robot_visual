@@ -259,10 +259,10 @@ void TaskExecutor::onArmStageCompleted(const QString &stageName)
     emit logMessage(prefix(QStringLiteral("ARM"))
                     + QStringLiteral(" %1 已完成").arg(stageName));
 
-    const ExecState postPickupStowState = ExecState::StowAfterPickup;
-
     switch (m_state) {
     case ExecState::ArmPickup:
+    case ExecState::PreGripScan:
+    case ExecState::RotateForScan:
         if (m_stationCfg->pickupLm == m_stationCfg->unloadLm) {
             emit logMessage(prefix(QStringLiteral("AGV"))
                             + QStringLiteral(" 取料已回拍照安全高度，取料位与倒料位同一 LM%1，跳过 AGV 导航，直接进入倒料准备点")
@@ -272,16 +272,12 @@ void TaskExecutor::onArmStageCompleted(const QString &stageName)
             break;
         }
 
-        enterState(postPickupStowState, QStringLiteral("取料完成，机械臂收姿态"));
+        enterState(ExecState::StowAfterPickup, QStringLiteral("取料完成，机械臂收姿态"));
         break;
     case ExecState::StowAfterPickup:
         startAgvStep(ExecState::AgvToUnload,
                      m_stationCfg->unloadLm,
                      QStringLiteral("AGV 前往倒料位 LM%1").arg(m_stationCfg->unloadLm));
-        break;
-    case ExecState::PreGripScan:
-    case ExecState::RotateForScan:
-        enterState(ExecState::StowAfterPickup, QStringLiteral("取料完成，机械臂收姿态"));
         break;
     case ExecState::ArmUnload:
         enterState(ExecState::StowAfterUnload, QStringLiteral("倒料完成，机械臂收姿态"));
