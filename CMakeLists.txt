@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(wh-robot-visual VERSION 0.2.2 LANGUAGES CXX)
+project(wh-robot-visual VERSION 0.2.3 LANGUAGES CXX)
 
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)

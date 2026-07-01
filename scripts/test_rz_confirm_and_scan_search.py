@@ -27,7 +27,6 @@ def main() -> int:
         huayan_cpp = read_text("src/huayanScheduler.cpp")
         task_h = read_text("src/taskexecutor.h")
         task_cpp = read_text("src/taskexecutor.cpp")
-        cmake = read_text("CMakeLists.txt")
         changelog = read_text("changelog/CHANGELOG.md")
         readme = read_text("README.md")
     except RuntimeError as exc:
@@ -63,10 +62,8 @@ def main() -> int:
             and SCAN_RETURN_MARKER in task_cpp,
         ),
         (
-            "missing v0.2.2 documentation markers",
-            "VERSION" in cmake
-            and "0.2.2" in cmake
-            and "v0.2.2" in changelog
+            "missing v0.2.2 Rz documentation markers",
+            "v0.2.2" in changelog
             and CHANGELOG_RZ_MARKER in changelog
             and README_SCAN_MARKER in readme,
         ),
