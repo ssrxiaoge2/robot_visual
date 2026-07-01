@@ -109,6 +109,14 @@ public slots:
      */
     void checkStatus();
 
+    /**
+     * @brief 码垛区占用检测（GET /inference）
+     *
+     * 该接口只把 object_count 转换为 occupied/empty，用于码垛缓存校验；
+     * 不复用 parseInferenceReply()，也不发抓取坐标信号，避免影响取料闭环。
+     */
+    void fetchPalletOccupancy(const QString &requestId);
+
 signals:
     /// 坐标就绪，values 为 6 个寄存器值 [X,Y,Z,Rx,Ry,Rz]（对应 Holding 901-906）
     void coordinatesReady(QList<quint16> values);
@@ -122,6 +130,14 @@ signals:
     void errorOccurred(QString msg);
     /// 工具坐标系原始 mm 值（手眼变换后，未乘寄存器倍率）
     void rawCoordinatesReady(double x, double y, double z, double rz);
+    /// 码垛区占用检测结果：occupied=true 表示当前相机视野内检测到目标。
+    void palletOccupancyReady(QString requestId,
+                              bool occupied,
+                              int objectCount,
+                              double bestConfidence,
+                              QString summary);
+    /// 码垛区占用检测网络/JSON 错误；调用方不得据此修改码垛缓存。
+    void palletOccupancyError(QString requestId, QString msg);
 
 private:
     /// 解析 /inference 响应 JSON

@@ -1,6 +1,8 @@
 # 仓储机器人上位机可视化系统
 
-基于 **Qt 6 + C++17** 开发的工业仓储自动化上位机软件，运行于 Windows / Linux 工控机。机械臂通过 **华沿 SDK** 控制，AGV 通过 **Modbus TCP** 控制，视觉服务通过 **HTTP** 通信，由 `LineOrchestrator` 串起 AGV 取料 → 视觉夹取 → 运输 → 倒料 → 返回的整线自动化循环。
+基于 **Qt 6 + C++17** 开发的工业仓储自动化上位机软件，运行于 Windows / Linux 工控机。机械臂通过 **华沿 SDK** 控制，AGV 通过 **Modbus TCP** 控制，视觉服务通过 **HTTP** 通信，扫码枪通过 **N-ScanHub SDK / TCP** 主动触发读取。
+
+当前主流程由 `LineManager + TaskExecutor` 驱动：现场 12 个工位发生缺料后进入 FIFO 队列，系统依次完成 AGV 前往取料位、机械臂视觉取料、夹紧前扫码、AGV 前往倒料位、机械臂倒料、AGV 前往码垛位、机械臂放置空箱，队列为空时 AGV 回到 LM1 待机。
 
 **GitHub**：https://github.com/ssrxiaoge2/robot_visual.git
 
@@ -45,11 +47,19 @@ wh-robot-visual/
 ├── src/
 │   ├── main.cpp
 │   ├── mainwindow.{h,cpp}          # 纯 UI 层：布局 + 信号转发
-│   ├── lineorchestrator.{h,cpp}    # 整线流程编排器（AGV + 机械臂时序协调）
+│   ├── linemanager.{h,cpp}         # 12 工位连续补料 FIFO 调度入口
+│   ├── taskexecutor.{h,cpp}        # 单个缺料任务状态机
+│   ├── taskqueue.h                 # 进程内 Pending 任务 FIFO 队列
+│   ├── lineconfig.h                # 12 工位 LM 点位与示教函数配置表
+│   ├── lineorchestrator.{h,cpp}    # 旧单工位流程参考，当前不作为主流程入口
 │   ├── huayanScheduler.{h,cpp}     # 华沿机械臂 SDK 调度（取料/收姿态/倒料阶段机）
 │   ├── agvcontroller.{h,cpp}       # 仙工 AGV Modbus TCP（监控轮询 + 派单）
 │   ├── visionclient.{h,cpp}        # 视觉 HTTP + 手眼坐标转换 + 多目标择优
 │   ├── devicemanager.{h,cpp}       # 设备生命周期管理 + 工位→站点映射
+│   ├── nscanscheduler.{h,cpp}      # N-ScanHub 网络扫码 SDK 同步封装
+│   ├── palletscheduler.{h,cpp}     # 空箱码垛点位规划与已放数量缓存
+│   ├── palletparamdialog.{h,cpp}   # 码垛参数配置窗口
+│   ├── customSysScheduler.{h,cpp}  # 客户系统 REST API 连通性和日统计读取
 │   ├── camerawindow.{h,cpp}        # 相机实时预览对话框
 │   ├── handeyedialog.{h,cpp}       # 手眼矩阵加载向导
 │   ├── deviceindicator.{h,cpp}     # LED 状态指示灯控件
@@ -108,34 +118,76 @@ python3 main_angle_depth_samseg_depth_http.py   # Flask 在 8080 端口监听
 
 1. 填写机械臂 / AGV / 视觉各设备 IP，点击「应用配置」建立连接
 2. 用各设备旁「测试」按钮验证 TCP 可达性
-3. 点击「▶ 开始运行」启动整线流程；点击「■ 停止」就地停机
-4. AGV 调试面板可单独派单 / 取消 / 暂停 / 继续，便于联调
+3. 点击「Start」或顶部「▶ 开始运行」启动 `LineManager`，系统进入“等待缺料”
+4. 在「调度监控」中点击「工位1」到「工位12」模拟缺料，任务按 FIFO 顺序执行
+5. 点击「Stop」执行急停语义：取消 AGV、停止机械臂、清空 Pending 队列并进入 Error
+6. 现场处理完成后点击「Reset Error」恢复到 Idle，再重新 Start
+7. AGV 调试面板可单独派单 / 取消 / 暂停 / 继续，便于联调
 
 ---
 
-## 整线流程
+## 12 工位缺料流程
 
-`LineOrchestrator` 实现单次（非自动循环）的整线状态机，任一步出错就地停机告警（取消 AGV 导航 + 停机械臂）：
+`LineManager` 是当前整线入口。它只负责队列、启停、回 LM1 和 Error 边界；单个工位的动作由 `TaskExecutor` 串行执行。系统启动后没有任务时保持“等待缺料”，收到缺料事件后创建一个任务，多个工位同时缺料时按 FIFO 依次执行。
 
 ```
-初检       AGV 须在待机站（真检测 curStation）+ 强制机械臂收姿态
+缺料入队       工位按钮 / 后续客户系统事件 → TaskQueue FIFO
   ↓
-AGV→取料站  派工位号 → 经映射表转物理站点号 → 监控轮询判到达
+AGV→取料位     下发该工位 pickupLm，监控 navStatus/navStation/curStation 判到达
   ↓
-机械臂取料  华沿 SDK：拍照位 → 视觉闭环对准(XY+Rz) → Z 下探 → 夹紧 → 抬升
+机械臂取料     调该工位 Func_captureN 到拍照/取料安全位，视觉闭环对准
   ↓
-收姿态      调 Func_yun_xing_zhong 收回运行姿态
+夹紧前扫码     N-ScanHub 主动扫码；首轮失败后机械臂按工具系 Y 轴依次搜索 +20 mm、-20 mm
+  → 搜码结果       扫到码则先回原夹取位继续夹紧；两次搜码都失败则回拍照位并按任务失败收尾
   ↓
-AGV→倒料站  派站 + 到达判定
+夹紧抬升       扫码通过后机械臂继续夹紧、抬升
   ↓
-倒料        调 Func_daoliao_1_point → Func_daoliao
+收姿态         调 Func_yun_xing_zhong 回运行中安全姿态
   ↓
-收姿态 → AGV→待机站 → 完成
+AGV→倒料位     下发该工位 unloadLm；如果 pickupLm == unloadLm，则跳过同站导航
+  ↓
+机械臂倒料     调该工位 Func_daoliaoN 到倒料准备位，再调 Func_fanzhuan 翻转倒料
+  ↓
+收姿态         倒料后再次回运行中安全姿态
+  ↓
+AGV→码垛位     大多数工位到共享码垛区 LM16；工位12 到独立码垛区 LM17
+  ↓
+空箱码垛       PalletScheduler 计算下一相对偏移，机械臂到码垛基准位并松爪
+  ↓
+提交缓存       放置成功后 commitPlaced() 推进已放数量
+  ↓
+最终收姿态     任务完成；有下一任务则继续 FIFO，没有任务则 AGV 回 LM1 待机
 ```
 
-**机械臂阶段机**（`HuayanScheduler`）：`StageOne`（取料，含视觉闭环迭代）、`Stow`（收姿态）、`Unload`（倒料），均通过华沿 SDK `HRIF_RunFunc` / `HRIF_MoveRelL` 等下发，以 100ms 轮询机器人运动标志判完成。
+### 工位点位与示教函数
 
-**机械臂未连接时**直接报连接失败；AGV 未连接时整线初检不通过——整线流程需真实硬件在线。
+`src/lineconfig.h` 是 12 个工位的固定配置来源。表中的 LM 是上位机直接下发并用于到达判定的数字站点；LM2 这类中间过渡点属于 AGV 地图路径规划内部节点，通常不由上位机单独派单。以工位1为例：AGV 从 LM1 待机点出发，地图路径可能经过 LM2，最终到达上位机下发的 LM3；到达 LM3 后机械臂调用 `Func_capture1` 完成拍照位/取料流程，取完料后因取料位和倒料位同为 LM3，跳过二次导航，直接调用 `Func_daoliao1` 到倒料准备位，再执行 `Func_fanzhuan` 完成倒料。
+
+| 工位 | 取料 LM | 倒料 LM | 拍照/取料函数 | 倒料准备函数 | 倒料函数 | 空箱码垛区 |
+|------|---------|---------|---------------|--------------|----------|------------|
+| 1 | LM3 | LM3 | `Func_capture1` | `Func_daoliao1` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 2 | LM4 | LM4 | `Func_capture2` | `Func_daoliao2` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 3 | LM5 | LM9 | `Func_capture3` | `Func_daoliao3` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 4 | LM5 | LM9 | `Func_capture4` | `Func_daoliao4` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 5 | LM5 | LM10 | `Func_capture5` | `Func_daoliao5` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 6 | LM6 | LM10 | `Func_capture6` | `Func_daoliao6` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 7 | LM6 | LM11 | `Func_capture7` | `Func_daoliao7` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 8 | LM6 | LM11 | `Func_capture8` | `Func_daoliao8` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 9 | LM7 | LM12 | `Func_capture9` | `Func_daoliao9` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 10 | LM7 | LM12 | `Func_capture10` | `Func_daoliao10` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 11 | LM7 | LM7 | `Func_capture11` | `Func_daoliao11` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 12 | LM15 | LM15 | `Func_capture12` | `Func_daoliao12` | `Func_fanzhuan` | 工位12独立码垛区 LM17 |
+
+### 失败处理
+
+- AGV 每段导航有 120s 超时保护；到达判定必须同时满足 `navStatus=Arrived`、`navStation=目标 LM`、`curStation=目标 LM`。
+- 机械臂任一阶段失败时，当前任务先尝试执行安全收姿态；收姿态成功则该任务失败但 FIFO 可以继续。
+- 视觉计算出的 Rz 若出现 80° 以上大角度跳变，必须连续两帧同向确认后才允许执行旋转，避免 `minAreaRect()` 偶发 90° 跳变直接驱动机械臂误转。
+- 夹紧前扫码首轮失败后，机械臂按工具系 Y 轴 `+20 mm`、`-20 mm` 依次搜码；这是当前默认的 Y 轴搜码补救流程。搜到后回原夹取位继续夹紧，两次都失败则回拍照位并按任务失败收尾。
+- 扫码失败默认不执行 180 度旋转补救，避免现场碰撞风险；当前任务失败并安全收姿态。
+- 系统级错误、AGV 通信错误、码垛缓存提交失败、急停 Stop 会取消 AGV、停止机械臂、清空 Pending 队列并进入 Error，必须人工 Reset Error。
+
+**机械臂阶段机**（`HuayanScheduler`）：`StageOne`（视觉定位、夹紧前扫码暂停、夹紧抬升）、`Stow`（收姿态）、`Unload`（倒料）、`PalletPlace`（空箱码垛独立动作），均通过华沿 SDK `HRIF_RunFunc` / `HRIF_MoveRelL` 等下发，以 100ms 轮询机器人运动标志判完成。
 
 ---
 
@@ -176,18 +228,22 @@ AGV→倒料站  派站 + 到达判定
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | UI 布局 + 深浅色主题 | 完成 | 2×2 设备状态网格，动画主题切换 |
-| 华沿 SDK 机械臂调度 | 完成 | 取料（视觉闭环）/ 收姿态 / 倒料阶段机 |
+| 调度监控看板 | 完成 | Start / Stop / Reset Error，12 工位缺料模拟，当前任务与 FIFO 队列展示 |
+| 12 工位 FIFO 补料 | 完成 | `LineManager + TaskExecutor` 串行执行缺料任务，队列为空回 LM1 |
+| 华沿 SDK 机械臂调度 | 完成 | 取料（视觉闭环 + 夹紧前扫码）/ 收姿态 / 倒料 / 空箱码垛 |
 | AGV Modbus 监控 + 派单 | 完成 | 监控轮询 + 工位→站点映射 + 调试面板 |
-| 整线流程编排（单次） | 完成 | AGV 取料 → 夹取 → 倒料 → 返回，出错就地停机 |
+| AGV 严格到达判定 | 完成 | 同时校验导航状态、导航目标 LM 和当前物理 LM，避免残留到达误判 |
 | 视觉 HTTP + 坐标转换 | 完成 | /inference + 手眼矩阵 + 多目标择优 |
 | 相机实时预览 | 完成 | /frame/annotated JPEG 流 |
+| N-ScanHub 主动扫码 | 完成 | 调试扫码与主调度扫码使用不同 worker，SDK 入口用 mutex 串行保护 |
+| 空箱码垛规划 | 完成 | 大箱/小箱两套区域配置、下一点位计算、已放数量缓存 |
+| 客户系统通信测试 | 完成 | REST API 连通性测试，读取日统计并提取 actualQty |
 | 手眼矩阵加载向导 | 完成 | 文件加载 / 手动填写 |
 | 补光灯控制 | 完成 | Linux GPIO，Windows 静默跳过 |
 | 日志持久化 | 完成 | Log/<日期> log.txt |
 | 整线真机试跑 | 进行中 | 已修复多处真机问题，仍需现场验证 |
-| 连续循环 / 多站点 | 未实现 | 当前为单次单站点试测 |
-| 扫码器数据读取 | 未实现 | 仅 TCP 连通性测试 |
-| MES 接口 | 未实现 | API 文档待提供 |
+| 客户系统自动入队 | 未实现 | 当前缺料入口仍以 UI 模拟按钮为主，客户系统 actualQty 暂未驱动 FIFO |
+| M4 车队调度 / 多车互斥 | 设计中 | 设计文档已存在，源码当前仍是 SEER Modbus 单 AGV 主线 |
 
 ---
 
@@ -207,18 +263,26 @@ AGV→倒料站  派站 + 到达判定
 
 ```
 MainWindow（UI 层）
-    ├── LineOrchestrator     整线流程状态机（纯协调层，不含 Modbus/SDK 原语）
-    └── DeviceManager        设备生命周期管理 + 工位→站点映射
-            ├── HuayanScheduler   华沿机械臂 SDK 调度
+    ├── 调度监控看板 / 设备调试面板 / 码垛配置面板
+    └── DeviceManager        设备生命周期管理、跨线程 worker 和信号接线中心
+            ├── LineManager       12 工位 FIFO 整线状态机
+            │     ├── TaskQueue       Pending 任务队列
+            │     └── TaskExecutor    单个缺料任务状态机
             ├── AgvController     仙工 AGV Modbus TCP
-            └── VisionHttpClient  视觉 HTTP + 手眼坐标变换
+            ├── HuayanScheduler   华沿机械臂 SDK 调度
+            ├── VisionHttpClient  视觉 HTTP + 手眼坐标变换
+            ├── NScanScheduler    N-ScanHub 主动扫码
+            ├── PalletScheduler   空箱码垛规划与缓存
+            └── CustomSysScheduler 客户系统 REST API 测试
 ```
 
 核心原则：
 
 - **MainWindow** 只做布局和信号转发，不含 Modbus / SDK / 网络逻辑
-- **LineOrchestrator** 纯协调层，只调高层方法并监听完成信号，不触碰 Modbus/SDK 原语
-- **控制器**（`HuayanScheduler` / `AgvController` / `VisionHttpClient`）由 `DeviceManager` 持有，不在别处 new
+- **DeviceManager** 是设备对象唯一所有者；调度扫码和 UI 测试扫码隔离，避免结果串线
+- **LineManager** 只管理整线状态、FIFO 队列、回 LM1 和 Error 边界，不直接调用 Modbus/SDK 原语
+- **TaskExecutor** 只执行一个任务的高层动作，所有硬件细节委托给 AGV、机械臂、视觉、扫码、码垛模块
+- **控制器**（`HuayanScheduler` / `AgvController` / `VisionHttpClient` / `NScanScheduler` 等）由 `DeviceManager` 持有，不在别处 new
 
 ---
 
@@ -227,11 +291,13 @@ MainWindow（UI 层）
 | 事项 | 说明 |
 |------|------|
 | 站点映射核对 | 取料/倒料/待机工位对应的 AGV 物理站点号需与现场地图一致 |
-| 倒料函数确认 | `Func_daoliao_1_point` / `Func_daoliao` 须在示教器中已示教 |
+| 12 工位示教函数确认 | `Func_capture1` 到 `Func_capture12`、`Func_daoliao1` 到 `Func_daoliao12`、`Func_fanzhuan`、码垛基准函数和 `Func_songzhua` 须在示教器中已示教 |
+| 码垛 LM16/LM17 核对 | 当前为共享码垛区和工位12独立码垛区配置，投产前需与现场地图一致 |
 | baseRzReg 基准 | `VisionHttpClient` 默认 0，需联机后设实际值 |
 | 手眼标定精度 | 当前误差约 2–3mm，必要时重标后 `setHandEyeMatrix()` 更新 |
 | 叉车货叉扩展 | 取放货需扩展货叉高度 / 到位寄存器 |
-| 扫码器 / MES | 待协议与 API 文档 |
+| 客户系统自动派单 | 当前只做 REST 连通性和 actualQty 读取，缺料事件自动生成任务的规则待确认 |
+| M4 车队调度 | 多车互斥和外部地图资源锁仍是设计阶段，当前生产主线不依赖它 |
 
 ---
 

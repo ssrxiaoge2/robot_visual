@@ -1,11 +1,15 @@
 #include "devicemanager.h"
 #include "agvcontroller.h"
-#include "visionclient.h"
+#include "customSysScheduler.h"
 #include "huayanScheduler.h"
+#include "linemanager.h"
 #include "lineorchestrator.h"
 #include "nscanscheduler.h"
+#include "palletscheduler.h"
+#include "visionclient.h"
 
 #include <QDebug>
+#include <QMutexLocker>
 #include <QSettings>
 #include <QTcpSocket>
 #include <QThread>
@@ -21,19 +25,22 @@ static const char *kSettingsApp  = "robot-visual";
 static const char *kStationMapKey = "agv/stationMap";
 
 namespace {
-class NScanTestWorker : public QObject
+/// 同步扫码 SDK 的 worker 包装；moveToThread 后 scan() 在工作线程执行。
+class NScanWorker : public QObject
 {
     Q_OBJECT
 
 public:
-    explicit NScanTestWorker(std::shared_ptr<NScanScheduler> scheduler)
+    explicit NScanWorker(std::shared_ptr<NScanScheduler> scheduler, QMutex *scanMutex)
         : m_scheduler(std::move(scheduler))
+        , m_scanMutex(scanMutex)
     {
     }
 
 public slots:
     void scan(const NScanScheduler::ScanOptions &options)
     {
+        QMutexLocker locker(m_scanMutex);
         emit finished(m_scheduler->scan(options));
     }
 
@@ -42,7 +49,20 @@ signals:
 
 private:
     std::shared_ptr<NScanScheduler> m_scheduler;
+    QMutex *m_scanMutex = nullptr;
 };
+
+unsigned long boundedScanWaitMs(const NScanScheduler::ScanOptions &options)
+{
+    const qint64 attempts = qMax(1, options.maxAttempts);
+    const qint64 scanWaitMs = static_cast<qint64>(qMax(0, options.timeoutMs))
+            * attempts
+        + static_cast<qint64>(qMax(0, options.retryIntervalMs))
+            * (attempts - 1)
+        + 2000;
+    return static_cast<unsigned long>(
+        qBound<qint64>(qint64{2000}, scanWaitMs, qint64{60000}));
+}
 
 QString rawDataSummary(const QByteArray &rawData)
 {
@@ -61,17 +81,21 @@ DeviceManager::DeviceManager(QObject *parent)
 {
     qRegisterMetaType<NScanScheduler::ScanResult>("NScanScheduler::ScanResult");
     qRegisterMetaType<NScanScheduler::ScanOptions>("NScanScheduler::ScanOptions");
+    qRegisterMetaType<CustomSysScheduler::DayRecord>("CustomSysScheduler::DayRecord");
+    qRegisterMetaType<Task>("Task");
+    qRegisterMetaType<QList<Task>>("QList<Task>");
+    qRegisterMetaType<LineSystemState>("LineSystemState");
 
-    // 高频扫码复用一个工作线程；空闲时仅等待事件，不轮询、不消耗 CPU。
+    // UI 测试扫码使用独立线程；空闲时仅等待事件，不轮询、不消耗 CPU。
     auto *nscanThread = new QThread;
-    auto *nscanWorker = new NScanTestWorker(m_nscanScheduler);
+    auto *nscanWorker = new NScanWorker(m_nscanScheduler, &m_nscanScanMutex);
     nscanWorker->moveToThread(nscanThread);
     m_nscanTestThread = nscanThread;
     m_nscanTestWorker = nscanWorker;
 
     connect(this, &DeviceManager::nscanScanRequested,
-            nscanWorker, &NScanTestWorker::scan, Qt::QueuedConnection);
-    connect(nscanWorker, &NScanTestWorker::finished, this,
+            nscanWorker, &NScanWorker::scan, Qt::QueuedConnection);
+    connect(nscanWorker, &NScanWorker::finished, this,
             [this](const NScanScheduler::ScanResult &result) {
         const QString summary = rawDataSummary(result.rawData);
         const QString finalLog = QStringLiteral(
@@ -116,6 +140,21 @@ DeviceManager::DeviceManager(QObject *parent)
         emit cameraStatusChanged(ok, msg);
     });
 
+    // 客户系统通信测试只验证 REST API 可达性和 actualQty 读取，暂不进入整线流程。
+    m_customSysScheduler = new CustomSysScheduler(this);
+    connect(m_customSysScheduler, &CustomSysScheduler::logMessage,
+            this, &DeviceManager::logMessage);
+    connect(m_customSysScheduler, &CustomSysScheduler::connectivityChecked,
+            this, [this](bool ok, const QString &statusText, int) {
+        emit customSystemStatusChanged(ok, statusText);
+    });
+    connect(m_customSysScheduler, &CustomSysScheduler::dayDataReady,
+            this, &DeviceManager::customSystemDayDataReady);
+    connect(m_customSysScheduler, &CustomSysScheduler::requestStarted,
+            this, &DeviceManager::customSystemRequestStarted);
+    connect(m_customSysScheduler, &CustomSysScheduler::requestFailed,
+            this, &DeviceManager::customSystemRequestFailed);
+
     m_huayanScheduler = new HuayanScheduler(this);
 
     connect(m_huayanScheduler, &HuayanScheduler::surveyReady,
@@ -123,15 +162,9 @@ DeviceManager::DeviceManager(QObject *parent)
     connect(m_visionClient,    &VisionHttpClient::rawCoordinatesReady,
             m_huayanScheduler, &HuayanScheduler::setGrabOffset);
     connect(m_visionClient, &VisionHttpClient::noObjectDetected,
-            this, [this] {
-        emit logMessage(QStringLiteral("[视觉] 未检测到目标，停止调度"));
-        m_huayanScheduler->stop();
-    });
+            m_huayanScheduler, &HuayanScheduler::onVisionNoObject);
     connect(m_visionClient, &VisionHttpClient::errorOccurred,
-            this, [this](const QString &msg) {
-        emit logMessage(QStringLiteral("[视觉] 推理错误：%1，停止调度").arg(msg));
-        m_huayanScheduler->stop();
-    });
+            m_huayanScheduler, &HuayanScheduler::onVisionErrorForPickup);
 
     connect(m_huayanScheduler, &HuayanScheduler::logMessage,
             this, &DeviceManager::logMessage);
@@ -139,6 +172,59 @@ DeviceManager::DeviceManager(QObject *parent)
             this, [this](const QString &msg) {
         emit logMessage(QStringLiteral("[华沿] 错误：%1").arg(msg));
     });
+
+    m_palletScheduler = new PalletScheduler(this);
+
+    // 主调度另建 worker，避免测试扫码完成信号误推进任务；两个 worker 通过同一
+    // mutex 串行进入非线程安全的厂商 SDK。
+    auto *lineScanThread = new QThread;
+    auto *lineScanWorker = new NScanWorker(m_nscanScheduler, &m_nscanScanMutex);
+    lineScanWorker->moveToThread(lineScanThread);
+    m_lineScanThread = lineScanThread;
+    m_lineScanWorker = lineScanWorker;
+
+    connect(this, &DeviceManager::lineScanRequested,
+            lineScanWorker, &NScanWorker::scan, Qt::QueuedConnection);
+    connect(lineScanThread, &QThread::finished,
+            lineScanWorker, &QObject::deleteLater);
+    connect(lineScanThread, &QThread::finished,
+            lineScanThread, &QObject::deleteLater);
+    lineScanThread->start();
+
+    // 主调度引用上面创建的唯一设备对象，不另建第二套 AGV/机械臂/码垛缓存。
+    m_lineManager = new LineManager(m_agvCtrl,
+                                    m_huayanScheduler,
+                                    m_nscanScheduler.get(),
+                                    m_palletScheduler,
+                                    this);
+    connect(m_lineManager, &LineManager::logMessage,
+            this, &DeviceManager::logMessage);
+    // 新调度层配置表已保存数字 LM，不再走旧 AGV 调试面板的工位映射。
+    connect(m_lineManager, &LineManager::agvDispatchRequested,
+            m_agvCtrl, &AgvController::sendToStation);
+    // 调度扫码和 UI 测试扫码必须隔离，避免结果串线。
+    connect(m_lineManager, &LineManager::scanRequested, this,
+            [this](NScanScheduler::ScanOptions options) {
+        options.ip = m_cfg.scannerIP.trimmed();
+        m_lineScanOptions = options;
+
+        if (!m_lineScanThread || !m_lineScanThread->isRunning()
+            || !m_lineScanWorker) {
+            NScanScheduler::ScanResult result;
+            result.status = NScanScheduler::ScanResult::Status::SdkUnavailable;
+            result.errorMessage = QStringLiteral("调度扫码工作线程不可用");
+            emit logMessage(QStringLiteral("[LineManager] %1").arg(result.errorMessage));
+            if (m_lineManager) {
+                m_lineManager->onScanFinished(result);
+            }
+            return;
+        }
+
+        emit lineScanRequested(options);
+    });
+    // 扫码结果排队回到 UI 主线程，再由 LineManager 推进任务状态机。
+    connect(lineScanWorker, &NScanWorker::finished,
+            m_lineManager, &LineManager::onScanFinished, Qt::QueuedConnection);
 
     m_lineOrch = new LineOrchestrator(m_agvCtrl, m_huayanScheduler, this);
     // 编排器请求派单 → 经映射表解析后下发（复用 dispatchAgv）
@@ -157,22 +243,26 @@ DeviceManager::DeviceManager(QObject *parent)
 
 DeviceManager::~DeviceManager()
 {
-    QThread *thread = m_nscanTestThread.data();
-    if (!thread || !thread->isRunning())
-        return;
+    const unsigned long sharedScanWaitMs = qMin<unsigned long>(
+        boundedScanWaitMs(m_nscanTestOptions) + boundedScanWaitMs(m_lineScanOptions),
+        120000UL);
+    const auto shutdownScanThread =
+        [](QThread *thread, unsigned long waitMs, const char *warning) {
+        if (!thread || !thread->isRunning())
+            return;
 
-    // scan() cannot be interrupted safely; wait only for its configured upper bound.
-    const qint64 attempts = qMax(1, m_nscanTestOptions.maxAttempts);
-    const qint64 scanWaitMs = static_cast<qint64>(qMax(0, m_nscanTestOptions.timeoutMs))
-            * attempts
-        + static_cast<qint64>(qMax(0, m_nscanTestOptions.retryIntervalMs))
-            * (attempts - 1)
-        + 2000;
-    const unsigned long boundedWaitMs = static_cast<unsigned long>(
-        qBound<qint64>(qint64{2000}, scanWaitMs, qint64{60000}));
-    thread->quit();
-    if (!thread->wait(boundedWaitMs))
-        qWarning() << "N-ScanHub test thread did not finish before shutdown timeout";
+        thread->quit();
+        if (!thread->wait(waitMs))
+            qWarning() << warning;
+    };
+
+    // scan() 不能安全中断，只等待当前参数对应的最大扫码时长。
+    shutdownScanThread(m_lineScanThread.data(),
+                       sharedScanWaitMs,
+                       "LineManager scan thread did not finish before shutdown timeout");
+    shutdownScanThread(m_nscanTestThread.data(),
+                       boundedScanWaitMs(m_nscanTestOptions),
+                       "N-ScanHub test thread did not finish before shutdown timeout");
 }
 
 void DeviceManager::applyConfig()
@@ -197,6 +287,7 @@ void DeviceManager::applyConfig()
         m_visionClient->setServerUrl(m_cfg.cameraIP, m_cfg.cameraPort);
 
     m_huayanScheduler->setConnectionParams(m_cfg.huayanIP, m_cfg.huayanPort);
+    m_customSysScheduler->setEndpoint(QUrl(m_cfg.customSysEndpoint.trimmed()));
 }
 
 void DeviceManager::testRobot()
@@ -272,6 +363,20 @@ void DeviceManager::testScanner()
         emit logMessage(QString("[扫码器] %1:8080 连接失败 ✗").arg(m_cfg.scannerIP));
         emit scannerStatusChanged(false, QStringLiteral("不可达"));
     }
+}
+
+void DeviceManager::testCustomSystem()
+{
+    // 客户现场只要求验证 HTTP 接口可达，WiFi 连接由操作系统负责。
+    m_customSysScheduler->setEndpoint(QUrl(m_cfg.customSysEndpoint.trimmed()));
+    m_customSysScheduler->testConnectivity();
+}
+
+void DeviceManager::fetchCustomSystemDayData()
+{
+    // 读取日统计接口并提取 actualQty，其余字段仅用于现场调试展示。
+    m_customSysScheduler->setEndpoint(QUrl(m_cfg.customSysEndpoint.trimmed()));
+    m_customSysScheduler->fetchDayData();
 }
 
 void DeviceManager::startNScanTest(const NScanScheduler::ScanOptions &options)

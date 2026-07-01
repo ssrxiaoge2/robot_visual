@@ -42,10 +42,10 @@
 //   [ 0  0  0 |   1   ]
 // 平移 t = (-28.63, 5.07, 156.09) mm（相机光心在工具坐标系中的位置）
 static const float kDefaultHandEye[16] = {
-     0.99979039f, -0.01978854f,  0.00525241f, -28.62873261f,  // 第0行
-     0.01977454f,  0.99980081f,  0.00270399f,   5.07318523f,  // 第1行
-    -0.00530488f, -0.00259956f,  0.99998255f, 156.09358373f,  // 第2行
-     0.00000000f,  0.00000000f,  0.00000000f,   1.00000000f,  // 第3行（齐次）
+    0.99970807, -0.01952258, -0.01423497, -6.07400241,
+    0.01923080, 0.99960787, -0.02035380, 12.84364319,
+    0.01462674, 0.02007411, 0.99969150, 147.64502743,
+    0.00000000, 0.00000000, 0.00000000, 1.00000000,
 };
 
 // ── 构造 ─────────────────────────────────────────────────────
@@ -67,7 +67,8 @@ void VisionHttpClient::setServerUrl(const QString &ip, int port)
 
 void VisionHttpClient::setHandEyeMatrix(const float m[16])
 {
-    // 将平铺的 16 个浮点数填入 4×4 数组（行主序）
+    // 将平铺的 16 个浮点数填入 4×4 数组（行主序）。矩阵错误会使后续机械臂
+    // 相对运动方向/距离整体错误，因此它属于现场标定的安全关键输入。
     for (int r = 0; r < 4; ++r)
         for (int c = 0; c < 4; ++c)
             m_T[r][c] = m[r * 4 + c];
@@ -101,6 +102,66 @@ void VisionHttpClient::fetchInference()
     reply->setParent(this);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         parseInferenceReply(reply);
+        reply->deleteLater();
+    });
+}
+
+
+/**
+ * @brief GET /inference — 码垛区占用检测
+ *
+ * 只解析 object_count/objects/confidence，供码垛状态校验使用。
+ * 不调用 parseInferenceReply()，因此不会 emit rawCoordinatesReady / coordinatesReady，
+ * 也不会触发现有机械臂抓取偏移闭环。
+ */
+void VisionHttpClient::fetchPalletOccupancy(const QString &requestId)
+{
+    if (!isConfigured()) {
+        emit palletOccupancyError(requestId, QStringLiteral("[视觉] 服务器地址未配置"));
+        return;
+    }
+
+    QNetworkRequest req(QUrl(
+        QString("http://%1:%2/inference").arg(m_ip).arg(m_port)));
+    req.setTransferTimeout(5000);
+
+    QNetworkReply *reply = m_nam->get(req);
+    reply->setParent(this);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, requestId]() {
+        if (reply->error() != QNetworkReply::NoError) {
+            emit palletOccupancyError(
+                requestId,
+                QStringLiteral("[视觉] 码垛占用检测网络错误: %1")
+                    .arg(reply->errorString()));
+            reply->deleteLater();
+            return;
+        }
+
+        const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());
+        if (doc.isNull() || !doc.isObject()) {
+            emit palletOccupancyError(
+                requestId,
+                QStringLiteral("[视觉] 码垛占用检测 JSON 解析失败"));
+            reply->deleteLater();
+            return;
+        }
+
+        const QJsonObject root = doc.object();
+        const int objCount = root.value("object_count").toInt(0);
+        const QJsonArray objects = root.value("objects").toArray();
+        double bestConfidence = 0.0;
+        for (const QJsonValue &v : objects) {
+            if (v.isObject())
+                bestConfidence = qMax(bestConfidence,
+                                      v.toObject().value("confidence").toDouble(0.0));
+        }
+
+        const bool occupied = objCount > 0 && !objects.isEmpty();
+        const QString summary = QStringLiteral("object_count=%1, objects=%2, best_confidence=%3")
+            .arg(objCount)
+            .arg(objects.size())
+            .arg(bestConfidence, 0, 'f', 3);
+        emit palletOccupancyReady(requestId, occupied, objCount, bestConfidence, summary);
         reply->deleteLater();
     });
 }

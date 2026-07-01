@@ -6,7 +6,7 @@
 #include <QModbusDataUnit>
 #include <QTimer>
 
-/// AGV 实时监控快照（监控轮询每周期发布一次）
+/// AGV 实时监控快照；只有 monitorUpdated 发出时，各字段才属于同一轮完整读取。
 struct AgvMonitorData {
     int     navStation = 0;     ///< [3x]00007 当前导航站点
     quint16 locStatus  = 0;     ///< [3x]00008 定位状态
@@ -110,13 +110,13 @@ private:
 
     void pollMonitor();
 
-    QModbusTcpClient *m_client         = nullptr;
-    QTimer           *m_reconnectTimer = nullptr;
-    QTimer           *m_monitorTimer   = nullptr;
-    AgvMonitorData    m_monitorData;
-    QString           m_ip;
-    int               m_port          = 502;
-    int               m_targetStation = 0;
+    QModbusTcpClient *m_client         = nullptr; ///< QObject 子对象，Modbus TCP 主站。
+    QTimer           *m_reconnectTimer = nullptr; ///< 断线后每 5s 尝试重连。
+    QTimer           *m_monitorTimer   = nullptr; ///< 周期读取导航、位置和控制权。
+    AgvMonitorData    m_monitorData;              ///< 最近一轮完整监控快照。
+    QString           m_ip;                       ///< 非空表示允许自动重连。
+    int               m_port          = 502;      ///< Modbus TCP 标准端口。
+    int               m_targetStation = 0;        ///< 最近一次 sendToStation 的目标 LM。
     bool              m_monitorBusy   = false; ///< 防止上一轮读取未完成时叠发请求
 };
 

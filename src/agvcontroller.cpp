@@ -87,7 +87,10 @@ bool AgvController::isConnected() const
  */
 void AgvController::sendToStation(int stationNo)
 {
-    if (!isConnected()) return;
+    if (!isConnected()) {
+        emit errorOccurred(QStringLiteral("AGV 未连接，无法发送导航到站点 %1").arg(stationNo));
+        return;
+    }
 
     m_targetStation = stationNo;
 

@@ -5,6 +5,85 @@
 
 ---
 
+## 2026-07-01 | v0.2.2 | Rz 跳变确认（双帧）与夹紧前 Y 轴搜码
+
+### 修复
+- 修复视觉取料阶段 Rz 大角度跳变可能直接驱动机械臂旋转的问题；当 Rz 出现 80° 以上跳变时，必须连续两帧同向确认后才允许执行旋转，降低 `minAreaRect()` 偶发 90° 跳变带来的误转风险。
+
+### 新增
+- 新增夹紧前扫码失败后的工具系 Y 轴搜码流程：机械臂依次移动到 `+20 mm`、`-20 mm` 位置重新扫码。
+- 新增搜码成功后的回原夹取位续夹逻辑；若两次搜码都失败，则机械臂回拍照位，并按任务失败流程执行后续收尾。
+
+### 文件
+- `CMakeLists.txt`
+- `src/huayanScheduler.h`
+- `src/huayanScheduler.cpp`
+- `src/taskexecutor.h`
+- `src/taskexecutor.cpp`
+- `README.md`
+- `changelog/CHANGELOG.md`
+
+---
+
+## 2026-07-01 | v0.2.1 | 倒料函数名切换为 Func_fanzhuan
+
+### 修复
+- 将 12 个工位配置中的机械臂倒料函数名从 `FlipUnload` 统一改为 `Func_fanzhuan`，与现场示教函数名保持一致。
+
+### 变更
+- 同步更新 README 中 12 工位缺料流程和工位配置表，倒料动作说明改为 `Func_fanzhuan`。
+- 新增 `scripts/test_unload_function_name.py` 回归脚本，防止后续配置或文档把倒料函数名写回旧值。
+
+### 文件
+- `src/lineconfig.h`
+- `README.md`
+- `scripts/test_unload_function_name.py`
+- `changelog/CHANGELOG.md`
+
+---
+
+## 2026-07-01 | v0.2.0 | 版本号显示与变更记录规范
+
+### 新增
+- 由 CMake `project(... VERSION ...)` 统一管理程序版本号，构建时同时注入 `APP_VERSION` 与 `APP_BUILD_DATE`。
+- 主窗口标题显示当前程序版本，启动日志显示版本号与构建日期，便于现场快速确认运行包是否为最新版本。
+- 新增 `scripts/test_version_metadata.py` 回归脚本，检查版本宏、窗口标题、启动日志和 changelog 记录是否接线完整。
+
+### 规范
+- 后续每次功能修改都在本文件顶部追加版本记录，明确写明该版本修复/新增了什么功能，并列出涉及文件。
+
+### 文件
+- `CMakeLists.txt`
+- `src/mainwindow.cpp`
+- `scripts/test_version_metadata.py`
+- `changelog/CHANGELOG.md`
+
+---
+
+
+## 2026-06-17 | 客户系统 REST API 通信测试与 Orbbec Linux 运行库补齐
+
+### 新增
+- 新增 `CustomSysScheduler`，用于客户现场 REST API 的 HTTP 连通性测试、日统计接口读取和 `actualQty` 解析
+- 主窗口新增“客户系统通信测试”面板，支持配置客户接口 URL、测试连接、读取数据、显示 `actualQty` 和解析摘要
+- `DeviceManager` 统一接入客户系统调度器，MainWindow 只负责按钮、状态指示灯和展示，不直接处理 HTTP/JSON 细节
+- 提交客户系统通信测试实施计划，并一并纳入 N-ScanHub 网络扫码枪实施计划文档
+
+### 变更
+- 客户系统面板按 HTTP 无状态通信调整为“测试连接 + 读取数据”，不设置断开按钮
+- 客户接口完整原始 JSON 改为打印到底部日志区，避免左侧面板过窄导致内容不可读
+- `.gitignore` 放行 HuaYan SDK 与 Orbbec SDK Linux 运行库，避免服务器拉代码后缺少运行时 `.so`
+
+### 修复
+- 补齐 `3rd/OrbbecSdk/lib/` 下 Linux 运行库，修复从仓库拉取后 Linux 运行可能找不到 Orbbec SDK 动态库的问题
+
+### 验证
+- 客户现场 WiFi 环境下已验证接口连通正常，并可读取客户系统数据
+- 本地执行 `cmake --build build --target wh-robot-visual -j2` 构建通过
+- 本地执行 `QT_QPA_PLATFORM=offscreen timeout 5s ./build/wh-robot-visual` 启动 5 秒未崩溃，超时退出符合预期
+
+---
+
 ## 2026-06-13 | N-ScanHub 网络扫码枪接入与主动扫码验证
 
 ### 新增

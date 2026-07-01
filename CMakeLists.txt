@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(wh-robot-visual VERSION 0.1 LANGUAGES CXX)
+project(wh-robot-visual VERSION 0.2.2 LANGUAGES CXX)
 
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
@@ -11,9 +11,18 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_compile_definitions(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
+string(TIMESTAMP APP_BUILD_DATE "%Y-%m-%d")
+
+add_compile_definitions(
+    APP_VERSION="${PROJECT_VERSION}"
+    APP_BUILD_DATE="${APP_BUILD_DATE}"
+)
+
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network SerialBus)
 include(GNUInstallDirs)
 
+# 调度文件职责：lineconfig/taskqueue 定义模型，taskexecutor 执行单任务，
+# linemanager 管理整线状态和 FIFO；它们与设备控制器编译进同一 Qt 程序。
 set(PROJECT_SOURCES
         src/main.cpp
         src/mainwindow.cpp
@@ -40,8 +49,20 @@ set(PROJECT_SOURCES
         src/workflowwidget.h
         src/themeswitch.cpp
         src/themeswitch.h
+        src/lineconfig.h
+        src/taskqueue.h
+        src/taskexecutor.cpp
+        src/taskexecutor.h
+        src/linemanager.cpp
+        src/linemanager.h
         src/nscanscheduler.cpp
         src/nscanscheduler.h
+        src/customSysScheduler.cpp
+        src/customSysScheduler.h
+        src/palletscheduler.cpp
+        src/palletscheduler.h
+        src/palletparamdialog.cpp
+        src/palletparamdialog.h
 )
 
 qt_add_executable(wh-robot-visual

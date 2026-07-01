@@ -24,7 +24,9 @@
 #include "mainwindow.h"
 #include "./ui_mainwindow.h"
 #include "camerawindow.h"
+#include "customSysScheduler.h"
 
+#include <QAbstractItemView>
 #include <QDate>
 #include <QDir>
 #include <QFile>
@@ -37,15 +39,222 @@
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QIntValidator>
+#include <QMessageBox>
 #include <QScrollArea>
 #include <QSizePolicy>
 #include <QTextStream>
 
 #include <algorithm>
+#include <utility>
 
 #include "handeyedialog.h"
 #include "huayanScheduler.h"
 #include "lineorchestrator.h"
+#include "palletparamdialog.h"
+#include "palletscheduler.h"
+
+namespace {
+
+constexpr int kLineStationCount = 12;
+
+QString fallbackLineStateText(LineSystemState state)
+{
+    switch (state) {
+    case LineSystemState::Idle:
+        return QStringLiteral("未启动");
+    case LineSystemState::Running:
+        return QStringLiteral("等待缺料");
+    case LineSystemState::ReturningHome:
+        return QStringLiteral("回待机点");
+    case LineSystemState::Error:
+        return QStringLiteral("系统报警");
+    }
+    return QStringLiteral("未知状态");
+}
+
+QString lineTaskPhaseText(const Task &task)
+{
+    switch (task.state) {
+    case TaskState::Pending:
+        return QStringLiteral("等待执行");
+    case TaskState::Running:
+        switch (task.step) {
+        case TaskStep::Waiting:
+            return QStringLiteral("开始送料");
+        case TaskStep::AgvToPickup:
+        case TaskStep::StowAfterPickup:
+        case TaskStep::AgvToUnload:
+            return QStringLiteral("正在送料");
+        case TaskStep::ArmPickup:
+        case TaskStep::GripAndLift:
+            return QStringLiteral("正在取料");
+        case TaskStep::PreGripScan:
+            return QStringLiteral("正在扫码");
+        case TaskStep::ArmUnload:
+            return QStringLiteral("正在倒料");
+        case TaskStep::StowAfterUnload:
+        case TaskStep::AgvToPallet:
+        case TaskStep::PreparePalletPoint:
+        case TaskStep::ArmPalletPlace:
+        case TaskStep::CommitPallet:
+        case TaskStep::StowAfterPallet:
+            return QStringLiteral("正在放空箱");
+        case TaskStep::ReturningHome:
+            return QStringLiteral("回待机点");
+        case TaskStep::Done:
+            break;
+        }
+        break;
+    case TaskState::Succeeded:
+        return QStringLiteral("送料完成");
+    case TaskState::Failed:
+        return QStringLiteral("送料失败");
+    case TaskState::Canceled:
+        return QStringLiteral("任务已取消");
+    }
+
+    return taskStateText(task.state);
+}
+
+QString lineTaskSummaryText(const Task &task)
+{
+    if (task.taskId == 0) {
+        return QStringLiteral("当前无任务");
+    }
+
+    const QString station = QStringLiteral("工位%1").arg(task.stationId);
+    switch (task.state) {
+    case TaskState::Pending:
+        return QStringLiteral("%1已加入送料队列").arg(station);
+    case TaskState::Running:
+        switch (task.step) {
+        case TaskStep::Waiting:
+            return QStringLiteral("%1开始送料").arg(station);
+        case TaskStep::ArmPickup:
+        case TaskStep::GripAndLift:
+            return QStringLiteral("%1正在取料").arg(station);
+        case TaskStep::PreGripScan:
+            return QStringLiteral("%1正在扫码").arg(station);
+        case TaskStep::ArmUnload:
+            return QStringLiteral("%1正在倒料").arg(station);
+        case TaskStep::StowAfterUnload:
+        case TaskStep::AgvToPallet:
+        case TaskStep::PreparePalletPoint:
+        case TaskStep::ArmPalletPlace:
+        case TaskStep::CommitPallet:
+        case TaskStep::StowAfterPallet:
+            return QStringLiteral("%1正在放空箱").arg(station);
+        case TaskStep::ReturningHome:
+            return QStringLiteral("送料完成，系统回待机点");
+        case TaskStep::AgvToPickup:
+        case TaskStep::StowAfterPickup:
+        case TaskStep::AgvToUnload:
+            return QStringLiteral("%1正在送料").arg(station);
+        case TaskStep::Done:
+            break;
+        }
+        return QStringLiteral("%1%2").arg(station, lineTaskPhaseText(task));
+    case TaskState::Succeeded:
+        return QStringLiteral("%1送料完成").arg(station);
+    case TaskState::Failed:
+        if (!task.lastError.isEmpty()) {
+            return QStringLiteral("%1送料失败：%2").arg(station, task.lastError);
+        }
+        return QStringLiteral("%1送料失败").arg(station);
+    case TaskState::Canceled:
+        if (!task.lastError.isEmpty()) {
+            return QStringLiteral("%1任务已取消：%2").arg(station, task.lastError);
+        }
+        return QStringLiteral("%1任务已取消").arg(station);
+    }
+
+    return QStringLiteral("当前无任务");
+}
+
+QString lineTaskTooltipText(const Task &task)
+{
+    if (task.taskId == 0) {
+        return QString();
+    }
+
+    QStringList lines;
+    lines << QStringLiteral("任务号：T#%1").arg(task.taskId)
+          << QStringLiteral("工位：%1").arg(task.stationId)
+          << QStringLiteral("状态：%1").arg(lineTaskPhaseText(task));
+
+    if (!task.statusText.isEmpty()) {
+        lines << QStringLiteral("执行详情：%1").arg(task.statusText);
+    }
+    if (!task.lastError.isEmpty()) {
+        lines << QStringLiteral("失败原因：%1").arg(task.lastError);
+    }
+    return lines.join(QLatin1Char('\n'));
+}
+
+QString lineTaskAnnouncement(const Task &task)
+{
+    if (task.taskId == 0 || task.state != TaskState::Running) {
+        return QString();
+    }
+
+    switch (task.step) {
+    case TaskStep::Waiting:
+        return QString();
+    case TaskStep::AgvToPickup:
+    case TaskStep::StowAfterPickup:
+    case TaskStep::AgvToUnload:
+        return QStringLiteral("工位%1正在送料").arg(task.stationId);
+    case TaskStep::ArmPickup:
+    case TaskStep::GripAndLift:
+        return QStringLiteral("工位%1正在取料").arg(task.stationId);
+    case TaskStep::PreGripScan:
+        return QStringLiteral("工位%1正在扫码").arg(task.stationId);
+    case TaskStep::ArmUnload:
+        return QStringLiteral("工位%1正在倒料").arg(task.stationId);
+    case TaskStep::StowAfterUnload:
+    case TaskStep::AgvToPallet:
+    case TaskStep::PreparePalletPoint:
+    case TaskStep::ArmPalletPlace:
+    case TaskStep::CommitPallet:
+    case TaskStep::StowAfterPallet:
+        return QStringLiteral("工位%1正在放空箱").arg(task.stationId);
+    case TaskStep::ReturningHome:
+        return QStringLiteral("系统正在回待机点");
+    case TaskStep::Done:
+        break;
+    }
+
+    return QString();
+}
+
+QString lineQueueStatusText(const Task &task)
+{
+    if (task.state == TaskState::Running) {
+        return QStringLiteral("%1（%2）")
+            .arg(taskStateText(task.state), lineTaskPhaseText(task));
+    }
+    return taskStateText(task.state);
+}
+
+QString lineTaskTimeText(const Task &task)
+{
+    if (!task.createdAt.isValid()) {
+        return QStringLiteral("-");
+    }
+    return task.createdAt.toLocalTime().toString(QStringLiteral("HH:mm:ss"));
+}
+
+QString latestTaskResultText(const QString &prefix, const Task &task, const QString &suffix)
+{
+    return QStringLiteral("%1 T#%2 工位%3 %4 %5")
+        .arg(prefix)
+        .arg(task.taskId)
+        .arg(task.stationId)
+        .arg(suffix)
+        .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")));
+}
+
+} // namespace
 
 // ============================================================
 //  构造 / 析构
@@ -76,6 +285,9 @@ MainWindow::MainWindow(QWidget *parent)
 
     // ── 1. 先构造业务层 ─────────────────────────────────────
     m_devMgr = new DeviceManager(this);
+    // 码垛参数 UI 与调度流程必须共用同一个 PalletScheduler，避免两边参数不同步。
+    m_palletScheduler = m_devMgr->palletScheduler();
+    Q_ASSERT(m_palletScheduler != nullptr);
 
     // ── 2. 构建所有 UI 控件 ─────────────────────────────────
     initUI();
@@ -105,6 +317,25 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::onNScanFinished);
     connect(m_devMgr, &DeviceManager::nscanTestIdle,
             this, &MainWindow::onNScanIdle);
+
+    connect(m_devMgr, &DeviceManager::customSystemRequestStarted,
+            this, &MainWindow::onCustomSystemRequestStarted);
+    connect(m_devMgr, &DeviceManager::customSystemStatusChanged,
+            this, [this](bool ok, const QString &statusText) {
+        m_customSysVisualState = ok ? QStringLiteral("success") : QStringLiteral("error");
+        m_customSysIndicator->setStatus(
+            ok, ok ? QStringLiteral("连接正常") : statusText);
+        m_customSysInfoLabel->setText(
+            ok ? QStringLiteral("连接正常；HTTP 为无状态请求，读取数据会再次访问接口")
+               : QStringLiteral("连接失败：%1").arg(statusText));
+        m_customSysRawLabel->setText(QStringLiteral("原始 JSON 将打印到日志区"));
+        setCustomSystemInputsEnabled(true);
+        applyTheme(m_darkTheme);
+    });
+    connect(m_devMgr, &DeviceManager::customSystemDayDataReady,
+            this, &MainWindow::onCustomSystemDayDataReady);
+    connect(m_devMgr, &DeviceManager::customSystemRequestFailed,
+            this, &MainWindow::onCustomSystemRequestFailed);
 
     // 补光灯切换结果 / 配置应用结果
     connect(m_devMgr, &DeviceManager::lightChanged,
@@ -166,7 +397,44 @@ MainWindow::MainWindow(QWidget *parent)
                 this, &MainWindow::onLineError);
     }
 
-    log(QStringLiteral("===== 上位机可视化系统启动 ====="));
+    // ── 整线调度看板信号连接 ────────────────────────────────
+    {
+        LineManager *lm = m_devMgr->lineManager();
+        Q_ASSERT(lm != nullptr);
+        connect(lm, &LineManager::systemStateChanged,
+                this, &MainWindow::updateLineSystemState);
+        connect(lm, &LineManager::queueChanged,
+                this, &MainWindow::updateLineQueue);
+        connect(lm, &LineManager::currentTaskChanged,
+                this, &MainWindow::updateLineCurrentTask);
+        connect(lm, &LineManager::alarmRaised, this, [this](const QString &reason) {
+            if (m_lineAlarmLabel) {
+                m_lineAlarmLabel->setText(QStringLiteral("系统报警：%1\n请立即处理并 Reset Error").arg(reason));
+                m_lineAlarmLabel->setToolTip(reason);
+                m_lineAlarmLabel->setStyleSheet(QStringLiteral(
+                    "QLabel { color: #b71c1c; font-weight: 700; background: #ffebee; "
+                    "border: 1px solid #d32f2f; padding: 4px 6px; }"));
+            }
+
+            const QString lastAlarmReason = property("lineAlarmLastReason").toString();
+            if (lastAlarmReason == reason) {
+                return;
+            }
+
+            setProperty("lineAlarmLastReason", reason);
+            QMessageBox::warning(this,
+                                 QStringLiteral("系统报警"),
+                                 QStringLiteral("系统报警：%1\n\n请现场处理后再执行 Reset Error。")
+                                     .arg(reason));
+        });
+
+        updateLineSystemState(lm->state(), fallbackLineStateText(lm->state()));
+        updateLineQueue(lm->queueSnapshot());
+        updateLineCurrentTask(lm->currentTask());
+    }
+
+    log(QStringLiteral("===== 上位机可视化系统启动 v%1（Build %2） =====")
+            .arg(QStringLiteral(APP_VERSION), QStringLiteral(APP_BUILD_DATE)));
     log(QStringLiteral("请配置设备IP后连接"));
 }
 
@@ -194,7 +462,7 @@ MainWindow::~MainWindow()
  */
 void MainWindow::initUI()
 {
-    setWindowTitle(QStringLiteral("仓储机器人可视化上位机"));
+    setWindowTitle(QStringLiteral("仓储机器人可视化上位机 v%1").arg(QStringLiteral(APP_VERSION)));
     setMinimumSize(1100, 750);
     resize(1200, 850);
 
@@ -207,8 +475,11 @@ void MainWindow::initUI()
     auto *toolbar = new QHBoxLayout();
     m_btnStart = new QPushButton(QStringLiteral("▶  开始运行"));
     m_btnStop  = new QPushButton(QStringLiteral("■  停止"));
+    m_btnReset = new QPushButton(QStringLiteral("复位"));
     m_btnStart->setFixedHeight(32);
     m_btnStop ->setFixedHeight(32);
+    m_btnReset->setFixedHeight(32);
+    m_btnReset->setObjectName("btnReset");
     m_btnStop ->setEnabled(false);  // 初始状态：停止按钮不可用
 
     // 循环计数标签（数字）和当前步骤标签（文字）
@@ -223,6 +494,7 @@ void MainWindow::initUI()
 
     toolbar->addWidget(m_btnStart);
     toolbar->addWidget(m_btnStop);
+    toolbar->addWidget(m_btnReset);
     toolbar->addSpacing(30);
     toolbar->addWidget(new QLabel(QStringLiteral("循环:")));
     toolbar->addWidget(m_lblCycle);
@@ -253,12 +525,15 @@ void MainWindow::initUI()
     statusLayout->addWidget(m_indAGV,    1, 0);
     statusLayout->addWidget(m_indLight,  1, 1);
     leftPanel->addWidget(gbStatus);
+    initLineDispatchPanel(leftPanel);
 
     // 各功能面板（按功能分组，内部实现见 initXxxPanel）
     initConfigPanel(leftPanel);   // 网络配置 + 补光灯
     initCameraPanel(leftPanel);   // 相机调试
     initScannerPanel(leftPanel);  // 扫码器调试
     initNScanPanel(leftPanel);    // N-ScanHub SDK 主动扫码验证
+    initCustomSystemPanel(leftPanel); // 客户系统 REST API 通信测试
+    initPalletPanel(leftPanel);   // 空箱码垛配置
     initAgvPanel(leftPanel);      // AGV 调试
     initHuayanPanel(leftPanel);   // 华沿 SDK 调试
 
@@ -288,6 +563,7 @@ void MainWindow::initUI()
     // ── 按钮信号连接 ─────────────────────────────────────────
     connect(m_btnStart,          &QPushButton::clicked, this, &MainWindow::onStart);
     connect(m_btnStop,           &QPushButton::clicked, this, &MainWindow::onStop);
+    connect(m_btnReset,          &QPushButton::clicked, this, &MainWindow::onReset);
     connect(m_btnLight,          &QPushButton::clicked, this, &MainWindow::onLightToggle);
     connect(m_btnApply,          &QPushButton::clicked, this, &MainWindow::onApplyConfig);
     connect(m_btnTestRobot,      &QPushButton::clicked, this, &MainWindow::onTestRobot);
@@ -307,6 +583,107 @@ void MainWindow::initUI()
 }
 
 // ── 左侧面板初始化（按功能分组）─────────────────────────────
+
+void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
+{
+    // 这是客户/现场关注的任务看板，不替代现有设备测试面板。
+    auto *gbLine = new QGroupBox(QStringLiteral("调度监控"));
+    auto *layout = new QVBoxLayout(gbLine);
+    layout->setSpacing(6);
+
+    auto makeValueLabel = []() {
+        auto *label = new QLabel();
+        label->setWordWrap(true);
+        label->setTextInteractionFlags(Qt::TextSelectableByMouse);
+        return label;
+    };
+
+    auto addInfoRow = [layout, &makeValueLabel](const QString &title, QLabel *&valueLabel) {
+        auto *row = new QHBoxLayout();
+        auto *titleLabel = new QLabel(title);
+        titleLabel->setMinimumWidth(68);
+        valueLabel = makeValueLabel();
+        row->addWidget(titleLabel, 0, Qt::AlignTop);
+        row->addWidget(valueLabel, 1);
+        layout->addLayout(row);
+    };
+
+    addInfoRow(QStringLiteral("系统状态"), m_lineStateLabel);
+    addInfoRow(QStringLiteral("当前任务"), m_lineCurrentLabel);
+    addInfoRow(QStringLiteral("待送料数量"), m_lineQueueCountLabel);
+    addInfoRow(QStringLiteral("报警信息"), m_lineAlarmLabel);
+
+    auto *controlRow = new QHBoxLayout();
+    m_lineStartBtn = new QPushButton(QStringLiteral("Start"));
+    m_lineStopBtn = new QPushButton(QStringLiteral("Stop"));
+    m_lineResetBtn = new QPushButton(QStringLiteral("Reset Error"));
+    m_lineStopBtn->setObjectName("btnStop");
+    controlRow->addWidget(m_lineStartBtn);
+    controlRow->addWidget(m_lineStopBtn);
+    controlRow->addWidget(m_lineResetBtn);
+    layout->addLayout(controlRow);
+
+    auto *stationTitle = new QLabel(QStringLiteral("模拟缺料"));
+    layout->addWidget(stationTitle);
+
+    auto *stationGrid = new QGridLayout();
+    stationGrid->setHorizontalSpacing(4);
+    stationGrid->setVerticalSpacing(4);
+    for (int stationId = 1; stationId <= kLineStationCount; ++stationId) {
+        auto *button = new QPushButton(QStringLiteral("工位%1").arg(stationId));
+        button->setProperty("stationId", stationId);
+        button->setMinimumHeight(28);
+        // 按钮只上报一次缺料事件；任务编号、FIFO 入队和执行时机由 LineManager 决定。
+        connect(button, &QPushButton::clicked, this, [this, button]() {
+            LineManager *lm = m_devMgr ? m_devMgr->lineManager() : nullptr;
+            if (!lm) {
+                return;
+            }
+            const int stationId = button->property("stationId").toInt();
+            lm->reportShortage(stationId);
+        });
+        stationGrid->addWidget(button, (stationId - 1) / 3, (stationId - 1) % 3);
+        m_stationButtons.append(button);
+    }
+    layout->addLayout(stationGrid);
+
+    auto *queueTitle = new QLabel(QStringLiteral("FIFO 队列"));
+    layout->addWidget(queueTitle);
+
+    // 仅展示 Running + Pending；长期历史写日志，避免表格随运行时间无限增长。
+    m_lineQueueTable = new QTableWidget(0, 4, gbLine);
+    m_lineQueueTable->setHorizontalHeaderLabels(
+        {QStringLiteral("任务号"), QStringLiteral("工位"), QStringLiteral("状态"), QStringLiteral("入队时间")});
+    m_lineQueueTable->verticalHeader()->setVisible(false);
+    m_lineQueueTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_lineQueueTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_lineQueueTable->setFocusPolicy(Qt::NoFocus);
+    m_lineQueueTable->setAlternatingRowColors(true);
+    m_lineQueueTable->setMinimumHeight(180);
+    m_lineQueueTable->horizontalHeader()->setStretchLastSection(true);
+    m_lineQueueTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    layout->addWidget(m_lineQueueTable);
+
+    addInfoRow(QStringLiteral("最近完成"), m_lineLastDoneLabel);
+    addInfoRow(QStringLiteral("最近失败"), m_lineLastFailedLabel);
+
+    connect(m_lineStartBtn, &QPushButton::clicked, this, &MainWindow::onStart);
+    connect(m_lineStopBtn, &QPushButton::clicked, this, &MainWindow::onStop);
+    connect(m_lineResetBtn, &QPushButton::clicked, this, [this]() {
+        if (m_devMgr && m_devMgr->lineManager()) {
+            m_devMgr->lineManager()->resetError();
+        }
+    });
+
+    m_lineStateLabel->setText(QStringLiteral("未启动"));
+    m_lineCurrentLabel->setText(QStringLiteral("当前无任务"));
+    m_lineQueueCountLabel->setText(QStringLiteral("0 单"));
+    m_lineAlarmLabel->setText(QStringLiteral("无"));
+    m_lineLastDoneLabel->setText(QStringLiteral("暂无"));
+    m_lineLastFailedLabel->setText(QStringLiteral("暂无"));
+
+    leftPanel->addWidget(gbLine);
+}
 
 /**
  * @brief 初始化"网络配置"和"补光灯"面板
@@ -552,6 +929,81 @@ void MainWindow::initNScanPanel(QVBoxLayout *leftPanel)
 }
 
 /**
+ * @brief 初始化客户系统 REST API 通信测试面板。
+ *
+ * 面板只通过 DeviceManager 发起请求；HTTP 和 JSON 解析由 CustomSysScheduler 处理。
+ */
+void MainWindow::initCustomSystemPanel(QVBoxLayout *leftPanel)
+{
+    auto *group = new QGroupBox(QStringLiteral("客户系统通信测试"));
+    auto *layout = new QVBoxLayout(group);
+    layout->setSpacing(5);
+
+    auto *row1 = new QHBoxLayout();
+    m_customSysConnectBtn = new QPushButton(QStringLiteral("测试连接"));
+    m_customSysFetchBtn = new QPushButton(QStringLiteral("读取数据"));
+    m_customSysIndicator = new DeviceIndicator(QStringLiteral("客户系统"));
+    m_customSysIndicator->setStatus(false, QStringLiteral("待测试"));
+    m_customSysConnectBtn->setFixedHeight(28);
+    m_customSysFetchBtn->setFixedHeight(28);
+    row1->addWidget(m_customSysConnectBtn);
+    row1->addWidget(m_customSysFetchBtn);
+    row1->addStretch();
+    row1->addWidget(m_customSysIndicator);
+    layout->addLayout(row1);
+
+    auto *line = new QFrame();
+    line->setFrameShape(QFrame::HLine);
+    line->setFrameShadow(QFrame::Sunken);
+    layout->addWidget(line);
+
+    auto *form = new QFormLayout();
+    form->setLabelAlignment(Qt::AlignRight | Qt::AlignTop);
+    m_customSysEndpointEdit = new QLineEdit(
+        CustomSysScheduler::defaultEndpoint().toString());
+    m_customSysEndpointEdit->setPlaceholderText(QStringLiteral("客户系统接口 URL"));
+    m_customSysEndpointEdit->setToolTip(QStringLiteral(
+        "现场电脑需先连接 WiFi WDAS_PA01；程序只验证该 HTTP 接口。"));
+
+    m_customSysActualQtyEdit = new QLineEdit();
+    m_customSysActualQtyEdit->setReadOnly(true);
+    m_customSysActualQtyEdit->setPlaceholderText(QStringLiteral("尚未读取"));
+    m_customSysInfoLabel = new QLabel(QStringLiteral("未读取"));
+    m_customSysInfoLabel->setWordWrap(true);
+    m_customSysRawLabel = new QLabel(QStringLiteral("原始 JSON 将打印到日志区"));
+    m_customSysRawLabel->setWordWrap(true);
+    m_customSysRawLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    m_customSysRawLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
+    m_customSysRawLabel->setMaximumHeight(58);
+
+    form->addRow(QStringLiteral("接口:"), m_customSysEndpointEdit);
+    form->addRow(QStringLiteral("actualQty:"), m_customSysActualQtyEdit);
+    form->addRow(QStringLiteral("解析:"), m_customSysInfoLabel);
+    form->addRow(QStringLiteral("日志:"), m_customSysRawLabel);
+    layout->addLayout(form);
+
+    connect(m_customSysConnectBtn, &QPushButton::clicked,
+            this, &MainWindow::onCustomSystemConnect);
+    connect(m_customSysFetchBtn, &QPushButton::clicked,
+            this, &MainWindow::onCustomSystemFetch);
+
+    leftPanel->addWidget(group);
+}
+
+
+void MainWindow::initPalletPanel(QVBoxLayout *leftPanel)
+{
+    auto *group = new QGroupBox(QStringLiteral("码垛配置"));
+    auto *layout = new QVBoxLayout(group);
+    m_btnPalletConfig = new QPushButton(QStringLiteral("打开码垛配置"));
+    m_btnPalletConfig->setFixedHeight(28);
+    layout->addWidget(m_btnPalletConfig);
+    connect(m_btnPalletConfig, &QPushButton::clicked,
+            this, &MainWindow::onPalletConfig);
+    leftPanel->addWidget(group);
+}
+
+/**
  * @brief 初始化"AGV 调试"面板
  *
  * 三块：派单行（工位号→站点解析+四按钮）、工位→站点映射表（编辑即存 QSettings）、
@@ -564,14 +1016,15 @@ void MainWindow::initAgvPanel(QVBoxLayout *leftPanel)
 
     // ── 派单行 ───────────────────────────────────────────────
     auto *dispatchRow = new QHBoxLayout();
-    m_spinWorkstation = new QSpinBox();
-    m_spinWorkstation->setRange(1, 65535);
-    m_spinWorkstation->setFixedWidth(70);
+    m_editWorkstation = new QLineEdit(QStringLiteral("1"));
+    m_editWorkstation->setValidator(new QIntValidator(1, 65535, m_editWorkstation));
+    m_editWorkstation->setAlignment(Qt::AlignRight);
+    m_editWorkstation->setFixedWidth(70);
     m_lblResolved = new QLabel();
     m_btnAgvGo = new QPushButton(QStringLiteral("出发"));
     m_btnAgvGo->setFixedSize(56, 24);
     dispatchRow->addWidget(new QLabel(QStringLiteral("工位:")));
-    dispatchRow->addWidget(m_spinWorkstation);
+    dispatchRow->addWidget(m_editWorkstation);
     dispatchRow->addWidget(m_lblResolved);
     dispatchRow->addStretch();
     dispatchRow->addWidget(m_btnAgvGo);
@@ -626,15 +1079,20 @@ void MainWindow::initAgvPanel(QVBoxLayout *leftPanel)
 
     // ── 信号连接 ─────────────────────────────────────────────
     connect(m_btnAgvGo, &QPushButton::clicked, this, [this]() {
-        const int ws = m_spinWorkstation->value();
+        bool ok = false;
+        const int ws = m_editWorkstation->text().trimmed().toInt(&ok);
+        if (!ok || ws < 1 || ws > 65535) {
+            log(QStringLiteral("[AGV] 工位号必须是 1-65535 的整数"));
+            return;
+        }
         m_devMgr->dispatchAgv(ws);
         m_flow->setStationHighlight(ws);
     });
     connect(m_btnAgvCancel, &QPushButton::clicked, m_devMgr, &DeviceManager::cancelAgvNav);
     connect(m_btnAgvPause,  &QPushButton::clicked, m_devMgr, &DeviceManager::pauseAgvNav);
     connect(m_btnAgvResume, &QPushButton::clicked, m_devMgr, &DeviceManager::resumeAgvNav);
-    connect(m_spinWorkstation, &QSpinBox::valueChanged,
-            this, [this](int) { refreshResolvedLabel(); });
+    connect(m_editWorkstation, &QLineEdit::textChanged,
+            this, [this](const QString &) { refreshResolvedLabel(); });
 
     connect(m_btnMapAdd, &QPushButton::clicked, this, [this]() {
         const int row = m_tblStationMap->rowCount();
@@ -693,8 +1151,10 @@ void MainWindow::rebuildStationMapFromTable()
 
 void MainWindow::refreshResolvedLabel()
 {
-    const int ws = m_spinWorkstation->value();
-    m_lblResolved->setText(QString("→ 站点 %1").arg(m_devMgr->resolveStation(ws)));
+    bool ok = false;
+    const int ws = m_editWorkstation ? m_editWorkstation->text().trimmed().toInt(&ok) : 0;
+    m_lblResolved->setText(ok ? QString("→ 站点 %1").arg(m_devMgr->resolveStation(ws))
+                              : QStringLiteral("→ 站点 -"));
 }
 
 /// 监控快照 → 五行标签；导航状态着色：到达=绿 失败/取消/超时=红
@@ -846,14 +1306,14 @@ void MainWindow::applyTheme(bool dark)
         "QLabel             { color:#ccc; background:transparent; }"
         "QLineEdit          { background:#3a3d44; color:#ddd; border:1px solid #555;"
         "                     border-radius:4px; padding:3px 6px; font-size:12px; }"
-        "QSpinBox           { background:#3a3d44; color:#ddd; border:1px solid #555;"
-        "                     border-radius:4px; padding:3px; }"
         "QPushButton        { background:#3a8fd4; color:white; border:none;"
         "                     border-radius:4px; padding:4px 16px; font-size:13px; }"
         "QPushButton:hover  { background:#4da3e8; }"
         "QPushButton:disabled { background:#444; color:#888; }"
         "QPushButton#btnStop  { background:#d9534f; }"       // 停止按钮：红色
         "QPushButton#btnStop:hover  { background:#e86562; }"
+        "QPushButton#btnReset  { background:#d9534f; }"       // 复位按钮：红色
+        "QPushButton#btnReset:hover  { background:#e86562; }"
         "QPushButton#btnApply { background:#5bc0de; }"       // 应用按钮：蓝色
         "QPushButton#btnApply:hover { background:#6ed0ee; }"
         "QTableWidget { background:#3a3d44; color:#ddd; gridline-color:#555;"
@@ -875,14 +1335,14 @@ void MainWindow::applyTheme(bool dark)
         "QLabel             { color:#333; background:transparent; }"
         "QLineEdit          { background:#ffffff; color:#222; border:1px solid #bbb;"
         "                     border-radius:4px; padding:3px 6px; font-size:12px; }"
-        "QSpinBox           { background:#ffffff; color:#222; border:1px solid #bbb;"
-        "                     border-radius:4px; padding:3px; }"
         "QPushButton        { background:#0078d4; color:white; border:none;"
         "                     border-radius:4px; padding:4px 16px; font-size:13px; }"
         "QPushButton:hover  { background:#106ebe; }"
         "QPushButton:disabled { background:#ccc; color:#888; }"
         "QPushButton#btnStop  { background:#c42b1c; }"
         "QPushButton#btnStop:hover  { background:#d83b2e; }"
+        "QPushButton#btnReset  { background:#c42b1c; }"
+        "QPushButton#btnReset:hover  { background:#d83b2e; }"
         "QPushButton#btnApply { background:#0078d4; }"
         "QPushButton#btnApply:hover { background:#106ebe; }"
         "QTableWidget { background:#ffffff; color:#222; gridline-color:#ccc;"
@@ -947,6 +1407,27 @@ void MainWindow::applyTheme(bool dark)
             : "color:#35536f; background:#f7f7f7; border:1px solid #ccc;"
               "border-radius:3px; padding:3px; font-family:monospace; font-size:10px;");
     }
+
+    if (m_customSysActualQtyEdit) {
+        QString stateColor = dark ? QStringLiteral("#b8b8b8")
+                                  : QStringLiteral("#444444");
+        if (m_customSysVisualState == QStringLiteral("running"))
+            stateColor = dark ? QStringLiteral("#66b7ff") : QStringLiteral("#0067b8");
+        else if (m_customSysVisualState == QStringLiteral("success"))
+            stateColor = dark ? QStringLiteral("#65d887") : QStringLiteral("#107c10");
+        else if (m_customSysVisualState == QStringLiteral("error"))
+            stateColor = dark ? QStringLiteral("#ff7b72") : QStringLiteral("#c42b1c");
+
+        m_customSysActualQtyEdit->setStyleSheet(QStringLiteral(
+            "QLineEdit { color:%1; font-weight:bold; }").arg(stateColor));
+        m_customSysInfoLabel->setStyleSheet(QStringLiteral(
+            "color:%1; font-weight:bold;").arg(stateColor));
+        m_customSysRawLabel->setStyleSheet(dark
+            ? "color:#9fc5e8; background:#202226; border:1px solid #444;"
+              "border-radius:3px; padding:3px; font-family:monospace; font-size:10px;"
+            : "color:#35536f; background:#f7f7f7; border:1px solid #ccc;"
+              "border-radius:3px; padding:3px; font-family:monospace; font-size:10px;");
+    }
 }
 
 // ── 读取 UI 控件 → Config 结构体 ────────────────────────────
@@ -964,6 +1445,8 @@ void MainWindow::buildConfig(DeviceManager::Config &cfg) const
     cfg.cameraIP   = m_editCameraIP->text().trimmed();
     cfg.cameraPort = 8080; // 视觉服务固定端口（Flask HTTP）
     cfg.scannerIP  = m_editScannerIP->text().trimmed();
+    if (m_customSysEndpointEdit)
+        cfg.customSysEndpoint = m_customSysEndpointEdit->text().trimmed();
     // agvPort 默认 502，无对应 UI 控件（Modbus 标准端口）
     // 机械臂 SDK 复用 robotIP（端口固定 10003）
     cfg.huayanIP   = cfg.robotIP;
@@ -974,21 +1457,19 @@ void MainWindow::buildConfig(DeviceManager::Config &cfg) const
 
 void MainWindow::onStart()
 {
-    m_btnStart->setEnabled(false); // 连接为阻塞调用，先禁用防止窗口期重复点击
-    DeviceManager::Config cfg;
-    buildConfig(cfg);
-    m_devMgr->setConfig(cfg);
-    m_devMgr->applyConfig();                       // 重连 AGV Modbus + 更新视觉 URL
-    m_devMgr->lineOrchestrator()->start();         // 整线流程
+    // 顶部与看板 Start 统一进入新 LineManager，不再启动旧 LineOrchestrator。
+    m_devMgr->lineManager()->start();
 }
 
 void MainWindow::onStop()
 {
-    m_devMgr->lineOrchestrator()->stop();          // 内部已含取消 AGV + 停机械臂
-    m_flow->setActiveStep(-1);
-    m_lblStep->setText(QStringLiteral("已停止"));
-    m_btnStart->setEnabled(true);
-    m_btnStop->setEnabled(false);
+    // Stop 是清队列并进入 Error 的急停语义，不是可恢复暂停。
+    m_devMgr->lineManager()->stop();
+}
+
+void MainWindow::onReset()
+{
+    m_devMgr->huayanScheduler()->resetArm();
 }
 
 /// 补光灯切换按钮回调
@@ -1198,6 +1679,117 @@ void MainWindow::setNScanInputsEnabled(bool enabled)
     m_nscanTriggerBtn->setEnabled(enabled);
 }
 
+void MainWindow::onCustomSystemConnect()
+{
+    DeviceManager::Config cfg;
+    buildConfig(cfg);
+    m_devMgr->setConfig(cfg);
+    m_devMgr->testCustomSystem();
+}
+
+
+void MainWindow::onPalletConfig()
+{
+    if (m_palletDialog) {
+        m_palletDialog->raise();
+        m_palletDialog->activateWindow();
+        return;
+    }
+
+    // 码垛参数 UI 直接复用主流程里的调度器实例，保证配置与调度读取的是同一份状态。
+    // 仅打开配置/仿真窗口；本期不接入整线流程，也不会自动提交机械臂放置完成。
+    auto *dialog = new PalletParamDialog(
+        m_palletScheduler,
+        m_devMgr ? m_devMgr->visionClient() : nullptr,
+        this);
+    m_palletDialog = dialog;
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &QObject::destroyed, this, [this] { m_palletDialog = nullptr; });
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
+}
+
+void MainWindow::onCustomSystemFetch()
+{
+    DeviceManager::Config cfg;
+    buildConfig(cfg);
+    m_devMgr->setConfig(cfg);
+    m_devMgr->fetchCustomSystemDayData();
+}
+
+void MainWindow::onCustomSystemRequestStarted(const QString &operation)
+{
+    setCustomSystemInputsEnabled(false);
+    m_customSysVisualState = QStringLiteral("running");
+    m_customSysIndicator->setStatus(false, operation + QStringLiteral("中..."));
+    m_customSysInfoLabel->setText(QStringLiteral("等待客户系统返回..."));
+    m_customSysRawLabel->setText(QStringLiteral("原始 JSON 将打印到日志区"));
+    m_customSysRawLabel->setToolTip(QString());
+    if (operation.contains(QStringLiteral("读取")))
+        m_customSysActualQtyEdit->setPlaceholderText(QStringLiteral("读取中..."));
+    applyTheme(m_darkTheme);
+}
+
+void MainWindow::onCustomSystemDayDataReady(const CustomSysScheduler::DayRecord &record,
+                                            const QString &rawJson)
+{
+    setCustomSystemInputsEnabled(true);
+    m_customSysVisualState = QStringLiteral("success");
+    m_customSysIndicator->setStatus(true, QStringLiteral("读取成功"));
+    m_customSysActualQtyEdit->setText(QString::number(record.actualQty));
+    m_customSysActualQtyEdit->setToolTip(QStringLiteral("客户接口 actualQty 字段"));
+
+    const QString line = record.lineName.isEmpty() ? record.lineId : record.lineName;
+    const QString dateText = record.statDate.isValid()
+        ? record.statDate.toString(QStringLiteral("yyyy-MM-dd"))
+        : QStringLiteral("-");
+    const QString parsedSummary = QStringLiteral("line=%1 date=%2 plan=%3 ok=%4 ng=%5")
+                                      .arg(line.isEmpty() ? QStringLiteral("-") : line)
+                                      .arg(dateText)
+                                      .arg(record.planQty)
+                                      .arg(record.okQty)
+                                      .arg(record.ngQty);
+    m_customSysInfoLabel->setText(parsedSummary);
+
+    m_customSysRawLabel->setText(QStringLiteral("完整原始 JSON 已打印到日志区"));
+    m_customSysRawLabel->setToolTip(rawJson.isEmpty() ? QStringLiteral("无原始返回") : rawJson);
+    log(QStringLiteral("[客户系统] 解析摘要：actualQty=%1，%2")
+            .arg(record.actualQty)
+            .arg(parsedSummary));
+    log(QStringLiteral("[客户系统] 原始返回：%1")
+            .arg(rawJson.isEmpty() ? QStringLiteral("<empty>") : rawJson));
+    applyTheme(m_darkTheme);
+}
+
+void MainWindow::onCustomSystemRequestFailed(const QString &operation,
+                                             const QString &errorMessage,
+                                             const QString &rawJson)
+{
+    setCustomSystemInputsEnabled(true);
+    m_customSysVisualState = QStringLiteral("error");
+    m_customSysIndicator->setStatus(false, QStringLiteral("请求失败"));
+    m_customSysInfoLabel->setText(QStringLiteral("%1失败：%2").arg(operation, errorMessage));
+    m_customSysInfoLabel->setToolTip(errorMessage);
+    // 失败时不覆盖旧 actualQty，避免把上一次成功数据误认为本次结果。
+    m_customSysActualQtyEdit->setPlaceholderText(QStringLiteral("读取失败"));
+    m_customSysRawLabel->setText(rawJson.isEmpty()
+        ? QStringLiteral("无原始 JSON，错误详见日志")
+        : QStringLiteral("失败时原始返回已打印到日志区"));
+    m_customSysRawLabel->setToolTip(rawJson.isEmpty() ? errorMessage : rawJson);
+    log(QStringLiteral("[客户系统] %1失败：%2").arg(operation, errorMessage));
+    if (!rawJson.isEmpty())
+        log(QStringLiteral("[客户系统] 失败原始返回：%1").arg(rawJson));
+    applyTheme(m_darkTheme);
+}
+
+void MainWindow::setCustomSystemInputsEnabled(bool enabled)
+{
+    m_customSysEndpointEdit->setEnabled(enabled);
+    m_customSysConnectBtn->setEnabled(enabled);
+    m_customSysFetchBtn->setEnabled(enabled);
+}
+
 /// "手眼标定矩阵"按钮回调：打开向导，用户确认后将矩阵写入视觉系统
 void MainWindow::onHandEyeCalib()
 {
@@ -1256,6 +1848,140 @@ void MainWindow::onConfigApplied(const QString &robotIP, const QString &agvIP)
 {
     m_indRobot->setStatus(true, QString("待连接 %1").arg(robotIP));
     m_indAGV->setStatus(true, QString("待连接 %1").arg(agvIP));
+}
+
+void MainWindow::updateLineSystemState(LineSystemState state, const QString &text)
+{
+    const QString displayText = text.isEmpty() ? fallbackLineStateText(state) : text;
+    if (m_lineStateLabel) {
+        m_lineStateLabel->setText(displayText);
+        m_lineStateLabel->setToolTip(displayText);
+    }
+
+    const bool canStart = (state == LineSystemState::Idle);
+    const bool canStop = (state == LineSystemState::Running
+                          || state == LineSystemState::ReturningHome);
+    const bool canReset = (state == LineSystemState::Error);
+    const bool shortageEnabled = (state != LineSystemState::Error);
+
+    m_btnStart->setEnabled(canStart);
+    m_btnStop->setEnabled(canStop);
+    if (m_lineStartBtn)
+        m_lineStartBtn->setEnabled(canStart);
+    if (m_lineStopBtn)
+        m_lineStopBtn->setEnabled(canStop);
+    if (m_lineResetBtn)
+        m_lineResetBtn->setEnabled(canReset);
+    for (QPushButton *button : std::as_const(m_stationButtons)) {
+        button->setEnabled(shortageEnabled);
+    }
+
+    if (state != LineSystemState::Error && m_lineAlarmLabel) {
+        m_lineAlarmLabel->setText(QStringLiteral("无"));
+        m_lineAlarmLabel->setToolTip(QString());
+        m_lineAlarmLabel->setStyleSheet(QString());
+        setProperty("lineAlarmLastReason", QString());
+    }
+
+}
+
+void MainWindow::updateLineQueue(const QList<Task> &tasks)
+{
+    int pendingCount = 0;
+    int runningCount = 0;
+    for (const Task &task : tasks) {
+        if (task.state == TaskState::Pending) {
+            ++pendingCount;
+        } else if (task.state == TaskState::Running) {
+            ++runningCount;
+        }
+    }
+
+    if (m_lineQueueCountLabel) {
+        QString text = QStringLiteral("%1 单").arg(pendingCount);
+        if (runningCount > 0) {
+            text += QStringLiteral("，当前执行 %1 单").arg(runningCount);
+        }
+        m_lineQueueCountLabel->setText(text);
+    }
+
+    if (!m_lineQueueTable) {
+        return;
+    }
+
+    // 长期历史走日志，表格只显示未完成任务，避免长时间运行 UI 无限增长。
+    m_lineQueueTable->setRowCount(tasks.size());
+    for (int row = 0; row < tasks.size(); ++row) {
+        const Task &task = tasks[row];
+        auto *taskIdItem = new QTableWidgetItem(QString::number(task.taskId));
+        auto *stationItem = new QTableWidgetItem(QStringLiteral("工位%1").arg(task.stationId));
+        auto *stateItem = new QTableWidgetItem(lineQueueStatusText(task));
+        auto *timeItem = new QTableWidgetItem(lineTaskTimeText(task));
+        taskIdItem->setTextAlignment(Qt::AlignCenter);
+        stationItem->setTextAlignment(Qt::AlignCenter);
+        stateItem->setTextAlignment(Qt::AlignCenter);
+        timeItem->setTextAlignment(Qt::AlignCenter);
+        m_lineQueueTable->setItem(row, 0, taskIdItem);
+        m_lineQueueTable->setItem(row, 1, stationItem);
+        m_lineQueueTable->setItem(row, 2, stateItem);
+        m_lineQueueTable->setItem(row, 3, timeItem);
+    }
+}
+
+void MainWindow::updateLineCurrentTask(const Task &task)
+{
+    if (m_lineCurrentLabel) {
+        m_lineCurrentLabel->setText(lineTaskSummaryText(task));
+        m_lineCurrentLabel->setToolTip(lineTaskTooltipText(task));
+    }
+
+    const bool changed = !m_hasLastLineTask
+        || task.taskId != m_lastLineTaskId
+        || task.step != m_lastLineTaskStep
+        || task.state != m_lastLineTaskState;
+    if (changed) {
+        const QString announcement = lineTaskAnnouncement(task);
+        if (!announcement.isEmpty()) {
+            log(announcement);
+        }
+    }
+
+    if (task.state == TaskState::Succeeded && m_lineLastDoneLabel) {
+        const QString text = latestTaskResultText(QStringLiteral("已完成"), task,
+                                                  QStringLiteral("送料完成"));
+        m_lineLastDoneLabel->setText(text);
+        m_lineLastDoneLabel->setToolTip(task.statusText);
+    } else if ((task.state == TaskState::Failed || task.state == TaskState::Canceled)
+               && m_lineLastFailedLabel) {
+        QString text = latestTaskResultText(QStringLiteral("失败"), task,
+                                            task.state == TaskState::Canceled
+                                                ? QStringLiteral("已取消")
+                                                : QStringLiteral("送料失败"));
+        if (!task.lastError.isEmpty()) {
+            text += QStringLiteral("\n原因：%1").arg(task.lastError);
+        }
+        m_lineLastFailedLabel->setText(text);
+        m_lineLastFailedLabel->setToolTip(task.lastError);
+    }
+
+    m_lastLineTaskId = task.taskId;
+    m_lastLineTaskStep = task.step;
+    m_lastLineTaskState = task.state;
+    m_hasLastLineTask = (task.taskId != 0);
+}
+
+bool MainWindow::lineManagerOwnsTopLevelWorkflowUi() const
+{
+    if (!m_devMgr || !m_devMgr->lineManager()) {
+        return false;
+    }
+
+    LineManager *lm = m_devMgr->lineManager();
+    const LineSystemState state = lm->state();
+    return state == LineSystemState::Running
+        || state == LineSystemState::ReturningHome
+        || state == LineSystemState::Error
+        || lm->currentTask().taskId != 0;
 }
 
 // ── 华沿 SDK 调试面板槽 ──────────────────────────────────────
@@ -1372,6 +2098,10 @@ void MainWindow::onHuayanStageStarted(const QString &stageName)
     m_huayanIndicator->setStatus(true, QStringLiteral("运行中"));
     log(QStringLiteral("[华沿] 阶段启动：%1").arg(stageName));
 
+    if (lineManagerOwnsTopLevelWorkflowUi()) {
+        return;
+    }
+
     m_btnStart->setEnabled(false);
     m_btnStop->setEnabled(true);
 }
@@ -1382,6 +2112,10 @@ void MainWindow::onHuayanStageCompleted(const QString &stageName)
     m_huayanStopBtn->setEnabled(false);
     m_huayanIndicator->setStatus(true, QStringLiteral("完成"));
     log(QStringLiteral("[华沿] 阶段完成：%1").arg(stageName));
+
+    if (lineManagerOwnsTopLevelWorkflowUi()) {
+        return;
+    }
 
     m_btnStart->setEnabled(true);
     m_btnStop->setEnabled(false);
@@ -1397,6 +2131,10 @@ void MainWindow::onHuayanStageError(const QString &msg)
     m_huayanStopBtn->setEnabled(false);
     m_huayanIndicator->setStatus(false, QStringLiteral("错误"));
     log(QStringLiteral("[华沿] 错误：%1").arg(msg));
+
+    if (lineManagerOwnsTopLevelWorkflowUi()) {
+        return;
+    }
 
     m_btnStart->setEnabled(true);
     m_btnStop->setEnabled(false);
