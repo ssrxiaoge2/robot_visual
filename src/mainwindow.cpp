@@ -452,11 +452,13 @@ MainWindow::~MainWindow()
  *
  * 布局结构：
  *   VBoxLayout (root)
- *     ├── HBoxLayout (toolbar)     工具栏：开始/停止/单步/延时/循环计数/主题开关
- *     ├── HBoxLayout (mainArea)
- *     │     ├── QScrollArea        左侧面板（设备状态+配置+调试面板，宽度受限340px）
- *     │     └── WorkflowWidget     右侧流程图（弹性填充）
- *     └── QPlainTextEdit (logView) 底部日志区
+ *     ├── HBoxLayout (toolbar)     工具栏
+ *     └── HBoxLayout (mainArea)
+ *           ├── QWidget (leftColumn)  左侧独立整列
+ *           │     └── QScrollArea     设备状态、调度、配置和调试面板
+ *           └── VBoxLayout (rightArea)
+ *                 ├── WorkflowWidget  上方流程监控
+ *                 └── QPlainTextEdit  下方日志区
  */
 void MainWindow::initUI()
 {
@@ -508,7 +510,8 @@ void MainWindow::initUI()
     auto *mainArea      = new QHBoxLayout();
     auto *leftContainer = new QWidget();
     auto *leftPanel     = new QVBoxLayout(leftContainer);
-    leftPanel->setContentsMargins(0, 0, 4, 0);
+    leftPanel->setContentsMargins(8, 8, 8, 8);
+    leftPanel->setSpacing(8);
 
     // 设备状态指示灯组（2×2 网格）
     auto *gbStatus     = new QGroupBox(QStringLiteral("设备状态"));
@@ -538,25 +541,39 @@ void MainWindow::initUI()
     leftPanel->addStretch(); // 底部弹性填充
     leftContainer->setMinimumWidth(280);
 
-    // 左侧面板加滚动条（屏幕高度不够时可滚动查看）
+    // 左侧整列是一个独立视觉区域；内容超出高度时只在本列上下滚动。
+    auto *leftColumn = new QWidget();
+    leftColumn->setObjectName("leftColumn");
+    leftColumn->setMinimumWidth(300);
+    leftColumn->setMaximumWidth(350);
+
+    auto *leftColumnLayout = new QVBoxLayout(leftColumn);
+    leftColumnLayout->setContentsMargins(0, 0, 0, 0);
+
     auto *scrollArea = new QScrollArea();
     scrollArea->setWidgetResizable(true);
+    scrollArea->setHorizontalScrollBarPolicy(Qt::ScrollBarAlwaysOff);
     scrollArea->setWidget(leftContainer);
-    scrollArea->setMaximumWidth(340);
-    scrollArea->setStyleSheet("QScrollArea { border:none; }");
-    mainArea->addWidget(scrollArea);
+    leftColumnLayout->addWidget(scrollArea);
+    mainArea->addWidget(leftColumn);
 
-    // 右侧流程图（弹性填充，stretch=1 占满剩余宽度）
+    // 右侧上方显示流程监控，下方显示日志，两者只占右侧区域。
+    auto *rightArea = new QVBoxLayout();
+    rightArea->setContentsMargins(0, 0, 0, 0);
+    rightArea->setSpacing(8);
+
     m_flow = new WorkflowWidget();
     m_flow->setMinimumSize(700, 280);
-    mainArea->addWidget(m_flow, 1);
-    root->addLayout(mainArea, 1);
+    rightArea->addWidget(m_flow, 2);
 
-    // ── 底部日志区 ───────────────────────────────────────────
     m_logView = new QPlainTextEdit();
     m_logView->setReadOnly(true);
     m_logView->setMaximumBlockCount(200); // 最多保留 200 行，防止内存无限增长
-    root->addWidget(m_logView, 1);
+    m_logView->setMinimumHeight(180);
+    rightArea->addWidget(m_logView, 1);
+
+    mainArea->addLayout(rightArea, 1);
+    root->addLayout(mainArea, 1);
 
     // ── 按钮信号连接 ─────────────────────────────────────────
     connect(m_btnStart,          &QPushButton::clicked, this, &MainWindow::onStart);
@@ -622,6 +639,7 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
     layout->addLayout(controlRow);
 
     auto *stationTitle = new QLabel(QStringLiteral("模拟缺料"));
+    stationTitle->setProperty("sectionTitle", true);
     layout->addWidget(stationTitle);
 
     auto *stationGrid = new QGridLayout();
@@ -646,6 +664,7 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
     layout->addLayout(stationGrid);
 
     auto *queueTitle = new QLabel(QStringLiteral("FIFO 队列"));
+    queueTitle->setProperty("sectionTitle", true);
     layout->addWidget(queueTitle);
 
     // 仅展示 Running + Pending；长期历史写日志，避免表格随运行时间无限增长。
@@ -1298,10 +1317,16 @@ void MainWindow::applyTheme(bool dark)
         "QMainWindow        { background:#2b2d33; }"
         "QDialog            { background:#2b2d33; }"
         "QScrollArea        { border:none; background:transparent; }"
+        "QWidget#leftColumn { background:#242629; border:1px solid #444; border-radius:7px; }"
+        "QWidget#leftColumn QScrollArea { background:transparent; border:none; }"
         "QGroupBox          { color:#ddd; border:1px solid #444; border-radius:6px;"
-        "                     margin-top:10px; padding-top:12px; background:#242629; }"
-        "QGroupBox::title   { subcontrol-origin:margin; left:12px; }"
+        "                     margin-top:16px; padding-top:14px; background:#242629; }"
+        "QGroupBox::title   { subcontrol-origin:margin; left:12px; padding:2px 10px 3px 10px;"
+        "                     color:#f7fbff; font-size:13px; font-weight:600; background:#2f5f85;"
+        "                     border:1px solid #4f7da2; border-radius:4px; }"
         "QLabel             { color:#ccc; background:transparent; }"
+        "QLabel[sectionTitle=\"true\"] { color:#f0f2f5; font-size:13px; font-weight:600;"
+        "                               padding-top:4px; }"
         "QLineEdit          { background:#3a3d44; color:#ddd; border:1px solid #555;"
         "                     border-radius:4px; padding:3px 6px; font-size:12px; }"
         "QPushButton        { background:#3a8fd4; color:white; border:none;"
@@ -1314,7 +1339,7 @@ void MainWindow::applyTheme(bool dark)
         "QPushButton#btnReset:hover  { background:#e86562; }"
         "QPushButton#btnApply { background:#5bc0de; }"       // 应用按钮：蓝色
         "QPushButton#btnApply:hover { background:#6ed0ee; }"
-        "QTableWidget { background:#3a3d44; color:#ddd; gridline-color:#555;"
+        "QTableWidget { background:#34373e; alternate-background-color:#2d3036; color:#ddd; gridline-color:#555;"
         "               border:1px solid #555; font-size:12px; }"
         "QHeaderView::section { background:#2f3138; color:#ccc; border:none; padding:2px 4px; }"
         "QScrollBar:vertical { background:#2b2d33; width:8px; }"
@@ -1327,10 +1352,16 @@ void MainWindow::applyTheme(bool dark)
         "QMainWindow        { background:#e8e8e8; }"
         "QDialog            { background:#f0f0f0; }"
         "QScrollArea        { border:none; background:transparent; }"
+        "QWidget#leftColumn { background:#ffffff; border:1px solid #ccc; border-radius:7px; }"
+        "QWidget#leftColumn QScrollArea { background:transparent; border:none; }"
         "QGroupBox          { color:#333; border:1px solid #ccc; border-radius:6px;"
-        "                     margin-top:10px; padding-top:12px; background:#ffffff; }"
-        "QGroupBox::title   { subcontrol-origin:margin; left:12px; }"
+        "                     margin-top:16px; padding-top:14px; background:#ffffff; }"
+        "QGroupBox::title   { subcontrol-origin:margin; left:12px; padding:2px 10px 3px 10px;"
+        "                     color:#f7fbff; font-size:13px; font-weight:600; background:#3f7fb1;"
+        "                     border:1px solid #5b94c1; border-radius:4px; }"
         "QLabel             { color:#333; background:transparent; }"
+        "QLabel[sectionTitle=\"true\"] { color:#1f2933; font-size:13px; font-weight:600;"
+        "                               padding-top:4px; }"
         "QLineEdit          { background:#ffffff; color:#222; border:1px solid #bbb;"
         "                     border-radius:4px; padding:3px 6px; font-size:12px; }"
         "QPushButton        { background:#0078d4; color:white; border:none;"
@@ -1343,7 +1374,7 @@ void MainWindow::applyTheme(bool dark)
         "QPushButton#btnReset:hover  { background:#d83b2e; }"
         "QPushButton#btnApply { background:#0078d4; }"
         "QPushButton#btnApply:hover { background:#106ebe; }"
-        "QTableWidget { background:#ffffff; color:#222; gridline-color:#ccc;"
+        "QTableWidget { background:#ffffff; alternate-background-color:#f3f6f9; color:#222; gridline-color:#ccc;"
         "               border:1px solid #bbb; font-size:12px; }"
         "QHeaderView::section { background:#e8e8e8; color:#333; border:none; padding:2px 4px; }"
         "QScrollBar:vertical { background:#e0e0e0; width:8px; }"

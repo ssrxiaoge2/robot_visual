@@ -5,6 +5,30 @@
 
 ---
 
+## 2026-07-01 | v0.2.4 | 左侧面板 UI 优化与补光灯权限脚本
+
+### 变更
+- 主窗口左侧改为独立整列布局，右侧改为上方流程监控、下方日志区；左列内部仅保留竖向滚动，日志不再横跨左侧下方。
+- FIFO 队列表格补齐深浅主题的隔行配色，修复深色主题下系统默认白底导致文字不清晰的问题。
+- 左侧所有 `QGroupBox` 面板统一改为参考现场截图的“左上角标题签”卡片风格，增强标题和内容区的视觉分层。
+- 同步更新 UI 布局与主题实施计划文档，使文档描述与当前代码实现一致。
+
+### 新增
+- 新增 `tools/setup_permissions.sh`，用于给 `tools/fill_light` 添加执行权限并授予 `CAP_SYS_RAWIO`，便于现场快速完成补光灯权限配置。
+
+### 验证
+- `scripts/test_*.py` 全部通过。
+- `cmake --build build-qt6-debug -j2` 构建通过。
+- `git diff --check` 无输出。
+
+### 文件
+- `src/mainwindow.cpp`
+- `tools/setup_permissions.sh`
+- `docs/superpowers/plans/2026-07-01-main-window-ui-layout-theme.md`
+- `changelog/CHANGELOG.md`
+
+---
+
 ## 2026-07-01 | v0.2.3 | 同站工位安全倒料与日志去重
 
 ### 修复
