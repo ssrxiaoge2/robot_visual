@@ -530,11 +530,11 @@ void HuayanScheduler::completeStage()
     // 完成信号直连编排器，会在 emit 内同步启动下一阶段；必须先 stop() 清理本阶段，
     // 否则 emit 返回后的 stop() 会把刚启动的下一阶段重置（m_stage 复位 None）
     const QString done = stageName(m_stage);
-    stop();
+    stop(false);
     emit stageCompleted(done);
 }
 
-void HuayanScheduler::stop()
+void HuayanScheduler::stop(bool emitStoppedLog)
 {
     stopPollingAndTimers();
     requestRobotStop();
@@ -548,7 +548,8 @@ void HuayanScheduler::stop()
     m_preGripScanSearchTargetY = 0.0;
     m_stage = Stage::None;
     m_stageStep = StageStep::None;
-    emit logMessage(QStringLiteral("调度已停止"));
+    if (emitStoppedLog)
+        emit logMessage(QStringLiteral("调度已停止"));
 }
 
 void HuayanScheduler::startWaitForIdle(int timeoutMs)

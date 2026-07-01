@@ -93,7 +93,7 @@ public:
     void startStageThree();
     void startStow();    // 收运行姿态（Func_yun_xing_zhong）
     void startUnload();  // 倒料（Func_daoliao_1_point → Func_daoliao）
-    void stop();
+    void stop(bool emitStoppedLog = true);
 
     void setSurveyPose(const Pose &p);
     void releaseGripper();           // 手动松开夹爪（UI 按钮调用）
