@@ -56,12 +56,6 @@ TaskExecutor::TaskExecutor(AgvController *agv,
                 this, &TaskExecutor::onPalletPlaceCompleted);
         connect(m_arm, &HuayanScheduler::palletPlaceError,
                 this, &TaskExecutor::onPalletPlaceError);
-        connect(m_arm, &HuayanScheduler::logMessage, this, [this](const QString &message) {
-            if (m_task.taskId == 0 || !isBusy()) {
-                return;
-            }
-            emit logMessage(prefix(QStringLiteral("ARM")) + QStringLiteral(" ") + message);
-        });
     }
 }
 

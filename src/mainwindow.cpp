@@ -364,8 +364,6 @@ MainWindow::MainWindow(QWidget *parent)
                 this, &MainWindow::onHuayanConnected);
         connect(hs, &HuayanScheduler::disconnected,
                 this, &MainWindow::onHuayanDisconnected);
-        connect(hs, &HuayanScheduler::logMessage,
-                this, &MainWindow::onHuayanLog);
         connect(hs, &HuayanScheduler::stageStarted,
                 this, &MainWindow::onHuayanStageStarted);
         connect(hs, &HuayanScheduler::stageCompleted,
