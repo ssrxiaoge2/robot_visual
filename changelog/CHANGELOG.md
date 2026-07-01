@@ -5,6 +5,25 @@
 
 ---
 
+## 2026-07-01 | v0.2.3 | 同站工位安全倒料与日志去重
+
+### 修复
+- 修复 1、2、11、12 同站工位在取料回到拍照安全高度后未直接进入倒料准备点的问题；现在 `StageOne` 完成后跳过 AGV 同站导航与收姿态，直接执行 `Func_daoliaoN -> Func_fanzhuan`。
+- 修复机械臂日志被 `HuayanScheduler`、`TaskExecutor` 和 `MainWindow` 多路径转发导致同一条日志输出三遍的问题。
+
+### 变更
+- 正常阶段完成时静默清理内部调度状态，不再额外输出“调度已停止”；人工 Stop 和错误停止仍保留停止日志。
+
+### 文件
+- `src/taskexecutor.cpp`
+- `src/huayanScheduler.h`
+- `src/huayanScheduler.cpp`
+- `src/mainwindow.cpp`
+- `scripts/test_same_lm_unload_and_log_dedup.py`
+- `changelog/CHANGELOG.md`
+
+---
+
 ## 2026-07-01 | v0.2.2 | Rz 跳变确认（双帧）与夹紧前 Y 轴搜码
 
 ### 修复
