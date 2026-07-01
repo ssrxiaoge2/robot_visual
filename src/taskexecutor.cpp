@@ -1,5 +1,6 @@
 #include "taskexecutor.h"
 
+#include <QDateTime>
 #include <QTimer>
 
 #include "huayanScheduler.h"
@@ -39,6 +40,14 @@ TaskExecutor::TaskExecutor(AgvController *agv,
                 this, &TaskExecutor::onArmStageError);
         connect(m_arm, &HuayanScheduler::preGripScanRequested,
                 this, &TaskExecutor::onPreGripScanRequested);
+        connect(m_arm, &HuayanScheduler::preGripScanSearchMoveCompleted,
+                this, &TaskExecutor::onPreGripScanSearchMoveCompleted);
+        connect(m_arm, &HuayanScheduler::preGripScanSearchMoveError,
+                this, &TaskExecutor::onPreGripScanSearchMoveError);
+        connect(m_arm, &HuayanScheduler::preGripScanCaptureReturnCompleted,
+                this, &TaskExecutor::onPreGripScanCaptureReturnCompleted);
+        connect(m_arm, &HuayanScheduler::preGripScanCaptureReturnError,
+                this, &TaskExecutor::onPreGripScanCaptureReturnError);
         connect(m_arm, &HuayanScheduler::toolRotationCompleted,
                 this, &TaskExecutor::onToolRotationCompleted);
         connect(m_arm, &HuayanScheduler::toolRotationError,
@@ -68,8 +77,6 @@ Task TaskExecutor::currentTask() const
 
 void TaskExecutor::start(const Task &task)
 {
-    // 单 AGV + 单机械臂只能串行执行；忙碌时再次 start 属于调度层不变量被破坏，
-    // 因而不是普通任务失败，而是需要停止整线检查的系统级错误。
     if (isBusy()) {
         Task rejected = task;
         rejected.state = TaskState::Failed;
@@ -111,7 +118,6 @@ void TaskExecutor::start(const Task &task)
     m_arm->setPalletFunctions(palletFuncs);
     m_arm->setPreGripScanEnabled(true);
 
-    // 任务启动时清除上一次可能残留的“正在码垛”标志，避免 UI/配置窗口误判。
     clearPalletStackingFlag();
 
     emit logMessage(prefix(QStringLiteral("TASK"))
@@ -137,20 +143,29 @@ void TaskExecutor::stopForSystemError(const QString &reason)
 
 void TaskExecutor::onScanFinished(const NScanScheduler::ScanResult &result)
 {
-    // worker 结果通过排队连接返回，可能在 Stop 或状态切换后迟到；只有当前确实
-    // 等待扫码时才能消费，防止测试扫码或旧请求误推进机械臂。
     if (!isBusy() || m_state != ExecState::PreGripScan) {
         return;
     }
 
     const QString trimmedCode = result.code.trimmed();
-
-    // 后续客户比对规则接入前，非空码默认通过，空码不可追溯所以失败。
     if (result.isSuccess() && !trimmedCode.isEmpty()) {
         emit logMessage(prefix(QStringLiteral("SCAN"))
                         + QStringLiteral(" 第 %1 轮扫码成功，条码=%2")
                               .arg(m_scanAttempt)
                               .arg(trimmedCode));
+
+        if (m_scanSearchIndex > 0) {
+            m_pendingScanCodeAfterSearch = trimmedCode;
+            m_state = ExecState::PreGripScanSearchReturn;
+            setTaskRunning(TaskStep::PreGripScan,
+                           QStringLiteral("扫码搜索成功，回到原夹取位置后继续夹紧"));
+            emit logMessage(prefix(QStringLiteral("SCAN"))
+                            + QStringLiteral(" 扫码搜索成功，回到原夹取位置"));
+            m_arm->movePreGripScanSearchTo(0.0);
+            return;
+        }
+
+        resetScanSearchState();
         setTaskRunning(TaskStep::GripAndLift, QStringLiteral("扫码通过，机械臂继续夹紧并抬升"));
         m_arm->continueAfterPreGripScan();
         return;
@@ -165,39 +180,27 @@ void TaskExecutor::onScanFinished(const NScanScheduler::ScanResult &result)
         failureDetail = NScanScheduler::statusText(result.status);
     }
 
-    if (m_scanAttempt <= 1) {
-        // 安全策略：默认禁止首轮失败后的 180° 旋转，避免机械臂碰撞旁边人员或物体。
-        // 此时按普通任务失败收尾并收安全姿态，不得先切换旋转状态或下发旋转命令。
-        if (!kEnableScanFailureRotationRecovery) {
-            emit logMessage(prefix(QStringLiteral("SCAN"))
-                            + QStringLiteral(" 首轮失败：%1；扫码旋转补救开关已关闭，禁止旋转")
-                                  .arg(failureDetail));
-            beginCleanupAfterTaskFailure(
-                QStringLiteral("首轮扫码失败且旋转补救已关闭：%1").arg(failureDetail));
-            return;
-        }
-
-        // 仅在现场安全确认并显式开启开关后，才保留暂停中的 StageOne，执行旋转并发起第二轮扫码。
-        m_scanAttempt = 2;
-        m_state = ExecState::RotateForScan;
-        setTaskRunning(TaskStep::PreGripScan,
-                       QStringLiteral("首轮扫码失败（%1），旋转工具 180 度后重试").arg(failureDetail));
-        emit logMessage(prefix(QStringLiteral("SCAN"))
-                        + QStringLiteral(" 首轮失败：%1，进入旋转补救").arg(failureDetail));
-        m_arm->rotateToolRz180();
+    m_lastScanFailureDetail = failureDetail;
+    if (m_scanSearchIndex < kScanSearchTargetCount) {
+        startNextScanSearchMove(failureDetail);
         return;
     }
 
-    beginCleanupAfterTaskFailure(QStringLiteral("两轮扫码均失败：%1").arg(failureDetail));
+    if (kEnableScanFailureRotationRecovery) {
+        emit logMessage(prefix(QStringLiteral("SCAN"))
+                        + QStringLiteral(" Y 轴搜码全部失败，但旋转补救开关已打开；当前版本仍按回拍照位失败收尾处理"));
+    }
+
+    m_state = ExecState::PreGripScanReturnCapture;
+    setTaskRunning(TaskStep::PreGripScan, QStringLiteral("扫码搜索仍失败，机械臂返回拍照位"));
+    emit logMessage(prefix(QStringLiteral("SCAN"))
+                    + QStringLiteral(" Y 轴搜码全部失败：%1，返回拍照位").arg(failureDetail));
+    m_arm->returnToCaptureForScanFailure();
 }
 
 void TaskExecutor::onAgvMonitor(const AgvMonitorData &data)
 {
-    if (!isBusy()) {
-        return;
-    }
-
-    if (!isAgvNavigationState(m_state)) {
+    if (!isBusy() || !isAgvNavigationState(m_state)) {
         return;
     }
 
@@ -208,7 +211,6 @@ void TaskExecutor::onAgvMonitor(const AgvMonitorData &data)
 
     if (data.navStatus >= static_cast<quint16>(AgvController::NavStatus::Failed)
         && data.navStatus <= static_cast<quint16>(AgvController::NavStatus::Timeout)) {
-        // 忽略其他/上一导航任务残留的失败状态，只处理当前 expectedLm 对应任务。
         if (data.navStation != m_expectedLm) {
             return;
         }
@@ -221,14 +223,10 @@ void TaskExecutor::onAgvMonitor(const AgvMonitorData &data)
         return;
     }
 
-    // 禁止直接消费启动前残留的 Arrived(4)。本次必须先真实出现 Waiting/Running，
-    // 才能证明后续 Arrived 属于刚刚发出的导航命令。
     if (!m_agvSeenMoving) {
         return;
     }
 
-    // navStatus/navStation 只反映导航任务自身状态，可能残留上一单的“已到达”；
-    // 必须同时检查 curStation，确认 AGV 物理位置也真正到达本次目标 LM。
     if (data.navStatus == static_cast<quint16>(AgvController::NavStatus::Arrived)
         && data.navStation == m_expectedLm
         && data.curStation == m_expectedLm) {
@@ -244,7 +242,7 @@ void TaskExecutor::onAgvMonitor(const AgvMonitorData &data)
             enterState(ExecState::ArmUnload, QStringLiteral("机械臂开始倒料"));
             break;
         case ExecState::AgvToPallet:
-            enterState(ExecState::PreparePalletPoint, QStringLiteral("校验码垛配置并计算下一点"));
+            enterState(ExecState::PreparePalletPoint, QStringLiteral("校验码垛配置并计算下一个点"));
             break;
         default:
             break;
@@ -261,8 +259,6 @@ void TaskExecutor::onArmStageCompleted(const QString &stageName)
     emit logMessage(prefix(QStringLiteral("ARM"))
                     + QStringLiteral(" %1 已完成").arg(stageName));
 
-    // HuayanScheduler 的完成信号是通用信号；业务推进只依赖当前 ExecState，
-    // 不解析可变的中文 stageName，从而避免文案变化破坏状态机。
     switch (m_state) {
     case ExecState::ArmPickup:
     case ExecState::PreGripScan:
@@ -270,13 +266,9 @@ void TaskExecutor::onArmStageCompleted(const QString &stageName)
         enterState(ExecState::StowAfterPickup, QStringLiteral("取料完成，机械臂收姿态"));
         break;
     case ExecState::StowAfterPickup:
-        // 取料位与倒料位相同表示 AGV 在机械臂取料期间始终停留于目标站。
-        // 若仍下发同站导航，AGV 通常不会重新出现 Waiting/Running，而严格到站
-        // 判定又不会接受残留 Arrived，调度将一直等待。因此这里不创建导航任务、
-        // 不启动导航超时，直接推进机械臂倒料；不同站点仍沿用严格导航校验。
         if (m_stationCfg->pickupLm == m_stationCfg->unloadLm) {
             emit logMessage(prefix(QStringLiteral("AGV"))
-                            + QStringLiteral(" 取料位与倒料位同为 LM%1，跳过 AGV 导航，直接开始倒料")
+                            + QStringLiteral(" 取料位与倒料位同一 LM%1，跳过 AGV 导航，直接开始倒料")
                                   .arg(m_stationCfg->unloadLm));
             enterState(ExecState::ArmUnload, QStringLiteral("取料位与倒料位相同，机械臂开始倒料"));
             break;
@@ -311,8 +303,6 @@ void TaskExecutor::onArmStageError(const QString &reason)
         return;
     }
 
-    // CleanupStow 已是任务失败后的最后安全恢复手段；它再失败说明无法保证机械臂
-    // 处于可运输姿态，必须升级为系统级 ERROR，禁止继续下一任务。
     if (m_state == ExecState::CleanupStow) {
         emit logMessage(prefix(QStringLiteral("ERROR"))
                         + QStringLiteral(" CLEANUP 安全收姿态失败，需升级为系统级 ERROR：%1")
@@ -332,8 +322,66 @@ void TaskExecutor::onPreGripScanRequested()
         return;
     }
 
+    resetScanSearchState();
     m_scanAttempt = 1;
     requestScan(QStringLiteral("机械臂到达预夹取扫码点，等待首轮扫码结果"));
+}
+
+void TaskExecutor::onPreGripScanSearchMoveCompleted(double currentYOffsetMm)
+{
+    if (!isBusy()) {
+        return;
+    }
+
+    if (m_state == ExecState::PreGripScanSearchReturn) {
+        emit logMessage(prefix(QStringLiteral("SCAN"))
+                        + QStringLiteral(" 已回到原夹取位置，条码=%1，继续夹紧")
+                              .arg(m_pendingScanCodeAfterSearch));
+        resetScanSearchState();
+        setTaskRunning(TaskStep::GripAndLift, QStringLiteral("扫码通过，机械臂继续夹紧并抬升"));
+        m_arm->continueAfterPreGripScan();
+        return;
+    }
+
+    if (m_state != ExecState::PreGripScanSearchMove) {
+        return;
+    }
+
+    emit logMessage(prefix(QStringLiteral("SCAN"))
+                    + QStringLiteral(" 已到 Y=%1mm 搜码位置，重新扫码")
+                          .arg(currentYOffsetMm, 0, 'f', 1));
+    m_scanAttempt = m_scanSearchIndex + 1;
+    requestScan(QStringLiteral("已到 Y 轴搜码位置，等待扫码结果"));
+}
+
+void TaskExecutor::onPreGripScanSearchMoveError(const QString &reason)
+{
+    if (!isBusy()) {
+        return;
+    }
+
+    resetScanSearchState();
+    beginCleanupAfterTaskFailure(QStringLiteral("扫码搜索移动失败：%1").arg(reason));
+}
+
+void TaskExecutor::onPreGripScanCaptureReturnCompleted()
+{
+    if (!isBusy() || m_state != ExecState::PreGripScanReturnCapture) {
+        return;
+    }
+
+    finishScanSearchFailureAtCapture(
+        QStringLiteral("扫码失败且 Y 轴搜码无结果：%1").arg(m_lastScanFailureDetail));
+}
+
+void TaskExecutor::onPreGripScanCaptureReturnError(const QString &reason)
+{
+    if (!isBusy()) {
+        return;
+    }
+
+    resetScanSearchState();
+    beginCleanupAfterTaskFailure(QStringLiteral("扫码失败后返回拍照位失败：%1").arg(reason));
 }
 
 void TaskExecutor::onToolRotationCompleted()
@@ -362,12 +410,10 @@ void TaskExecutor::onPalletPlaceCompleted()
         return;
     }
 
-    // 先显式进入 CommitPallet，使日志/UI 能区分“机械臂已放好”和“缓存已推进”。
     m_state = ExecState::CommitPallet;
     setTaskRunning(TaskStep::CommitPallet, QStringLiteral("机械臂放置完成，提交码垛缓存"));
 
     QString error;
-    // 只有机械臂到位并松爪成功后才能推进码垛缓存。
     if (!m_pallet->commitPlaced(m_stationCfg->palletArea, &error)) {
         raiseSystemError(QStringLiteral("commitPlaced() 失败：%1").arg(error));
         return;
@@ -401,7 +447,6 @@ void TaskExecutor::onAgvTimeout()
 
 void TaskExecutor::resetRuntimeState()
 {
-    // 只重置运行期字段；调用方会在 reset 后设置 m_task 终态并发送最终信号。
     m_agvTimeout->stop();
     m_state = ExecState::Idle;
     m_stationCfg = nullptr;
@@ -409,6 +454,7 @@ void TaskExecutor::resetRuntimeState()
     m_pendingPalletOffset = PalletPose{};
     m_expectedLm = 0;
     m_scanAttempt = 0;
+    resetScanSearchState();
     m_agvSeenMoving = false;
     m_cleanupAfterTaskFailure = false;
     m_pendingTaskFailureReason.clear();
@@ -451,6 +497,9 @@ TaskStep TaskExecutor::taskStepForState(ExecState state) const
     case ExecState::ArmPickup:
         return TaskStep::ArmPickup;
     case ExecState::PreGripScan:
+    case ExecState::PreGripScanSearchMove:
+    case ExecState::PreGripScanSearchReturn:
+    case ExecState::PreGripScanReturnCapture:
     case ExecState::RotateForScan:
         return TaskStep::PreGripScan;
     case ExecState::StowAfterPickup:
@@ -470,7 +519,6 @@ TaskStep TaskExecutor::taskStepForState(ExecState state) const
     case ExecState::CommitPallet:
         return TaskStep::CommitPallet;
     case ExecState::StowAfterPallet:
-        return TaskStep::StowAfterPallet;
     case ExecState::CleanupStow:
         return TaskStep::StowAfterPallet;
     case ExecState::Idle:
@@ -545,8 +593,6 @@ bool TaskExecutor::resolveTaskConfigs()
 
 void TaskExecutor::enterState(ExecState state, const QString &statusText)
 {
-    // 先发布任务状态，再启动设备动作；这样即使设备立即同步报错，日志/UI 也能
-    // 准确显示错误发生在哪个业务步骤。
     m_state = state;
     setTaskRunning(taskStepForState(state), statusText);
 
@@ -580,7 +626,6 @@ void TaskExecutor::enterState(ExecState state, const QString &statusText)
         m_arm->startPalletPlace(m_pendingPalletOffset);
         break;
     case ExecState::CleanupStow:
-        // 这是任务级失败后的安全恢复路径；如果收姿态失败必须升级系统级 ERROR。
         emit logMessage(prefix(QStringLiteral("CLEANUP"))
                         + QStringLiteral(" 开始执行安全收姿态：%1")
                               .arg(m_pendingTaskFailureReason));
@@ -588,6 +633,9 @@ void TaskExecutor::enterState(ExecState state, const QString &statusText)
         break;
     case ExecState::Idle:
     case ExecState::PreGripScan:
+    case ExecState::PreGripScanSearchMove:
+    case ExecState::PreGripScanSearchReturn:
+    case ExecState::PreGripScanReturnCapture:
     case ExecState::RotateForScan:
     case ExecState::CommitPallet:
     case ExecState::AgvToPickup:
@@ -599,7 +647,6 @@ void TaskExecutor::enterState(ExecState state, const QString &statusText)
 
 void TaskExecutor::startAgvStep(ExecState state, int lm, const QString &statusText)
 {
-    // 每次导航都重新清除 SeenMoving，避免沿用上一段导航的运动证据。
     m_expectedLm = lm;
     m_agvSeenMoving = false;
     m_state = state;
@@ -612,7 +659,6 @@ void TaskExecutor::startAgvStep(ExecState state, int lm, const QString &statusTe
 
 void TaskExecutor::requestScan(const QString &statusText)
 {
-    // ScanOptions 只包含协议参数；scannerIP 由 DeviceManager 在跨线程转发时填入。
     m_state = ExecState::PreGripScan;
     setTaskRunning(TaskStep::PreGripScan, statusText);
 
@@ -650,7 +696,6 @@ void TaskExecutor::beginPalletPreparation()
                         + QStringLiteral(" 配置建议：%1").arg(suggestions.join(QStringLiteral("；"))));
     }
 
-    // nextRelativeOffset 只预览下一点，不改变 placedCount；真正提交在机械臂成功松爪后。
     QString error;
     if (!m_pallet->nextRelativeOffset(m_stationCfg->palletArea, &m_pendingPalletOffset, &error)) {
         raiseSystemError(QStringLiteral("码垛区无可用点位：%1").arg(error));
@@ -658,13 +703,44 @@ void TaskExecutor::beginPalletPreparation()
     }
 
     emit logMessage(prefix(QStringLiteral("PALLET"))
-                    + QStringLiteral(" 已计算下一放置点 offset X=%1 Y=%2 Z=%3 Rz=%4")
+                    + QStringLiteral(" 已计算下一个放置点 offset X=%1 Y=%2 Z=%3 Rz=%4")
                           .arg(m_pendingPalletOffset.x, 0, 'f', 1)
                           .arg(m_pendingPalletOffset.y, 0, 'f', 1)
                           .arg(m_pendingPalletOffset.z, 0, 'f', 1)
                           .arg(m_pendingPalletOffset.rz, 0, 'f', 1));
 
     enterState(ExecState::ArmPalletPlace, QStringLiteral("机械臂执行码垛放置"));
+}
+
+void TaskExecutor::startNextScanSearchMove(const QString &failureDetail)
+{
+    static const double kTargets[] = { kScanSearchYOffsetMm, -kScanSearchYOffsetMm };
+    const double target = kTargets[m_scanSearchIndex];
+    ++m_scanSearchIndex;
+    m_state = ExecState::PreGripScanSearchMove;
+    setTaskRunning(TaskStep::PreGripScan,
+                   QStringLiteral("扫码失败（%1），Y 轴搜码 %2/%3")
+                       .arg(failureDetail)
+                       .arg(m_scanSearchIndex)
+                       .arg(kScanSearchTargetCount));
+    emit logMessage(prefix(QStringLiteral("SCAN"))
+                    + QStringLiteral(" 扫码失败：%1；移动到工具系 Y=%2mm 后重试")
+                          .arg(failureDetail)
+                          .arg(target, 0, 'f', 1));
+    m_arm->movePreGripScanSearchTo(target);
+}
+
+void TaskExecutor::finishScanSearchFailureAtCapture(const QString &reason)
+{
+    resetScanSearchState();
+    beginCleanupAfterTaskFailure(reason);
+}
+
+void TaskExecutor::resetScanSearchState()
+{
+    m_scanSearchIndex = 0;
+    m_lastScanFailureDetail.clear();
+    m_pendingScanCodeAfterSearch.clear();
 }
 
 void TaskExecutor::beginCleanupAfterTaskFailure(const QString &reason)
@@ -686,6 +762,9 @@ void TaskExecutor::beginCleanupAfterTaskFailure(const QString &reason)
         case ExecState::StowAfterPallet:
             return QStringLiteral("ARM");
         case ExecState::PreGripScan:
+        case ExecState::PreGripScanSearchMove:
+        case ExecState::PreGripScanSearchReturn:
+        case ExecState::PreGripScanReturnCapture:
         case ExecState::RotateForScan:
             return QStringLiteral("SCAN");
         case ExecState::PreparePalletPoint:
@@ -703,7 +782,6 @@ void TaskExecutor::beginCleanupAfterTaskFailure(const QString &reason)
     m_agvTimeout->stop();
     m_pendingTaskFailureReason = reason;
     m_cleanupAfterTaskFailure = true;
-    // 允许收姿态成功后继续下一任务。
     emit logMessage(prefix(QStringLiteral("ERROR"))
                     + QStringLiteral(" 任务级失败：阶段=%1，原因=%2")
                           .arg(failedStage, reason));
@@ -736,8 +814,6 @@ void TaskExecutor::finishTaskSuccess()
 
 void TaskExecutor::raiseSystemError(const QString &reason)
 {
-    // 系统级错误必须同时停 AGV、停机械臂并清理运行期状态；LineManager 收到
-    // systemError 后负责清空 Pending 和阻止新任务入队。
     emit logMessage(prefix(QStringLiteral("ERROR"))
                     + QStringLiteral(" 系统级 ERROR：%1").arg(reason));
     clearPalletStackingFlag();

@@ -433,7 +433,8 @@ MainWindow::MainWindow(QWidget *parent)
         updateLineCurrentTask(lm->currentTask());
     }
 
-    log(QStringLiteral("===== 上位机可视化系统启动 ====="));
+    log(QStringLiteral("===== 上位机可视化系统启动 v%1（Build %2） =====")
+            .arg(QStringLiteral(APP_VERSION), QStringLiteral(APP_BUILD_DATE)));
     log(QStringLiteral("请配置设备IP后连接"));
 }
 
@@ -461,7 +462,7 @@ MainWindow::~MainWindow()
  */
 void MainWindow::initUI()
 {
-    setWindowTitle(QStringLiteral("仓储机器人可视化上位机"));
+    setWindowTitle(QStringLiteral("仓储机器人可视化上位机 v%1").arg(QStringLiteral(APP_VERSION)));
     setMinimumSize(1100, 750);
     resize(1200, 850);
 

@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(wh-robot-visual VERSION 0.1 LANGUAGES CXX)
+project(wh-robot-visual VERSION 0.2.2 LANGUAGES CXX)
 
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
@@ -10,6 +10,13 @@ set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
 add_compile_definitions(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
+
+string(TIMESTAMP APP_BUILD_DATE "%Y-%m-%d")
+
+add_compile_definitions(
+    APP_VERSION="${PROJECT_VERSION}"
+    APP_BUILD_DATE="${APP_BUILD_DATE}"
+)
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network SerialBus)
 include(GNUInstallDirs)

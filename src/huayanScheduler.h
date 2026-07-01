@@ -81,6 +81,10 @@ public:
     void continueAfterPreGripScan();
     /// 扫码补救独立动作：工具坐标系 Rz 相对旋转 180°，不丢失暂停中的 StageOne。
     void rotateToolRz180();
+    /// 夹紧前扫码失败时，沿工具系 Y 轴移动到指定搜索偏移。
+    void movePreGripScanSearchTo(double targetYOffsetMm);
+    /// 扫码搜索全部失败时，回到拍照位，后续失败收尾由上层决定。
+    void returnToCaptureForScanFailure();
     /// 执行“码垛基准位→相对偏移→松爪”；不更新 PalletScheduler 缓存。
     void startPalletPlace(const PalletPose &offset);
 
@@ -112,6 +116,10 @@ signals:
     void preGripScanRequested();    ///< 已到夹紧前安全暂停点，请上层异步扫码。
     void toolRotationCompleted();
     void toolRotationError(const QString &reason);
+    void preGripScanSearchMoveCompleted(double currentYOffsetMm);
+    void preGripScanSearchMoveError(const QString &reason);
+    void preGripScanCaptureReturnCompleted();
+    void preGripScanCaptureReturnError(const QString &reason);
     void palletPlaceCompleted();
     void palletPlaceError(const QString &reason);
 
@@ -154,9 +162,11 @@ private:
 
     /// 可在 StageOne 扫码暂停期间运行的独立动作状态机。
     enum class Action {
-        None,        ///< 无独立动作。
-        RotateTool,  ///< 扫码补救旋转。
-        PalletPlace  ///< 空箱码垛放置。
+        None,                           ///< 无独立动作。
+        RotateTool,                     ///< 扫码补救旋转。
+        PalletPlace,                    ///< 空箱码垛放置。
+        PreGripScanSearchMove,          ///< 夹紧前扫码搜索位移动。
+        ReturnToCaptureForScanFailure   ///< 扫码搜索失败后回拍照位。
     };
 
     enum class ActionStep {
@@ -164,7 +174,9 @@ private:
         RotateTool,
         RunPalletBase,
         MovePalletOffset,
-        ReleasePallet
+        ReleasePallet,
+        MovePreGripScanSearchY,
+        RunCaptureForScanFailure
     };
 
     void proceedStage();
@@ -227,8 +239,12 @@ private:
     int m_grabIterations = 0;   // 闭环视觉矫正的迭代计数
     int m_searchDescendCount = 0;   // 找目标保护搜索的次数，不参与抓取闭环迭代
     double m_searchDescendedMm = 0.0;  // 找目标累计下移量(mm)，不是抓取 Z 下探量
+    bool m_pendingLargeRzConfirmation = false; ///< 上一帧是否出现待确认的 Rz 大角度跳变。
+    double m_pendingLargeRz = 0.0;             ///< 待确认的 Rz 大角度跳变值(deg)。
     bool m_preGripScanEnabled = false; ///< 是否启用夹紧前扫码暂停。
     bool m_waitingPreGripScan = false; ///< 已发扫码请求且尚未收到继续指令。
+    double m_preGripScanSearchCurrentY = 0.0; ///< 当前夹紧前扫码搜索 Y 偏移(mm)。
+    double m_preGripScanSearchTargetY = 0.0;  ///< 本轮夹紧前扫码搜索目标 Y 偏移(mm)。
     Pose m_pickupPose;
     Pose m_pickupLiftPose;
     Pose m_unloadPose;

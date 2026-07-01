@@ -39,6 +39,8 @@ static constexpr bool   kZDescendInvert = false;   // Z 下探方向；若实际
 static constexpr double kOffsetIgnoreDistance = 0.5; // 码垛平移死区(mm)
 static constexpr double kOffsetIgnoreAngle = 0.5;    // 码垛旋转死区(deg)
 static constexpr double kRotateToolAngle = 180.0;    // 扫码补救的工具系 Rz 角(deg)
+static constexpr double kLargeRzJumpThreshold = 80.0; // Rz 大角度跳变确认阈值(deg)
+static constexpr double kLargeRzJumpDeltaTolerance = 15.0; // 连续两帧幅值接近阈值(deg)
 
 // 华研机器人默认 TCP/UCS 名称
 static const QString kTcpName = QStringLiteral("TCP");
@@ -323,6 +325,47 @@ void HuayanScheduler::rotateToolRz180()
     proceedAction();
 }
 
+void HuayanScheduler::movePreGripScanSearchTo(double targetYOffsetMm)
+{
+    if (m_action != Action::None) {
+        emit preGripScanSearchMoveError(QStringLiteral("当前已有独立动作执行中"));
+        return;
+    }
+    if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitPreGripScan || !m_waitingPreGripScan) {
+        emit preGripScanSearchMoveError(QStringLiteral("当前阶段不允许执行夹紧前扫码搜索移动"));
+        return;
+    }
+
+    m_preGripScanSearchTargetY = targetYOffsetMm;
+    m_action = Action::PreGripScanSearchMove;
+    m_actionStep = ActionStep::MovePreGripScanSearchY;
+    if (!ensureConnected())
+        return;
+    emit logMessage(QStringLiteral("[扫码搜索] 移动到工具系 Y=%1mm 搜码位置")
+                        .arg(targetYOffsetMm, 0, 'f', 1));
+    proceedAction();
+}
+
+void HuayanScheduler::returnToCaptureForScanFailure()
+{
+    if (m_action != Action::None) {
+        emit preGripScanCaptureReturnError(QStringLiteral("当前已有独立动作执行中"));
+        return;
+    }
+    if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitPreGripScan || !m_waitingPreGripScan) {
+        emit preGripScanCaptureReturnError(QStringLiteral("当前阶段不允许回拍照位"));
+        return;
+    }
+
+    m_action = Action::ReturnToCaptureForScanFailure;
+    m_actionStep = ActionStep::RunCaptureForScanFailure;
+    if (!ensureConnected())
+        return;
+    emit logMessage(QStringLiteral("[扫码搜索] 全部失败，调用拍照位函数 %1 返回拍照位")
+                        .arg(m_captureFuncName));
+    proceedAction();
+}
+
 void HuayanScheduler::startPalletPlace(const PalletPose &offset)
 {
     if (m_action != Action::None) {
@@ -392,7 +435,11 @@ void HuayanScheduler::startStageOne()
     m_grabIterations = 0;
     m_searchDescendCount = 0;
     m_searchDescendedMm = 0.0;
+    m_pendingLargeRzConfirmation = false;
+    m_pendingLargeRz = 0.0;
     m_waitingPreGripScan = false;
+    m_preGripScanSearchCurrentY = 0.0;
+    m_preGripScanSearchTargetY = 0.0;
 
     emit stageStarted(stageName(m_stage));
     resetAndProceed();
@@ -494,7 +541,11 @@ void HuayanScheduler::stop()
     clearActionState();
     m_searchDescendCount = 0;
     m_searchDescendedMm = 0.0;
+    m_pendingLargeRzConfirmation = false;
+    m_pendingLargeRz = 0.0;
     m_waitingPreGripScan = false;
+    m_preGripScanSearchCurrentY = 0.0;
+    m_preGripScanSearchTargetY = 0.0;
     m_stage = Stage::None;
     m_stageStep = StageStep::None;
     emit logMessage(QStringLiteral("调度已停止"));
@@ -853,6 +904,46 @@ void HuayanScheduler::proceedAction()
             break;
         }
         break;
+    case Action::PreGripScanSearchMove:
+        switch (m_actionStep) {
+        case ActionStep::MovePreGripScanSearchY: {
+            const double delta = m_preGripScanSearchTargetY - m_preGripScanSearchCurrentY;
+            if (qAbs(delta) < 0.1) {
+                finishAction();
+                return;
+            }
+
+            const int direction = delta >= 0.0 ? 1 : 0;
+            int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, 1, direction, qAbs(delta), 1);
+            if (nRet != 0) {
+                const QString detail = describeError(m_boxID, nRet);
+                actionError(detail.isEmpty()
+                    ? QStringLiteral("扫码搜索 Y 轴移动失败：%1").arg(nRet)
+                    : QStringLiteral("扫码搜索 Y 轴移动失败：%1（%2）").arg(nRet).arg(detail));
+                return;
+            }
+            startWaitForIdle();
+            break;
+        }
+        case ActionStep::None:
+            finishAction();
+            break;
+        default:
+            break;
+        }
+        break;
+    case Action::ReturnToCaptureForScanFailure:
+        switch (m_actionStep) {
+        case ActionStep::RunCaptureForScanFailure:
+            executeRunFunc(m_captureFuncName);
+            break;
+        case ActionStep::None:
+            finishAction();
+            break;
+        default:
+            break;
+        }
+        break;
     case Action::None:
         break;
     }
@@ -869,6 +960,10 @@ void HuayanScheduler::advanceActionStep()
             m_actionStep = ActionStep::MovePalletOffset;
         else if (m_actionStep == ActionStep::ReleasePallet)
             m_actionStep = ActionStep::None;
+        break;
+    case Action::PreGripScanSearchMove:
+    case Action::ReturnToCaptureForScanFailure:
+        m_actionStep = ActionStep::None;
         break;
     case Action::None:
         break;
@@ -921,9 +1016,18 @@ void HuayanScheduler::clearActionState()
 void HuayanScheduler::finishAction()
 {
     const Action action = m_action;
+    const double targetY = m_preGripScanSearchTargetY;
     clearActionState();
     if (action == Action::RotateTool)
         emit toolRotationCompleted();
+    else if (action == Action::PreGripScanSearchMove) {
+        m_preGripScanSearchCurrentY = targetY;
+        emit preGripScanSearchMoveCompleted(m_preGripScanSearchCurrentY);
+    } else if (action == Action::ReturnToCaptureForScanFailure) {
+        m_preGripScanSearchCurrentY = 0.0;
+        m_preGripScanSearchTargetY = 0.0;
+        emit preGripScanCaptureReturnCompleted();
+    }
     else if (action == Action::PalletPlace)
         emit palletPlaceCompleted();
 }
@@ -938,6 +1042,10 @@ void HuayanScheduler::actionError(const QString &msg, bool stopRobot)
 
     if (action == Action::RotateTool)
         emit toolRotationError(msg);
+    else if (action == Action::PreGripScanSearchMove)
+        emit preGripScanSearchMoveError(msg);
+    else if (action == Action::ReturnToCaptureForScanFailure)
+        emit preGripScanCaptureReturnError(msg);
     else if (action == Action::PalletPlace)
         emit palletPlaceError(msg);
     else
@@ -1014,20 +1122,49 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
     if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision)
         return;
 
-    m_grabOffset = { x, y, z, 0.0, 0.0, rz };
+    auto sameDirection = [](double a, double b) {
+        return (a >= 0.0 && b >= 0.0) || (a < 0.0 && b < 0.0);
+    };
+
+    const bool isLargeRzJump = qAbs(rz) >= kLargeRzJumpThreshold;
+    bool suppressLargeRzRotation = false;
+    double effectiveRz = rz;
+    if (isLargeRzJump) {
+        if (!m_pendingLargeRzConfirmation
+            || !sameDirection(m_pendingLargeRz, rz)
+            || qAbs(qAbs(m_pendingLargeRz) - qAbs(rz)) > kLargeRzJumpDeltaTolerance) {
+            m_pendingLargeRzConfirmation = true;
+            m_pendingLargeRz = rz;
+            suppressLargeRzRotation = true;
+            effectiveRz = 0.0;
+            emit logMessage(QStringLiteral("[阶段一] 检测到疑似 Rz 大角度跳变 Rz=%1，等待下一帧确认，本轮不执行 Rz 旋转")
+                                .arg(rz, 0, 'f', 1));
+        } else {
+            emit logMessage(QStringLiteral("[阶段一] Rz 大角度跳变已连续确认 Rz=%1，允许执行旋转")
+                                .arg(rz, 0, 'f', 1));
+            m_pendingLargeRzConfirmation = false;
+            m_pendingLargeRz = 0.0;
+        }
+    } else {
+        m_pendingLargeRzConfirmation = false;
+        m_pendingLargeRz = 0.0;
+    }
+
+    m_grabOffset = { x, y, z, 0.0, 0.0, effectiveRz };
     emit logMessage(QStringLiteral("[阶段一] 视觉偏移(工具系) X=%1 Y=%2 Z=%3 Rz=%4 (迭代 %5)")
                         .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1)
-                        .arg(z, 0, 'f', 1).arg(rz, 0, 'f', 1)
+                        .arg(z, 0, 'f', 1).arg(effectiveRz, 0, 'f', 1)
                         .arg(m_grabIterations));
 
-    const bool aligned = qAbs(x) < kGrabTolerance
+    const bool aligned = !suppressLargeRzRotation
+        && qAbs(x) < kGrabTolerance
         && qAbs(y) < kGrabTolerance
-        && qAbs(rz) < kRzTolerance;
+        && qAbs(effectiveRz) < kRzTolerance;
 
     // 闭环收敛：只有 XY 平移与 Rz 旋转都达标才进入 Z 下探。
     if (aligned) {
         emit logMessage(QStringLiteral("[阶段一] 视觉对准完成（X=%1 Y=%2 Rz=%3），开始 Z 下探")
-                            .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1).arg(rz, 0, 'f', 1));
+                            .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1).arg(effectiveRz, 0, 'f', 1));
         m_stageStep = StageStep::DescendZ;
         proceedStage();
         return;
@@ -1038,7 +1175,7 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
                                .arg(m_grabIterations)
                                .arg(x, 0, 'f', 1)
                                .arg(y, 0, 'f', 1)
-                               .arg(rz, 0, 'f', 1)
+                               .arg(effectiveRz, 0, 'f', 1)
                                .arg(kGrabTolerance, 0, 'f', 1)
                                .arg(kRzTolerance, 0, 'f', 1));
         return;
@@ -1055,7 +1192,7 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
     // Rz 取反：眼在手上闭环时，按 +rz 旋转会使下帧视觉角同向变大、机械臂持续旋转累积至 180°
     addMove(0, x);    // X
     addMove(1, -y);   // Y
-    addMove(5, -rz);  // Rz 旋转
+    addMove(5, -effectiveRz);  // Rz 旋转
 
     m_grabMoveIdx = 0;
     m_stageStep = StageStep::MoveToGrab;

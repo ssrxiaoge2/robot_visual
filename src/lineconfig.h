@@ -78,18 +78,18 @@ namespace lineconfig_detail {
 
 // 集中配置表是现场点位/示教函数的唯一来源；修改前必须与 AGV 地图和示教器核对。
 inline const StationTaskConfig kStationTaskConfigs[] = {
-    {1, 3, 3, PalletArea::LargeBox, QStringLiteral("Func_capture1"), QStringLiteral("Func_daoliao1"), QStringLiteral("FlipUnload")},
-    {2, 4, 4, PalletArea::LargeBox, QStringLiteral("Func_capture2"), QStringLiteral("Func_daoliao2"), QStringLiteral("FlipUnload")},
-    {3, 5, 9, PalletArea::LargeBox, QStringLiteral("Func_capture3"), QStringLiteral("Func_daoliao3"), QStringLiteral("FlipUnload")},
-    {4, 5, 9, PalletArea::LargeBox, QStringLiteral("Func_capture4"), QStringLiteral("Func_daoliao4"), QStringLiteral("FlipUnload")},
-    {5, 5, 10, PalletArea::LargeBox, QStringLiteral("Func_capture5"), QStringLiteral("Func_daoliao5"), QStringLiteral("FlipUnload")},
-    {6, 6, 10, PalletArea::LargeBox, QStringLiteral("Func_capture6"), QStringLiteral("Func_daoliao6"), QStringLiteral("FlipUnload")},
-    {7, 6, 11, PalletArea::LargeBox, QStringLiteral("Func_capture7"), QStringLiteral("Func_daoliao7"), QStringLiteral("FlipUnload")},
-    {8, 6, 11, PalletArea::LargeBox, QStringLiteral("Func_capture8"), QStringLiteral("Func_daoliao8"), QStringLiteral("FlipUnload")},
-    {9, 7, 12, PalletArea::LargeBox, QStringLiteral("Func_capture9"), QStringLiteral("Func_daoliao9"), QStringLiteral("FlipUnload")},
-    {10, 7, 12, PalletArea::LargeBox, QStringLiteral("Func_capture10"), QStringLiteral("Func_daoliao10"), QStringLiteral("FlipUnload")},
-    {11, 7, 7, PalletArea::LargeBox, QStringLiteral("Func_capture11"), QStringLiteral("Func_daoliao11"), QStringLiteral("FlipUnload")},
-    {12, 15, 15, PalletArea::SmallBox, QStringLiteral("Func_capture12"), QStringLiteral("Func_daoliao12"), QStringLiteral("FlipUnload")},
+    {1, 3, 3, PalletArea::LargeBox, QStringLiteral("Func_capture1"), QStringLiteral("Func_daoliao1"), QStringLiteral("Func_fanzhuan")},
+    {2, 4, 4, PalletArea::LargeBox, QStringLiteral("Func_capture2"), QStringLiteral("Func_daoliao2"), QStringLiteral("Func_fanzhuan")},
+    {3, 5, 9, PalletArea::LargeBox, QStringLiteral("Func_capture3"), QStringLiteral("Func_daoliao3"), QStringLiteral("Func_fanzhuan")},
+    {4, 5, 9, PalletArea::LargeBox, QStringLiteral("Func_capture4"), QStringLiteral("Func_daoliao4"), QStringLiteral("Func_fanzhuan")},
+    {5, 5, 10, PalletArea::LargeBox, QStringLiteral("Func_capture5"), QStringLiteral("Func_daoliao5"), QStringLiteral("Func_fanzhuan")},
+    {6, 6, 10, PalletArea::LargeBox, QStringLiteral("Func_capture6"), QStringLiteral("Func_daoliao6"), QStringLiteral("Func_fanzhuan")},
+    {7, 6, 11, PalletArea::LargeBox, QStringLiteral("Func_capture7"), QStringLiteral("Func_daoliao7"), QStringLiteral("Func_fanzhuan")},
+    {8, 6, 11, PalletArea::LargeBox, QStringLiteral("Func_capture8"), QStringLiteral("Func_daoliao8"), QStringLiteral("Func_fanzhuan")},
+    {9, 7, 12, PalletArea::LargeBox, QStringLiteral("Func_capture9"), QStringLiteral("Func_daoliao9"), QStringLiteral("Func_fanzhuan")},
+    {10, 7, 12, PalletArea::LargeBox, QStringLiteral("Func_capture10"), QStringLiteral("Func_daoliao10"), QStringLiteral("Func_fanzhuan")},
+    {11, 7, 7, PalletArea::LargeBox, QStringLiteral("Func_capture11"), QStringLiteral("Func_daoliao11"), QStringLiteral("Func_fanzhuan")},
+    {12, 15, 15, PalletArea::SmallBox, QStringLiteral("Func_capture12"), QStringLiteral("Func_daoliao12"), QStringLiteral("Func_fanzhuan")},
 };
 
 // 码垛 LM16/17 目前是设计阶段占位值，投产前必须替换为现场真实站点。
