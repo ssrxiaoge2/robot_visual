@@ -691,3 +691,105 @@ Git 交付门禁：
 预计修改：`src/taskexecutor.cpp`、本设计文档及唯一实施文档；不修改 `AgvController`、工位配置、机械臂、UI 或其他模块。
 
 实施结果（2026-07-01）：`StowAfterPickup` 已增加 `pickupLm == unloadLm` 判断；同站时记录日志并直接进入 `ArmUnload`，不会下发导航或启动导航超时，异站逻辑保持不变。完整构建和现有策略测试已通过；尚待工位 2 同站流程及异站工位回归现场复测。
+
+## 19. 2026-07-02 客户现场缺料信号接入
+
+### 19.1 目标与范围
+
+将 2026-06-16 仅用于读取 `actualQty` 的通信测试升级为十二工位主调度的自动缺料信号源。系统每 5 秒读取 MES 产量及 PLC 产品/生产方式，计算各工位消耗；某工位累计消耗达到安全库存时，向现有 FIFO 推送一次 `TaskSource::CustomerSystem` 任务。
+
+本次只做开发版本。UI 保留“模拟缺料 / 现场系统”互斥选择，不增加交付隐藏宏。切换只影响后续新信号，已入 FIFO 的任务继续执行且不清空。监听模块只确认事件是否成功入队，不等待或接收送料完成反馈。
+
+### 19.2 架构与职责
+
+```text
+MES actualQty ─┐
+               ├─> CustomSysScheduler ─> ShortageMonitor ─> ShortageCalculator
+PLC L 位 ──────┘                                  │
+                                                  v
+DeviceManager ─> LineManager::reportShortage(stationId, CustomerSystem) ─> FIFO
+```
+
+- `CustomSysScheduler`：HTTP GET、MES/PLC JSON 解析；不计算消耗，不操作主调度。
+- `ShortageCalculator`：纯计算单元，维护基线、产品/方式、十二工位累计和待接收阈值事件；不依赖网络、UI 或设备。
+- `ShortageMonitor`：5 秒定时器、同轮四请求聚合、启停、超时、重试和状态。
+- `DeviceManager`：持有监听器，把事件同步交给 `LineManager` 并返回是否入队。
+- `LineManager`：接收明确 `TaskSource`；模拟与现场任务共用 FIFO 和后续设备流程。
+- `MainWindow`：来源选择、监听控制和只读状态；不做 HTTP、解析或计算。
+
+### 19.3 接口与轮询一致性
+
+MES 地址固定为 `http://192.168.115.229:5084/api/MesData/day`，解析 JSON 数组首条记录的整数 `actualQty`；该值每天 20:00 换班清零。
+
+PLC 基址固定为 `http://192.168.115.228:5084/api/PlcData/GetLBitRegister`。每轮并行请求：
+
+```text
+?StartAddress=68&length=2     # L68、L69
+?StartAddress=71&length=3     # L71、L72、L73
+?StartAddress=1998&length=1   # L1998
+```
+
+PLC 响应契约为 `{"success":true,"data":[{"address":"L71","value":true}],"timestamp":"2026-07-02T15:12:32.6976771+08:00"}`。每轮共四个 GET（MES 一个、PLC 三个），周期 5 秒、请求超时 3 秒。每轮使用单调递增编号；只有同轮四个响应全部成功、PLC `success=true`、地址齐全且类型正确时才计算。上一轮未结束时不启动下一轮，过期响应不得混入新轮次。
+
+### 19.4 产品、方式与配置
+
+- `L71/L72/L73` 三选一，依次代表产品 `88/88R/92`。
+- `L68/L69/L1998` 三选一。异常多个 `true` 时按 `L68 -> L69 -> L1998` 取第一个并输出去重警告。
+- 产品不唯一或全为 `false`、地址缺失、类型错误时，本轮不计算、不派单。
+- 产品或方式变化时清空十二工位旧组合累计；变化当轮只重建 `actualQty` 基线。
+
+现场来源为 `xiancahngxitong/安全库存.xlsx`，程序使用经确认的固定配置表，不运行时读取 Excel。优先使用当前产品 sheet2 的品号、每箱数量、用量和安全库存；品号按共同主品号匹配。sheet2 字段为空时按品号回退 sheet1；仍缺失则禁用该工位并报警。
+
+| 代码工位 | sheet1 | sheet2位置 | 主品号 | 备注 |
+|---:|---:|---:|---|---|
+| 1 | 10 | 11 | `18117-RM8S0` | 独立累计 |
+| 2 | 9 | 10 | `18167-RM700` | 独立累计 |
+| 3 | 8（临时） | 9（临时） | `18116-RM8S0` | 复制工位4参数 |
+| 4 | 8 | 9 | `18116-RM8S0` | 与工位3参数相同但独立累计 |
+| 5 | 7 | 8 | `18214-RM8S0` | 独立累计 |
+| 6 | 6 | 7 | `18114-RM8S0` | 独立累计 |
+| 7 | 5 | 6 | `18225-RM8S0` | 独立累计 |
+| 8 | 4 | 5 | `18215-RM8S0` | 独立累计 |
+| 9 | 3 | 4 | `18125-RM8S0` | 独立累计 |
+| 10 | 2 | 3 | `18115-RM8S0` | 独立累计 |
+| 11 | 1 | 2 | `18112-RM8S0` | 独立累计 |
+| 12 | 11 | 13 | `18118-RM8S0` | 独立累计 |
+
+工位3、4配置相同但累计和事件独立。每箱数量只作配置和 UI 信息，不参与触发间隔，也不因任务完成改变累计。
+
+### 19.5 用量策略与触发算法
+
+集中编译期宏使用可读枚举选择两种策略：表格策略使用 sheet2“用量”（空值回退 sheet1）；PLC 方式策略在 `L68/L69` 时统一用量 2，在 `L1998` 时统一用量 1。开发版本默认使用 PLC 方式策略；修改宏必须重新编译，UI 和调度层不得重复判断。
+
+每工位维护非负整数 `accumulatedConsumption`：
+
+1. 首次有效读取只建立 `actualQty`、产品和方式基线。
+2. 新值小于上次值时视为换班/计数器清零：清空十二工位累计并重建基线。
+3. 产品或方式变化同样清空累计并重建基线。
+4. 正常轮次计算 `productionDelta = currentActualQty - previousActualQty`。
+5. 各工位增加 `productionDelta * usagePerProduct`。
+6. 累计达到安全库存时产生缺料候选。
+7. 仅当 `LineManager` 成功创建 FIFO 任务后扣除一次安全库存，不等待送料完成。
+8. 扣除后仍达阈值则继续生成独立任务，直至小于阈值并保留余数。
+
+每次触发间隔始终是安全库存，不是每箱数量。同工位允许重复入队，每个事件生成独立 `taskId`。
+
+### 19.6 拒收、断线与 UI
+
+`LineManager` 在 `Error` 拒收时不得扣阈值；保留待推送状态，恢复后重试。同一拒收原因日志去重。HTTP/JSON/PLC/配置异常只暂停本轮计算，不急停设备、不改变 FIFO。通信恢复第一轮只重建基线，不追算断线产量，既有未达阈值累计保留；若产品/方式变化则清空累计。
+
+开发 UI 使用“模拟缺料 / 现场系统”互斥选择。模拟模式保留十二按钮并停止监听；现场模式禁用模拟按钮，点击“开始检测”才轮询；“停止检测”只停止新现场信号，不停止主调度、不清 FIFO；切回模拟自动停止监听。状态区显示监听、`actualQty`、产品、方式、六个 L 位、十二工位累计/缺料状态；URL 不展示；FIFO 显示任务来源。
+
+### 19.7 文件范围
+
+新增：`src/shortageconfig.h`、`src/shortagecalculator.h/.cpp`、`src/shortagemonitor.h/.cpp`、`tests/test_shortagecalculator.cpp`、`tests/test_customsysscheduler.cpp`。
+
+修改：`src/customSysScheduler.h/.cpp`、`src/lineconfig.h`、`src/linemanager.h/.cpp`、`src/devicemanager.h/.cpp`、`src/mainwindow.h/.cpp`、`CMakeLists.txt`、本唯一 spec/plan。
+
+不修改：`TaskExecutor`、`TaskQueue`、`HuayanScheduler`、`AgvController`、视觉、扫码、码垛算法和机械臂动作流程。超出范围时按第 16、17 节暂停并确认。
+
+### 19.8 验收与注释
+
+自动验证覆盖 MES/PLC 解析、失败契约、地址/类型错误、两种策略、sheet2 回退、首次基线、正常增量、多阈值及余数、十二工位独立、工位3/4独立、产品/方式切换、`actualQty` 清零、断线恢复、FIFO 拒收/接收、模式切换不清 FIFO、同轮聚合/超时/过期响应。现场联调覆盖真实四请求、5 秒监听、切换、缺料入队、来源显示和模式互斥。离线通过不代表十二工位现场验收完成。
+
+新增类、枚举、结构体、配置、宏、成员、信号槽和状态跳转必须按第 16 节写详尽中文注释。每个实施任务单列源码注释要求与注释验收清单；注释与实现不一致时不得完成或申请提交。

@@ -1842,3 +1842,384 @@ Bug 修复或新功能完成并验证后，按以下顺序执行：
 - `cmake --build build --target wh-robot-visual -j$(nproc)` 通过。
 - `ctest --test-dir build --output-on-failure`：2/2 通过，0 失败。
 - 当前状态：代码和离线验证完成，待工位 2 同站流程及异站工位现场复测；十二工位整体验收仍未完成。
+
+## 2026-07-02 客户现场缺料信号实施阶段
+
+### 全局约束
+
+- 本阶段实现 spec 第 19 节；只做开发版本，不增加交付隐藏宏。
+- 监听周期固定 `5000ms`，请求超时固定 `3000ms`。
+- MES 固定地址为 `http://192.168.115.229:5084/api/MesData/day`。
+- PLC 固定基址为 `http://192.168.115.228:5084/api/PlcData/GetLBitRegister`，每轮读取 `68/2`、`71/3`、`1998/1`。
+- 默认使用 PLC 方式用量策略；用可读编译期枚举宏切换表格策略。
+- 每次累计达到安全库存产生一个任务；每箱数量不参与触发间隔。
+- 来源切换、停止监听和通信异常均不得清空现有 FIFO。
+- 不修改 `TaskExecutor`、`TaskQueue`、`HuayanScheduler`、`AgvController`、视觉、扫码、码垛算法或机械臂动作。
+- 每项完成后先展示文件、差异、测试和建议提交信息；获得明确许可后才能本地 commit，禁止 push。
+
+### 任务 17：建立缺料配置模型和测试目标
+
+**文件：**
+
+- 新增：`src/shortageconfig.h`
+- 新增：`tests/test_shortagecalculator.cpp`
+- 修改：`CMakeLists.txt`
+
+**接口：**
+
+```cpp
+enum class ProductModel { Model88, Model88R, Model92 };
+enum class ProductionMode { L68, L69, L1998 };
+enum class UsageStrategy { Spreadsheet, PlcMode };
+
+#ifndef SHORTAGE_USAGE_STRATEGY
+#define SHORTAGE_USAGE_STRATEGY UsageStrategy::PlcMode
+#endif
+
+struct MaterialConfig {
+    int stationId;
+    ProductModel product;
+    QString partNumber;
+    int boxQuantity;
+    int spreadsheetUsage;
+    int safetyStock;
+};
+
+const MaterialConfig *materialConfig(int stationId, ProductModel product);
+int usagePerProduct(const MaterialConfig &config, ProductionMode mode);
+```
+
+- [ ] **步骤 1：先写配置失败测试**
+
+在 `tests/test_shortagecalculator.cpp` 建立 `ShortageCalculatorTest : public QObject`，用 Qt Test 数据行断言工位 1–12、产品 88/88R/92 均可查到；断言工位 3、4 的参数值相同但返回项 `stationId` 分别为 3、4；断言默认 PLC 策略下 `L68/L69=2`、`L1998=1`。
+
+- [ ] **步骤 2：接入 Qt Test 并验证 RED**
+
+`CMakeLists.txt` 增加 `find_package(Qt6 REQUIRED COMPONENTS Widgets Network SerialBus Test)`、`enable_testing()` 和 `shortage-calculator-test`。运行：
+
+```bash
+cmake -S . -B build
+cmake --build build --target shortage-calculator-test -j$(nproc)
+```
+
+预期：因 `shortageconfig.h` 尚不存在而编译失败。
+
+- [ ] **步骤 3：写入固定配置**
+
+把 Excel 的三个产品表转成只读 `constexpr`/函数内静态配置。sheet2 空值在代码表中直接填入已确认的 sheet1 回退值，并在该字段旁标注“sheet2 空值，回退 sheet1”。工位 3 复制工位 4 参数，并写明现场临时映射。
+
+- [ ] **步骤 4：验证 GREEN**
+
+运行目标测试，预期全部通过；再用 `rg` 核对 12 个代码工位和三个产品均被覆盖。
+
+**源码注释要求：** 解释 Excel 来源、单位、品号匹配、策略宏重新编译要求，以及工位3临时规则。
+
+**注释验收清单：**
+
+- [ ] 所有枚举项、字段和宏均有中文业务注释。
+- [ ] 每个回退值可追溯到 sheet1。
+- [ ] 工位3/4相同参数但独立状态的语义明确。
+- [ ] 申请提交前展示范围与 `feat: add shortage material configuration`。
+
+### 任务 18：实现纯计算 `ShortageCalculator`
+
+**文件：**
+
+- 新增：`src/shortagecalculator.h`
+- 新增：`src/shortagecalculator.cpp`
+- 修改：`tests/test_shortagecalculator.cpp`
+- 修改：`CMakeLists.txt`
+
+**接口：**
+
+```cpp
+struct ShortageSample {
+    qint64 actualQty = 0;
+    ProductModel product = ProductModel::Model88;
+    ProductionMode mode = ProductionMode::L68;
+};
+
+struct StationConsumption {
+    int stationId = 0;
+    qint64 accumulated = 0;
+    int safetyStock = 0;
+    int boxQuantity = 0;
+    bool awaitingAcceptance = false;
+};
+
+struct IngestResult {
+    bool ok = false;
+    QList<int> pendingStations;
+    QString errorMessage;
+};
+
+class ShortageCalculator {
+public:
+    IngestResult ingest(const ShortageSample &sample);
+    bool confirmAccepted(int stationId);
+    void markCommunicationInterrupted();
+    QList<StationConsumption> snapshot() const;
+    void reset();
+};
+```
+
+`ingest()` 在 `ok=true` 时返回当前需要尝试入队的工位号，非法产量或溢出时以 `ok=false + errorMessage` 拒绝本轮；同一工位一次只暴露一个待确认事件。`confirmAccepted()` 成功后扣除一次安全库存；若余量仍达阈值，下一次 `ingest()` 或显式状态刷新再次返回该工位。
+
+- [ ] **步骤 1：补齐 RED 用例**
+
+测试至少包含：首次样本无事件；正常增量；刚好达到阈值；超过阈值保留余数；确认前重复采样不重复增加同一增量；拒收不扣减；确认后扣阈值；单轮跨多个阈值可连续确认；12 工位独立；工位3/4独立；产品/方式变化清累计并重建基线；`actualQty` 下降清累计；通信恢复首轮只重建基线且保留旧累计。
+
+- [ ] **步骤 2：运行 RED**
+
+```bash
+cmake --build build --target shortage-calculator-test -j$(nproc)
+ctest --test-dir build -R shortage-calculator --output-on-failure
+```
+
+预期：缺少 `ShortageCalculator` 实现而失败。
+
+- [ ] **步骤 3：最小实现状态机**
+
+内部保存 `m_hasBaseline`、`m_rebaselineAfterCommunication`、上一产品/方式/产量，以及 12 项累计和待确认位。所有乘法使用 `qint64`；`actualQty < 0` 拒绝；对 `delta * usage` 做溢出保护并返回错误状态，禁止回绕派单。
+
+- [ ] **步骤 4：运行 GREEN 与边界测试**
+
+运行单测并确认所有数据行通过，执行 `git diff --check`。
+
+**源码注释要求：** 类注释说明它不负责网络和任务完成；逐项解释基线、重建、待确认、扣阈值和多任务行为。
+
+**注释验收清单：**
+
+- [ ] 首次启动、换班、切型、断线恢复四种重建路径有不同原因注释。
+- [ ] “确认入队不等于送料完成”写在接口和实现处。
+- [ ] 申请提交前展示范围与 `feat: add shortage consumption calculator`。
+
+### 任务 19：扩展客户 HTTP 契约解析
+
+**文件：**
+
+- 新增：`tests/test_customsysscheduler.cpp`
+- 修改：`src/customSysScheduler.h`
+- 修改：`src/customSysScheduler.cpp`
+- 修改：`CMakeLists.txt`
+
+**接口：**
+
+```cpp
+struct PlcBitReply {
+    bool ok = false;
+    QHash<QString, bool> bits;
+    QDateTime timestamp;
+    QString errorMessage;
+};
+
+static PlcBitReply parsePlcBitReply(const QByteArray &payload,
+                                    const QStringList &requiredAddresses);
+void fetchMesDayData(quint64 roundId);
+void fetchPlcBits(quint64 roundId, int startAddress, int length);
+
+signals:
+void mesReplyReady(quint64 roundId, bool ok, qint64 actualQty, QString error);
+void plcReplyReady(quint64 roundId, int startAddress,
+                   PlcBitReply result);
+```
+
+- [ ] **步骤 1：写解析 RED 测试**
+
+覆盖用户提供的成功 JSON，并分别验证 `success=false`、根不是对象、`data` 非数组、缺少 address/value、value 非 bool、缺少所需地址、重复地址和 timestamp 无效。MES 测试保留数组/空数组/缺 `actualQty`/非数字路径。
+
+- [ ] **步骤 2：运行 RED**
+
+构建并执行 `custom-system-parser-test`，预期 PLC API 尚不存在而失败。
+
+- [ ] **步骤 3：实现解析与四类请求信号**
+
+集中定义 MES 和 PLC 基址常量。网络完成回调必须原样携带 `roundId` 与 `startAddress`；不在解析器中选择产品、方式或工位。
+
+- [ ] **步骤 4：运行 GREEN**
+
+```bash
+cmake --build build --target custom-system-parser-test -j$(nproc)
+ctest --test-dir build -R custom-system-parser --output-on-failure
+```
+
+**源码注释要求：** 说明 PLC 契约、必需地址校验、轮次透传及 3 秒超时。
+
+**注释验收清单：**
+
+- [ ] JSON 错误均有可定位中文信息。
+- [ ] 解析层没有产品或用量业务判断。
+- [ ] 申请提交前展示范围与 `feat: parse customer PLC bit responses`。
+
+### 任务 20：实现四请求聚合 `ShortageMonitor`
+
+**文件：**
+
+- 新增：`src/shortagemonitor.h`
+- 新增：`src/shortagemonitor.cpp`
+- 新增：`tests/test_shortagemonitor.cpp`
+- 修改：`CMakeLists.txt`
+
+**接口：**
+
+```cpp
+class ShortageMonitor : public QObject {
+    Q_OBJECT
+public:
+    explicit ShortageMonitor(CustomSysScheduler *client,
+                             QObject *parent = nullptr);
+    bool isRunning() const;
+    QList<StationConsumption> snapshot() const;
+public slots:
+    void start();
+    void stop();
+    void confirmShortageAccepted(int stationId, bool accepted);
+signals:
+    void shortageRequested(int stationId);
+    void statusChanged(QString text, bool healthy);
+    void sampleUpdated(qint64 actualQty, ProductModel product,
+                       ProductionMode mode, QHash<QString, bool> bits);
+    void consumptionUpdated(QList<StationConsumption> stations);
+};
+```
+
+- [ ] **步骤 1：写聚合 RED 测试**
+
+用信号驱动假客户端验证：start 立即发起一轮；四响应全部齐才计算；旧 roundId 被忽略；任一失败使整轮无效；3 秒超时标错并重建基线；未完成时 5 秒 tick 不重叠；stop 后迟到响应无效；六个 L 位选择正确；多方式按既定优先级并警告。
+
+- [ ] **步骤 2：实现最小轮次状态**
+
+`RoundState` 明确保存 MES、三个 PLC 分片、成功位和轮次号。只在四片齐全时合并 `QHash`、选择产品/方式并调用计算器。
+
+- [ ] **步骤 3：接入入队确认**
+
+收到计算器候选时发 `shortageRequested`；`accepted=true` 调 `confirmAccepted()` 并继续排空同工位跨越的多个阈值，`false` 保持待确认且日志去重。
+
+- [ ] **步骤 4：验证**
+
+运行 monitor、calculator、parser 三组测试，预期全部通过。
+
+**源码注释要求：** 说明对象在 UI 主线程、定时器所有权、轮次不混用、不重叠策略和 stop 边界。
+
+**注释验收清单：**
+
+- [ ] 每个 RoundState 字段和完成条件有注释。
+- [ ] 失败重建基线与产品切换清累计的区别准确。
+- [ ] 申请提交前展示范围与 `feat: add customer shortage monitor`。
+
+### 任务 21：接入 `LineManager` 与 `DeviceManager`
+
+**文件：**
+
+- 修改：`src/lineconfig.h`
+- 修改：`src/linemanager.h`
+- 修改：`src/linemanager.cpp`
+- 修改：`src/devicemanager.h`
+- 修改：`src/devicemanager.cpp`
+- 新增：`tests/test_shortage_line_integration.py`
+
+**接口变更：**
+
+```cpp
+bool LineManager::reportShortage(int stationId,
+                                 TaskSource source = TaskSource::UiMock);
+ShortageMonitor *DeviceManager::shortageMonitor() const;
+void DeviceManager::startShortageMonitoring();
+void DeviceManager::stopShortageMonitoring();
+```
+
+- [ ] **步骤 1：写接入 RED 检查**
+
+检查 UI 模拟调用显式或默认 `UiMock`；监听事件使用 `CustomerSystem`；非法工位和 Error 返回 false；Idle/Running/ReturningHome 成功入队返回 true；`Task.source` 保留并可显示。
+
+- [ ] **步骤 2：修改 `reportShortage`**
+
+返回值只表示 FIFO 是否接受，不表示任务成功。保持现有 Idle、Running、ReturningHome 行为和同工位重复入队规则。
+
+- [ ] **步骤 3：DeviceManager 接线**
+
+创建 monitor，连接 `shortageRequested` 到同步入队调用，再将 bool 回传 `confirmShortageAccepted`；转发监听、样本、累计和日志信号。
+
+- [ ] **步骤 4：验证既有调度不回归**
+
+运行新接入检查、现有 Python 回归、全部 CTest 和完整构建。
+
+**源码注释要求：** 说明同步确认语义、来源保留、对象所有权和“不等待送料完成”。
+
+**注释验收清单：**
+
+- [ ] 所有旧调用点行为不变。
+- [ ] Error 拒收不会误扣阈值。
+- [ ] 申请提交前展示范围与 `feat: connect customer shortages to line FIFO`。
+
+### 任务 22：开发版模拟/现场 UI
+
+**文件：**
+
+- 修改：`src/mainwindow.h`
+- 修改：`src/mainwindow.cpp`
+- 新增：`scripts/test_shortage_source_ui.py`
+
+- [ ] **步骤 1：写 UI RED 检查**
+
+检查互斥来源控件、开始/停止按钮、现场模式禁用 12 个模拟按钮、切回模拟调用 stop、来源切换不调用 `LineManager::stop/resetError` 或清队列、URL 文本不进入 UI。
+
+- [ ] **步骤 2：实现来源选择与控制**
+
+使用 `QButtonGroup` 管理“模拟缺料/现场系统”。默认模拟模式；现场模式仅允许用户点击开始后监听；停止只调用 `stopShortageMonitoring()`。
+
+- [ ] **步骤 3：实现简要状态**
+
+显示监听健康、actualQty、产品、方式、L68/L69/L71/L72/L73/L1998，以及 12 工位累计/安全库存/缺料待接收状态。FIFO 来源列使用 `TaskSource` 显示“模拟/现场”。
+
+- [ ] **步骤 4：主题与回归**
+
+新增控件纳入深浅主题；运行 UI 静态检查、完整构建，并人工确认切换不影响已有 FIFO 行。
+
+**源码注释要求：** UI 成员只描述展示职责；明确停止监听不等于停止主调度。
+
+**注释验收清单：**
+
+- [ ] 未向客户面板暴露 URL。
+- [ ] 没有交付隐藏宏。
+- [ ] 申请提交前展示范围与 `ui: add shortage source monitoring controls`。
+
+### 任务 23：总体验证、文档回填与现场清单
+
+**文件：**
+
+- 修改：`docs/superpowers/specs/2026-06-25-12-station-continuous-replenishment-design.md`
+- 修改：`docs/superpowers/plans/2026-06-25-12-station-continuous-replenishment.md`
+- 修改：`changelog/CHANGELOG.md`
+
+- [ ] **步骤 1：运行全部自动验证**
+
+```bash
+cmake -S . -B build
+cmake --build build --target wh-robot-visual shortage-calculator-test custom-system-parser-test shortage-monitor-test -j$(nproc)
+ctest --test-dir build --output-on-failure
+python3 scripts/test_shortage_source_ui.py
+python3 tests/test_shortage_line_integration.py
+git diff --check
+```
+
+预期：所有目标构建成功、CTest 0 失败、两个脚本 PASS、diff check 无输出。
+
+- [ ] **步骤 2：人工离线验收**
+
+用可控 HTTP fixture 依次验证首次基线、正常累计、阈值、多阈值、换班清零、切型、方式优先级、断线恢复、Error 拒收恢复、模拟/现场切换和 FIFO 来源。
+
+- [ ] **步骤 3：现场验收清单**
+
+真实网络验证四请求、5 秒连续运行、PLC 三选一、实际 `actualQty` 增长、至少一个工位自动入队、已有 FIFO 不受来源切换影响。结果逐项记录为“通过/失败/未测”，不得用离线结果替代。
+
+- [ ] **步骤 4：回填唯一文档**
+
+记录实际文件范围、测试输出、现场结论、遗留风险和最终策略宏值；更新 changelog，但在用户确认前不宣称现场验收完成。
+
+**源码注释验收清单：**
+
+- [ ] 新增类型、接口、状态、常量、宏和 UI 成员均有准确中文注释。
+- [ ] 注释与默认 PLC 策略、5 秒周期、3 秒超时一致。
+- [ ] 无注释暗示系统会等待送料完成。
+- [ ] 展示全部差异、验证结果及建议提交 `feat: integrate customer shortage signals`，获得许可后才本地提交。
