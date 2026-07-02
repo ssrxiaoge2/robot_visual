@@ -14,6 +14,7 @@
 #include "lineconfig.h"
 #include "linemanager.h"
 #include "nscanscheduler.h"
+#include "shortagemonitor.h"
 
 class AgvController;
 class VisionHttpClient;
@@ -62,6 +63,7 @@ public:
     NScanScheduler   *nscanScheduler() const { return m_nscanScheduler.get(); }
     PalletScheduler  *palletScheduler() const { return m_palletScheduler; }
     CustomSysScheduler *customSysScheduler() const { return m_customSysScheduler; }
+    ShortageMonitor *shortageMonitor() const { return m_shortageMonitor; }
     bool              lightIsOn()        const { return m_lightOn;      }
     bool              nscanTestRunning() const { return m_nscanTestRunning; }
     const Config     &config()           const { return m_cfg;          }
@@ -81,6 +83,8 @@ public slots:
     void testScanner();
     void testCustomSystem();
     void fetchCustomSystemDayData();
+    void startShortageMonitoring();
+    void stopShortageMonitoring();
     void startNScanTest(const NScanScheduler::ScanOptions &options);
     void toggleLight();
     void applyHandEyeMatrix(const float m[16]);
@@ -107,6 +111,12 @@ signals:
     void customSystemRequestFailed(const QString &operation,
                                    const QString &errorMessage,
                                    const QString &rawJson);
+    void shortageMonitorStatusChanged(const QString &text, bool healthy);
+    void shortageMonitorSampleUpdated(qint64 actualQty,
+                                      ProductModel product,
+                                      ProductionMode mode,
+                                      QHash<QString, bool> bits);
+    void shortageMonitorConsumptionUpdated(QList<StationConsumption> stations);
     void lightChanged(bool on, bool success);
     void configApplied(const QString &robotIP, const QString &agvIP);
     void agvModbusConnected();
@@ -127,6 +137,7 @@ private:
     LineManager      *m_lineManager = nullptr;       ///< 12 工位连续补料主调度。
     PalletScheduler  *m_palletScheduler = nullptr;   ///< 主流程和配置 UI 共用的码垛缓存。
     CustomSysScheduler *m_customSysScheduler = nullptr;
+    ShortageMonitor *m_shortageMonitor = nullptr;
     std::shared_ptr<NScanScheduler> m_nscanScheduler;
     QMutex            m_nscanScanMutex;      ///< 厂商扫码 SDK 串行保护，两个 worker 共用。
     QPointer<QThread> m_nscanTestThread;

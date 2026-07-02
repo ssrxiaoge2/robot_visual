@@ -11,8 +11,8 @@ changelog = (ROOT / "changelog" / "CHANGELOG.md").read_text(encoding="utf-8")
 checks = [
     (
         "cmake project version matches latest release",
-        "project(wh-robot-visual VERSION 0.2.3 LANGUAGES CXX)" in cmake
-        and "## 2026-07-01 | v0.2.3 |" in changelog,
+        "project(wh-robot-visual VERSION 0.2.5 LANGUAGES CXX)" in cmake
+        and "## 2026-07-02 | v0.2.5 |" in changelog,
     ),
     (
         "cmake defines APP_VERSION and APP_BUILD_DATE",
@@ -32,7 +32,8 @@ checks = [
     ),
     (
         "changelog records version feature entry",
-        "版本号显示与变更记录规范" in changelog and "v0.2.0" in changelog,
+        "客户现场缺料信号实施阶段（开发版）" in changelog
+        and "v0.2.5" in changelog,
     ),
 ]
 
