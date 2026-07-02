@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(wh-robot-visual VERSION 0.2.3 LANGUAGES CXX)
+project(wh-robot-visual VERSION 0.2.5 LANGUAGES CXX)
 
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
@@ -18,8 +18,9 @@ add_compile_definitions(
     APP_BUILD_DATE="${APP_BUILD_DATE}"
 )
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network SerialBus)
+find_package(Qt6 REQUIRED COMPONENTS Widgets Network SerialBus Test)
 include(GNUInstallDirs)
+enable_testing()
 
 # 调度文件职责：lineconfig/taskqueue 定义模型，taskexecutor 执行单任务，
 # linemanager 管理整线状态和 FIFO；它们与设备控制器编译进同一 Qt 程序。
@@ -59,6 +60,11 @@ set(PROJECT_SOURCES
         src/nscanscheduler.h
         src/customSysScheduler.cpp
         src/customSysScheduler.h
+        src/shortageconfig.h
+        src/shortagecalculator.cpp
+        src/shortagecalculator.h
+        src/shortagemonitor.cpp
+        src/shortagemonitor.h
         src/palletscheduler.cpp
         src/palletscheduler.h
         src/palletparamdialog.cpp
@@ -72,6 +78,39 @@ qt_add_executable(wh-robot-visual
 
 target_link_libraries(wh-robot-visual PRIVATE Qt6::Widgets Qt6::Network Qt6::SerialBus)
 target_include_directories(wh-robot-visual PRIVATE src/)
+
+add_executable(shortage-calculator-test
+    tests/test_shortagecalculator.cpp
+    src/shortagecalculator.cpp
+    src/shortagecalculator.h
+    src/shortageconfig.h
+)
+target_link_libraries(shortage-calculator-test PRIVATE Qt6::Test Qt6::Core)
+target_include_directories(shortage-calculator-test PRIVATE src/)
+add_test(NAME shortage-calculator COMMAND shortage-calculator-test)
+
+add_executable(custom-system-parser-test
+    tests/test_customsysscheduler.cpp
+    src/customSysScheduler.cpp
+    src/customSysScheduler.h
+)
+target_link_libraries(custom-system-parser-test PRIVATE Qt6::Test Qt6::Core Qt6::Network)
+target_include_directories(custom-system-parser-test PRIVATE src/)
+add_test(NAME custom-system-parser COMMAND custom-system-parser-test)
+
+add_executable(shortage-monitor-test
+    tests/test_shortagemonitor.cpp
+    src/shortagemonitor.cpp
+    src/shortagemonitor.h
+    src/shortagecalculator.cpp
+    src/shortagecalculator.h
+    src/shortageconfig.h
+    src/customSysScheduler.cpp
+    src/customSysScheduler.h
+)
+target_link_libraries(shortage-monitor-test PRIVATE Qt6::Test Qt6::Core Qt6::Network)
+target_include_directories(shortage-monitor-test PRIVATE src/)
+add_test(NAME shortage-monitor COMMAND shortage-monitor-test)
 
 # ── 奥比中光 SDK（仅 Linux 部署时链接，Windows 开发环境跳过）──
 if(UNIX)

@@ -82,9 +82,15 @@ DeviceManager::DeviceManager(QObject *parent)
     qRegisterMetaType<NScanScheduler::ScanResult>("NScanScheduler::ScanResult");
     qRegisterMetaType<NScanScheduler::ScanOptions>("NScanScheduler::ScanOptions");
     qRegisterMetaType<CustomSysScheduler::DayRecord>("CustomSysScheduler::DayRecord");
+    qRegisterMetaType<CustomSysScheduler::PlcBitReply>("CustomSysScheduler::PlcBitReply");
     qRegisterMetaType<Task>("Task");
     qRegisterMetaType<QList<Task>>("QList<Task>");
     qRegisterMetaType<LineSystemState>("LineSystemState");
+    qRegisterMetaType<ProductModel>("ProductModel");
+    qRegisterMetaType<ProductionMode>("ProductionMode");
+    qRegisterMetaType<QHash<QString, bool>>("QHash<QString,bool>");
+    qRegisterMetaType<StationConsumption>("StationConsumption");
+    qRegisterMetaType<QList<StationConsumption>>("QList<StationConsumption>");
 
     // UI 测试扫码使用独立线程；空闲时仅等待事件，不轮询、不消耗 CPU。
     auto *nscanThread = new QThread;
@@ -225,6 +231,24 @@ DeviceManager::DeviceManager(QObject *parent)
     // 扫码结果排队回到 UI 主线程，再由 LineManager 推进任务状态机。
     connect(lineScanWorker, &NScanWorker::finished,
             m_lineManager, &LineManager::onScanFinished, Qt::QueuedConnection);
+
+    m_shortageMonitor = new ShortageMonitor(m_customSysScheduler, this);
+    connect(m_shortageMonitor, &ShortageMonitor::logMessage,
+            this, &DeviceManager::logMessage);
+    connect(m_shortageMonitor, &ShortageMonitor::statusChanged,
+            this, &DeviceManager::shortageMonitorStatusChanged);
+    connect(m_shortageMonitor, &ShortageMonitor::sampleUpdated,
+            this, &DeviceManager::shortageMonitorSampleUpdated);
+    connect(m_shortageMonitor, &ShortageMonitor::consumptionUpdated,
+            this, &DeviceManager::shortageMonitorConsumptionUpdated);
+    connect(m_shortageMonitor, &ShortageMonitor::shortageRequested,
+            this, [this](int stationId) {
+        const bool accepted = m_lineManager
+            && m_lineManager->reportShortage(stationId, TaskSource::CustomerSystem);
+        if (m_shortageMonitor) {
+            m_shortageMonitor->confirmShortageAccepted(stationId, accepted);
+        }
+    });
 
     m_lineOrch = new LineOrchestrator(m_agvCtrl, m_huayanScheduler, this);
     // 编排器请求派单 → 经映射表解析后下发（复用 dispatchAgv）
@@ -377,6 +401,22 @@ void DeviceManager::fetchCustomSystemDayData()
     // 读取日统计接口并提取 actualQty，其余字段仅用于现场调试展示。
     m_customSysScheduler->setEndpoint(QUrl(m_cfg.customSysEndpoint.trimmed()));
     m_customSysScheduler->fetchDayData();
+}
+
+void DeviceManager::startShortageMonitoring()
+{
+    if (!m_customSysScheduler || !m_shortageMonitor) {
+        return;
+    }
+    m_customSysScheduler->setEndpoint(QUrl(m_cfg.customSysEndpoint.trimmed()));
+    m_shortageMonitor->start();
+}
+
+void DeviceManager::stopShortageMonitoring()
+{
+    if (m_shortageMonitor) {
+        m_shortageMonitor->stop();
+    }
 }
 
 void DeviceManager::startNScanTest(const NScanScheduler::ScanOptions &options)

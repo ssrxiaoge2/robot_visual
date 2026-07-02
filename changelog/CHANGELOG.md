@@ -5,6 +5,19 @@
 
 ---
 
+## 2026-07-02 | v0.2.5 | 客户现场缺料信号实施阶段（开发版）
+
+### 变更
+- 新增 `shortageconfig.h`、`ShortageCalculator`、`ShortageMonitor` 与对应 Qt Test，用于承接客户现场缺料信号的配置、纯计算与四请求聚合。
+- 扩展 `CustomSysScheduler`，补充 MES/PLC 四类请求解析、轮次透传和 PLC 位返回结构，供现场轮询监听复用。
+- 将现场缺料事件接入 `LineManager` / `DeviceManager` FIFO，保留 `TaskSource` 来源信息，并在主窗口中增加“模拟缺料 / 现场系统”切换、监控状态面板和 FIFO 来源列。
+- 新增 `scripts/test_shortage_source_ui.py` 与 `tests/test_shortage_line_integration.py`，用于静态回归检查 UI 接线和 FIFO 接线。
+
+### 风险与说明
+- 任务 17 依赖的 12 工位 × 3 产品现场确认阈值未随仓库提供；当前 `src/shortageconfig.h` 先写入保守占位值 `0`，避免未确认阈值误触发自动派单。
+- 当前已完成离线静态验证与单元测试代码补齐；完整 CMake 构建仍受本机缺少可用编译器/生成器约束，不能将其记为已通过。
+- 本次只完成开发版接线与离线验证，不宣称客户现场联调/验收完成。
+
 ## 2026-07-01 | v0.2.4 | 左侧面板 UI 优化与补光灯权限脚本
 
 ### 变更

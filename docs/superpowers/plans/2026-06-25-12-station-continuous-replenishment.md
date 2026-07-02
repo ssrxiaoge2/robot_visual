@@ -1845,6 +1845,16 @@ Bug 修复或新功能完成并验证后，按以下顺序执行：
 
 ## 2026-07-02 客户现场缺料信号实施阶段
 
+### 当前实现状态（2026-07-02）
+
+- 任务 17：结构与测试目标已落地到 `src/shortageconfig.h` / `tests/test_shortagecalculator.cpp`，但 12 工位 × 3 产品的现场确认阈值未在仓库中提供；当前以保守占位值 `0` 实现，标记为“待现场补值”，避免误触发自动派单。
+- 任务 18：`ShortageCalculator` 已实现并补齐关键 RED/GREEN 用例，覆盖基线建立、正常累计、跨阈值确认、拒收重试、换型/换模式清零、`actualQty` 回退和通信恢复重建基线。
+- 任务 19：`CustomSysScheduler` 已扩展 MES/PLC 四类请求解析、`PlcBitReply`、轮次透传和解析测试，保持解析层不承担产品/工位业务判断。
+- 任务 20：`ShortageMonitor` 已实现 5 秒轮询、3 秒超时、四请求聚合、L 位选型/选模式、拒收去重和与 `ShortageCalculator` 的同步确认语义。
+- 任务 21：`LineManager` / `DeviceManager` 已完成现场缺料接线，FIFO 保留 `TaskSource`，并新增 `tests/test_shortage_line_integration.py` 做静态回归检查。
+- 任务 22：主窗口已完成“模拟缺料 / 现场系统”来源切换、状态面板和 FIFO 来源列，并新增 `scripts/test_shortage_source_ui.py` 做静态 UI 回归检查。
+- 任务 23：版本已提升到 `0.2.5`，设计文档/计划文档/CHANGELOG 已回填；离线静态验证可执行，但完整 CMake 构建仍受当前机器缺少可用编译器与生成器约束，真实现场联调仍待后续验收。
+
 ### 全局约束
 
 - 本阶段实现 spec 第 19 节；只做开发版本，不增加交付隐藏宏。
