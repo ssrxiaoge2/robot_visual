@@ -57,6 +57,15 @@ struct IngestResult {
  *
  * 该类只负责测试面板的库存初始化、逐工位扣减、阈值判断和溢出保护。
  * 不包含 FIFO、派单或送料完成语义；confirmAccepted/markRejected 为兼容旧调用点保留。
+ *
+ * 当前新增的 recordReplenishment 也严格保持这个边界：
+ * - 修改前：该类只能做“初始化 + 消耗扣减 + 阈值判断”，不知道真实倒料成功后如何回补库存。
+ * - 修改后：允许在“外部已经确认真实倒料成功”这一前提下，只把指定工位的纯计算库存补回一箱。
+ * - 仍然不会在这里创建任务、进入 FIFO、触发派单，也不会感知主调度状态机。
+ *
+ * 这样设计的原因是把“库存数学模型”和“主流程调度动作”彻底拆开：
+ * - 主调度未来若需要接入真实缺料，只需在外部成功事件落地后调用本接口同步库存；
+ * - e1ffb3f 对既有主流程的行为不会被这里直接改写，因为本类依旧没有任何派单副作用。
  */
 class ShortageCalculator
 {
@@ -68,6 +77,35 @@ public:
     IngestResult ingest(const ShortageSample &sample);
     bool confirmAccepted(int stationId);
     bool markRejected(int stationId);
+    /**
+     * @brief 记录一次“已经确认成功”的真实倒料结果，只回补纯计算库存。
+     *
+     * 该接口专门服务于“真实缺料接入主流程”后的库存对账场景：
+     * - 调用前提：外部执行链路已经确认某个真实补料任务完成，且确实对应当前产品；
+     * - 本接口职责：仅把该工位 `estimatedAvailable` 增加一箱，并重新刷新 shortage snapshot 相关状态；
+     * - 本接口明确不做：不派单、不重排队、不修改 FIFO、不写入任务系统。
+     *
+     * 修改前原有语义：
+     * - 计算器只能随产量扣减库存，无法表达“倒料成功后补回一箱”。
+     *
+     * 修改后新增边界：
+     * - 仅允许当前已初始化产品、且 `product == m_currentProduct` 的场景调用；
+     * - 仅允许 1..12 工位；
+     * - 工位配置必须存在且合法（箱量/安全库存/用量满足既有校验）；
+     * - 若加一箱会导致 qint64 上溢，则返回 false，库存保持不变；
+     * - 任一失败都表示“本次回补未生效”，不会偷偷改库存。
+     *
+     * 为什么不会影响 e1ffb3f 既有主流程：
+     * - 这是新增公共接口，旧路径不主动调用就没有行为变化；
+     * - 现有 ingest/confirmAccepted/markRejected 语义保持不变；
+     * - 即便未来主调度接入，也只是把“真实倒料成功”映射为一次纯库存回补，不会在这里扩散成调度副作用。
+     *
+     * @param stationId 目标工位号，必须在 1..12。
+     * @param product 本次真实倒料对应的产品型号，必须与当前初始化产品一致。
+     * @return true 表示已经成功给该工位回补一箱；
+     *         false 表示工位号非法、尚未初始化、产品不匹配、配置缺失/非法或发生溢出，此时库存完全不变。
+     */
+    bool recordReplenishment(int stationId, ProductModel product);
     void markCommunicationInterrupted();
     QList<StationConsumption> snapshot() const;
     void reset();

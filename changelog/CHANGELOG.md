@@ -5,6 +5,54 @@
 
 ---
 
+## 2026-07-04 | v0.2.6 | 真实缺料接入主调度
+
+### 变更
+- 在不改动 `e1ffb3f99a3258c7204af3950e3a815a2fffa436` 既有主流程边界的前提下，新增 `ShortageCalculator::recordReplenishment()`，将“倒料成功后加一箱”的库存回写规则正式纳入真实缺料链路。
+- 重写 `ShortageMonitor` 的生产语义：基于 MES/PLC 轮询结果维护各工位预计库存，按“安全阈值 + 一箱”完成首次基线，在持续缺料时按 FIFO 队尾逐箱续补，并阻止同工位在“已派单或执行中且尚未倒料”时重复派单。
+- 为 `TaskExecutor` / `LineManager` / `DeviceManager` 增加真实缺料接线，补充任务入队、开始、倒料成功、结束等事实信号；倒料成功信号只挂在既有状态机成功节点，不改变原动作顺序。
+- 调度监控面板新增“模拟缺料 / 真实缺料”二选一；真实模式下启用三列工位状态表，仅用于主调度监控，不再把测试面板作为生产入口。
+- 新增并补强 Qt Test，覆盖真实缺料初始基线、持续缺料续补、通信超时与恢复、换型等待旧任务、UI 切换和接线回归等关键边界。
+- 调整 CMake IDE 分组，让 Qt Creator 中的主程序 target 与测试 target 分开展示，减少测试 target 对主工程视图的占用。
+
+### 风险与说明
+- 首次进入真实模式时，当前仍按临时决策使用“安全阈值 + 一箱”作为预计库存初值；该规则以及断线恢复、换型挂单、持续补料上限等仍需客户最终确认。
+- 缺料信号计算测试面板保持测试用途，不作为真实缺料生产入口。
+- `docs/superpowers/specs/2026-07-03-live-shortage-dispatch-design.md` 与 `docs/superpowers/plans/2026-07-03-live-shortage-dispatch.md` 仍是历史草稿，不建议纳入本次提交。
+
+### 验证
+- `cmake -S . -B build` 通过。
+- `ctest --test-dir build --output-on-failure` 通过（10 / 10）。
+- `git diff --check` 无输出。
+
+### 文件
+- `CMakeLists.txt`
+- `src/devicemanager.cpp`
+- `src/devicemanager.h`
+- `src/linemanager.cpp`
+- `src/linemanager.h`
+- `src/mainwindow.cpp`
+- `src/mainwindow.h`
+- `src/shortagecalculator.cpp`
+- `src/shortagecalculator.h`
+- `src/shortagemonitor.cpp`
+- `src/shortagemonitor.h`
+- `src/taskexecutor.cpp`
+- `src/taskexecutor.h`
+- `tests/test_live_shortage_baseline.cpp`
+- `tests/test_live_shortage_dispatch.cpp`
+- `tests/test_live_shortage_ui.cpp`
+- `tests/test_live_shortage_wiring.cpp`
+- `tests/test_shortagecalculator.cpp`
+- `tests/test_shortagemonitor.cpp`
+- `tests/test_shortagetestwiring.cpp`
+- `docs/superpowers/specs/2026-07-03-main-dispatch-live-shortage-design.md`
+- `docs/superpowers/plans/2026-07-03-main-dispatch-live-shortage.md`
+- `README.md`
+- `changelog/CHANGELOG.md`
+
+---
+
 ## 2026-07-02 | v0.2.5 | 客户现场缺料信号实施阶段（开发版）
 
 ### 变更

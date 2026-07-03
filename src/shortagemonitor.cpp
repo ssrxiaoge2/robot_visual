@@ -4,6 +4,7 @@ namespace {
 
 constexpr int kPollIntervalMs = 5000;
 constexpr int kRoundTimeoutMs = 3000;
+constexpr int kStationCount = 12;
 
 } // namespace
 
@@ -32,9 +33,22 @@ bool ShortageMonitor::isRunning() const
     return m_running;
 }
 
-QList<StationConsumption> ShortageMonitor::snapshot() const
+QList<LiveShortageStationSnapshot> ShortageMonitor::snapshot() const
 {
-    return m_calculator.snapshot();
+    QList<LiveShortageStationSnapshot> stations;
+    const QList<StationConsumption> consumption = m_calculator.snapshot();
+    stations.reserve(consumption.size());
+
+    for (const StationConsumption &item : consumption) {
+        LiveShortageStationSnapshot station;
+        station.stationId = item.stationId;
+        station.estimatedAvailable = item.estimatedAvailable;
+        station.safetyStock = item.safetyStock;
+        station.state = stateForStation(item);
+        stations.append(station);
+    }
+
+    return stations;
 }
 
 void ShortageMonitor::start()
@@ -45,9 +59,10 @@ void ShortageMonitor::start()
 
     m_running = true;
     emit statusChanged(QStringLiteral("现场系统待首轮数据"), true);
-    emit logMessage(QStringLiteral("[ShortageMonitor] 开始现场缺料监听"));
+    emit logMessage(QStringLiteral("[ShortageMonitor] 开始真实缺料监听"));
     beginRound();
     m_pollTimer->start();
+    emitSnapshot();
 }
 
 void ShortageMonitor::stop()
@@ -56,54 +71,125 @@ void ShortageMonitor::stop()
         return;
     }
 
+    // stop() 的语义是“停止新增轮询和新增真实派单”，不是“把运行期库存清零重来”。
+    // 因此这里仅停止定时器并丢弃未完成轮次，保留 m_calculator、m_tasks 和
+    // 已确认产品/方式，让同一进程内再次 start() 时继续沿用现场运行期状态。
     m_running = false;
     m_pollTimer->stop();
     m_roundTimeout->stop();
     m_round = RoundState{};
     emit statusChanged(QStringLiteral("现场系统监听已停止"), false);
-    emit logMessage(QStringLiteral("[ShortageMonitor] 停止现场缺料监听"));
+    emit logMessage(QStringLiteral("[ShortageMonitor] 停止真实缺料监听"));
+    emitSnapshot();
 }
 
-void ShortageMonitor::confirmShortageAccepted(int stationId, bool accepted)
+void ShortageMonitor::confirmDispatch(int stationId, quint64 taskId, bool accepted)
 {
-    if (!m_running) {
+    if (stationId < 1 || stationId > kStationCount) {
+        return;
+    }
+    if (!m_waitingStations.contains(stationId)) {
         return;
     }
 
     if (!accepted) {
-        const QString reason = QStringLiteral("工位%1 缺料事件被主调度拒收，保留待重试").arg(stationId);
-        m_calculator.markRejected(stationId);
-        if (m_lastRejectedReason != reason) {
-            m_lastRejectedReason = reason;
-            emit logMessage(QStringLiteral("[ShortageMonitor] %1").arg(reason));
+        emit logMessage(QStringLiteral("[ShortageMonitor] 工位%1 真实缺料请求暂未被主调度接收，保持待入队")
+                            .arg(stationId));
+        emitSnapshot();
+        return;
+    }
+    if (taskId == 0 || !m_hasConfirmedProduct) {
+        emit logMessage(QStringLiteral("[ShortageMonitor] 工位%1 接单确认无效：taskId/product 不完整")
+                            .arg(stationId));
+        emitSnapshot();
+        return;
+    }
+
+    LiveTaskRecord record;
+    record.taskId = taskId;
+    record.stationId = stationId;
+    record.product = m_confirmedProduct;
+    record.source = TaskSource::CustomerSystem;
+    m_tasks.insert(taskId, record);
+    m_waitingStations.remove(stationId);
+    emit logMessage(QStringLiteral("[ShortageMonitor] 工位%1 真实缺料已进入 FIFO，任务号=%2")
+                        .arg(stationId)
+                        .arg(taskId));
+    emitSnapshot();
+}
+
+void ShortageMonitor::onTaskStarted(const Task &task)
+{
+    if (task.source != TaskSource::CustomerSystem) {
+        return;
+    }
+
+    auto it = m_tasks.find(task.taskId);
+    if (it == m_tasks.end()) {
+        return;
+    }
+
+    it->started = true;
+    emitSnapshot();
+}
+
+void ShortageMonitor::onMaterialUnloaded(const Task &task)
+{
+    // UiMock 只是调试入口，不代表现场真实倒料，绝不能修改真实库存。
+    if (task.source != TaskSource::CustomerSystem) {
+        return;
+    }
+
+    auto it = m_tasks.find(task.taskId);
+    if (it == m_tasks.end() || it->unloaded) {
+        return;
+    }
+    if (!m_calculator.recordReplenishment(it->stationId, it->product)) {
+        emit logMessage(QStringLiteral("[ShortageMonitor] 工位%1 倒料成功后库存回补失败")
+                            .arg(it->stationId));
+        emitSnapshot();
+        return;
+    }
+
+    it->unloaded = true;
+    emit logMessage(QStringLiteral("[ShortageMonitor] 工位%1 已完成实际倒料，库存增加一箱")
+                        .arg(it->stationId));
+    emitSnapshot();
+
+    // 只有当前真实模式仍在运行时，才允许根据“倒料后仍缺料”立即追加下一箱。
+    // 若已切回模拟模式，则这里只完成库存对账；再次 start() 后再统一重新评估。
+    if (m_running) {
+        reevaluateStation(it->stationId);
+    }
+}
+
+void ShortageMonitor::onTaskFinished(const Task &task)
+{
+    if (task.source != TaskSource::CustomerSystem) {
+        return;
+    }
+
+    const auto it = m_tasks.find(task.taskId);
+    if (it == m_tasks.end()) {
+        return;
+    }
+
+    const int stationId = it->stationId;
+    m_tasks.erase(it);
+
+    if (m_waitingForOldProductTasks && m_hasConfirmedProduct
+        && !hasTasksForOtherProduct(m_confirmedProduct)) {
+        m_waitingForOldProductTasks = false;
+        emit logMessage(QStringLiteral("[ShortageMonitor] 旧产品真实任务已结束，解除换型派单门禁"));
+    }
+
+    emitSnapshot();
+    if (m_running) {
+        reevaluateStation(stationId);
+        if (!m_waitingForOldProductTasks) {
+            reevaluateDispatchForAllStations();
         }
-        emit statusChanged(reason, false);
-        emitSnapshot();
-        return;
     }
-
-    if (!m_calculator.confirmAccepted(stationId)) {
-        emit logMessage(QStringLiteral("[ShortageMonitor] 工位%1 缺料确认失败：当前没有待确认阈值").arg(stationId));
-        emitSnapshot();
-        return;
-    }
-
-    m_lastRejectedReason.clear();
-    emitSnapshot();
-    if (!m_hasLastSample) {
-        return;
-    }
-
-    const IngestResult refresh = m_calculator.ingest(m_lastSample);
-    if (!refresh.ok) {
-        emit statusChanged(refresh.errorMessage, false);
-        emit logMessage(QStringLiteral("[ShortageMonitor] 刷新待派单工位失败：%1").arg(refresh.errorMessage));
-        emitSnapshot();
-        return;
-    }
-
-    emitSnapshot();
-    emitPendingStations(refresh.pendingStations);
 }
 
 void ShortageMonitor::onPollTimerTimeout()
@@ -201,6 +287,7 @@ void ShortageMonitor::failRound(const QString &reason)
 {
     m_roundTimeout->stop();
     m_round = RoundState{};
+    m_communicationPaused = true;
     m_calculator.markCommunicationInterrupted();
     emit statusChanged(reason, false);
     emit logMessage(QStringLiteral("[ShortageMonitor] %1").arg(reason));
@@ -228,42 +315,63 @@ void ShortageMonitor::completeRoundIfReady()
     mergeBits(m_round.plc71.bits);
     mergeBits(m_round.plc1998.bits);
 
-    ProductModel product = ProductModel::Model88;
+    ProductModel candidateProduct = ProductModel::Model88;
     QString productError;
-    if (!chooseProduct(bits, &product, &productError)) {
+    if (!chooseProduct(bits, &candidateProduct, &productError)) {
         failRound(productError);
         return;
     }
 
-    ProductionMode mode = ProductionMode::L68;
-    QString modeWarning;
+    ProductionMode candidateMode = ProductionMode::L68;
     QString modeError;
-    if (!chooseMode(bits, &mode, &modeWarning, &modeError)) {
+    if (!chooseMode(bits, &candidateMode, &modeError)) {
         failRound(modeError);
         return;
     }
 
-    if (!modeWarning.isEmpty() && m_lastModeWarning != modeWarning) {
-        m_lastModeWarning = modeWarning;
-        emit logMessage(QStringLiteral("[ShortageMonitor] %1").arg(modeWarning));
-    } else if (modeWarning.isEmpty()) {
-        m_lastModeWarning.clear();
+    ProductModel effectiveProduct = candidateProduct;
+    ProductionMode effectiveMode = candidateMode;
+    bool confirmedProductChanged = false;
+    bool confirmedModeChanged = false;
+    if (!advanceConfirmedSignals(candidateProduct, candidateMode,
+                                 &effectiveProduct, &effectiveMode,
+                                 &confirmedProductChanged, &confirmedModeChanged)) {
+        emit statusChanged(QStringLiteral("等待真实缺料信号连续两轮稳定确认"), true);
+        m_round = RoundState{};
+        m_communicationPaused = false;
+        emitSnapshot();
+        return;
     }
 
-    m_lastSample = ShortageSample{m_round.actualQty, product, mode};
-    m_hasLastSample = true;
-    emit sampleUpdated(m_lastSample.actualQty, m_lastSample.product, m_lastSample.mode, bits);
+    if (confirmedProductChanged) {
+        m_calculator.initializeForProduct(effectiveProduct);
+        m_waitingForOldProductTasks = hasTasksForOtherProduct(effectiveProduct);
+        emit logMessage(QStringLiteral("[ShortageMonitor] 产品已稳定切换为 %1")
+                            .arg(productModelText(effectiveProduct)));
+    } else if (confirmedModeChanged) {
+        // 仅方式切换时保留库存，但下一轮只重建 MES 基线，不追补切换边界期间产量。
+        m_calculator.markCommunicationInterrupted();
+        emit logMessage(QStringLiteral("[ShortageMonitor] 生产方式已稳定切换为 %1")
+                            .arg(productionModeText(effectiveMode)));
+    }
 
-    const IngestResult ingestResult = m_calculator.ingest(m_lastSample);
+    const ShortageSample sample{m_round.actualQty, effectiveProduct, effectiveMode};
+    const IngestResult ingestResult = m_calculator.ingest(sample);
     if (!ingestResult.ok) {
         failRound(ingestResult.errorMessage);
         return;
     }
 
+    m_communicationPaused = false;
+    m_hasLastSample = true;
+    m_lastSample = sample;
+    emit sampleUpdated(sample.actualQty, sample.product, sample.mode);
     emit statusChanged(QStringLiteral("现场系统监听正常"), true);
-    emitSnapshot();
     m_round = RoundState{};
-    emitPendingStations(ingestResult.pendingStations);
+    emitSnapshot();
+    if (!m_waitingForOldProductTasks) {
+        reevaluateDispatchForAllStations();
+    }
 }
 
 bool ShortageMonitor::chooseProduct(const QHash<QString, bool> &bits,
@@ -290,22 +398,17 @@ bool ShortageMonitor::chooseProduct(const QHash<QString, bool> &bits,
 
 bool ShortageMonitor::chooseMode(const QHash<QString, bool> &bits,
                                  ProductionMode *mode,
-                                 QString *warning,
                                  QString *error) const
 {
     const bool l68 = bits.value(QStringLiteral("L68"), false);
     const bool l69 = bits.value(QStringLiteral("L69"), false);
     const bool l1998 = bits.value(QStringLiteral("L1998"), false);
     const int trueCount = (l68 ? 1 : 0) + (l69 ? 1 : 0) + (l1998 ? 1 : 0);
-    if (trueCount == 0) {
+    if (trueCount != 1) {
         if (error) {
-            *error = QStringLiteral("PLC 生产方式位无效：L68/L69/L1998 不能全为 false");
+            *error = QStringLiteral("PLC 生产方式位无效：L68/L69/L1998 必须且只能有一个为 true");
         }
         return false;
-    }
-
-    if (warning && trueCount > 1) {
-        *warning = QStringLiteral("PLC 生产方式位同时为 true，按 L68 -> L69 -> L1998 优先级取首个");
     }
 
     if (mode) {
@@ -315,22 +418,149 @@ bool ShortageMonitor::chooseMode(const QHash<QString, bool> &bits,
     return true;
 }
 
-void ShortageMonitor::emitPendingStations(const QList<int> &stations)
+bool ShortageMonitor::advanceConfirmedSignals(ProductModel candidateProduct,
+                                              ProductionMode candidateMode,
+                                              ProductModel *effectiveProduct,
+                                              ProductionMode *effectiveMode,
+                                              bool *confirmedProductChanged,
+                                              bool *confirmedModeChanged)
 {
-    for (int stationId : stations) {
-        if (stationId < 1 || stationId > 12) {
-            continue;
-        }
-        emit shortageRequested(stationId);
+    if (candidateProduct == m_candidateProduct) {
+        ++m_candidateProductRounds;
+    } else {
+        m_candidateProduct = candidateProduct;
+        m_candidateProductRounds = 1;
     }
+
+    if (candidateMode == m_candidateMode) {
+        ++m_candidateModeRounds;
+    } else {
+        m_candidateMode = candidateMode;
+        m_candidateModeRounds = 1;
+    }
+
+    if (confirmedProductChanged) {
+        *confirmedProductChanged = false;
+    }
+    if (confirmedModeChanged) {
+        *confirmedModeChanged = false;
+    }
+
+    if (m_candidateProductRounds >= 2) {
+        if (!m_hasConfirmedProduct || m_confirmedProduct != m_candidateProduct) {
+            if (confirmedProductChanged) {
+                *confirmedProductChanged = m_hasConfirmedProduct;
+            }
+            m_confirmedProduct = m_candidateProduct;
+        }
+        m_hasConfirmedProduct = true;
+    }
+
+    if (m_candidateModeRounds >= 2) {
+        if (!m_hasConfirmedMode || m_confirmedMode != m_candidateMode) {
+            if (confirmedModeChanged) {
+                *confirmedModeChanged = m_hasConfirmedMode;
+            }
+            m_confirmedMode = m_candidateMode;
+        }
+        m_hasConfirmedMode = true;
+    }
+
+    if (effectiveProduct) {
+        *effectiveProduct = m_confirmedProduct;
+    }
+    if (effectiveMode) {
+        *effectiveMode = m_confirmedMode;
+    }
+    return m_hasConfirmedProduct && m_hasConfirmedMode;
+}
+
+void ShortageMonitor::reevaluateDispatchForAllStations()
+{
+    const QList<StationConsumption> stations = m_calculator.snapshot();
+    for (const StationConsumption &station : stations) {
+        reevaluateStation(station.stationId);
+    }
+}
+
+void ShortageMonitor::reevaluateStation(int stationId)
+{
+    const QList<StationConsumption> stations = m_calculator.snapshot();
+    if (stationId < 1 || stationId > stations.size()) {
+        return;
+    }
+
+    const StationConsumption &station = stations.at(stationId - 1);
+    if (!m_running || !station.shortage || !station.configured || m_waitingForOldProductTasks) {
+        return;
+    }
+    if (m_communicationPaused || m_waitingStations.contains(stationId) || hasNotYetUnloadedTask(stationId)) {
+        return;
+    }
+
+    m_waitingStations.insert(stationId);
+    emit dispatchRequested(stationId);
+    emit logMessage(QStringLiteral("[ShortageMonitor] 工位%1 触发真实缺料派单请求").arg(stationId));
+    emitSnapshot();
 }
 
 void ShortageMonitor::emitSnapshot()
 {
-    emit consumptionUpdated(m_calculator.snapshot());
+    emit inventoryUpdated(snapshot());
 }
 
 bool ShortageMonitor::hasIncompleteCurrentRound() const
 {
     return m_round.roundId != 0;
+}
+
+bool ShortageMonitor::hasNotYetUnloadedTask(int stationId) const
+{
+    for (auto it = m_tasks.cbegin(); it != m_tasks.cend(); ++it) {
+        if (it->stationId == stationId && !it->unloaded) {
+            return true;
+        }
+    }
+    return false;
+}
+
+bool ShortageMonitor::hasTasksForOtherProduct(ProductModel product) const
+{
+    for (auto it = m_tasks.cbegin(); it != m_tasks.cend(); ++it) {
+        if (it->product != product) {
+            return true;
+        }
+    }
+    return false;
+}
+
+LiveShortageTaskState ShortageMonitor::stateForStation(const StationConsumption &station) const
+{
+    if (!station.configured) {
+        return LiveShortageTaskState::ConfigurationError;
+    }
+    if (m_waitingForOldProductTasks && station.shortage) {
+        return LiveShortageTaskState::WaitingOldProductTasks;
+    }
+
+    for (auto it = m_tasks.cbegin(); it != m_tasks.cend(); ++it) {
+        if (it->stationId != station.stationId) {
+            continue;
+        }
+        if (it->unloaded) {
+            return LiveShortageTaskState::UnloadedFinishing;
+        }
+        if (it->started) {
+            return LiveShortageTaskState::Running;
+        }
+        return LiveShortageTaskState::Queued;
+    }
+
+    if (m_waitingStations.contains(station.stationId)) {
+        return LiveShortageTaskState::WaitingForQueue;
+    }
+    if (m_communicationPaused) {
+        return LiveShortageTaskState::CommunicationPaused;
+    }
+    return LiveShortageTaskState::Normal;
 }

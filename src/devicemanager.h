@@ -14,6 +14,7 @@
 #include "lineconfig.h"
 #include "linemanager.h"
 #include "nscanscheduler.h"
+#include "shortagemonitor.h"
 #include "shortagetestsession.h"
 
 class AgvController;
@@ -65,6 +66,7 @@ public:
     PalletScheduler  *palletScheduler() const { return m_palletScheduler; }
     CustomSysScheduler *customSysScheduler() const { return m_customSysScheduler; }
     ShortageTestSession *shortageTestSession() const { return m_shortageTestSession; }
+    ShortageMonitor *shortageMonitor() const { return m_shortageMonitor; }
     bool              lightIsOn()        const { return m_lightOn;      }
     bool              nscanTestRunning() const { return m_nscanTestRunning; }
     const Config     &config()           const { return m_cfg;          }
@@ -86,6 +88,8 @@ public slots:
     void fetchCustomSystemDayData();
     void startShortageTest();
     void stopShortageTest();
+    void startLiveShortage();
+    void stopLiveShortage();
     void startNScanTest(const NScanScheduler::ScanOptions &options);
     void toggleLight();
     void applyHandEyeMatrix(const float m[16]);
@@ -119,6 +123,11 @@ signals:
                                    ProductionMode mode,
                                    QHash<QString, bool> bits);
     void shortageTestInventoryUpdated(QList<StationConsumption> stations);
+    void liveShortageStatusChanged(QString text, bool healthy);
+    void liveShortageSampleUpdated(qint64 actualQty,
+                                   ProductModel product,
+                                   ProductionMode mode);
+    void liveShortageInventoryUpdated(QList<LiveShortageStationSnapshot> stations);
     void lightChanged(bool on, bool success);
     void configApplied(const QString &robotIP, const QString &agvIP);
     void agvModbusConnected();
@@ -140,6 +149,7 @@ private:
     PalletScheduler  *m_palletScheduler = nullptr;   ///< 主流程和配置 UI 共用的码垛缓存。
     CustomSysScheduler *m_customSysScheduler = nullptr;   ///< 客户现场 HTTP/PLC 请求唯一入口。
     ShortageTestSession *m_shortageTestSession = nullptr; ///< 测试专用缺料会话，不接 FIFO。
+    ShortageMonitor *m_shortageMonitor = nullptr;         ///< 生产专用真实缺料会话；只发派单请求和库存对账。
     std::shared_ptr<NScanScheduler> m_nscanScheduler;
     QMutex            m_nscanScanMutex;      ///< 厂商扫码 SDK 串行保护，两个 worker 共用。
     QPointer<QThread> m_nscanTestThread;

@@ -91,6 +91,9 @@ DeviceManager::DeviceManager(QObject *parent)
     qRegisterMetaType<QHash<QString, bool>>("QHash<QString,bool>");
     qRegisterMetaType<StationConsumption>("StationConsumption");
     qRegisterMetaType<QList<StationConsumption>>("QList<StationConsumption>");
+    qRegisterMetaType<LiveShortageTaskState>("LiveShortageTaskState");
+    qRegisterMetaType<LiveShortageStationSnapshot>("LiveShortageStationSnapshot");
+    qRegisterMetaType<QList<LiveShortageStationSnapshot>>("QList<LiveShortageStationSnapshot>");
 
     // UI 测试扫码使用独立线程；空闲时仅等待事件，不轮询、不消耗 CPU。
     auto *nscanThread = new QThread;
@@ -240,6 +243,32 @@ DeviceManager::DeviceManager(QObject *parent)
             this, &DeviceManager::shortageTestSampleUpdated);
     connect(m_shortageTestSession, &ShortageTestSession::inventoryUpdated,
             this, &DeviceManager::shortageTestInventoryUpdated);
+
+    // 生产会话与测试会话状态独立：二者共享同一个 CustomSysScheduler 和纯计算规则来源，
+    // 但测试会话绝不派单，生产会话才允许向主调度发真实缺料请求。
+    m_shortageMonitor = new ShortageMonitor(m_customSysScheduler, this);
+    connect(m_shortageMonitor, &ShortageMonitor::statusChanged,
+            this, &DeviceManager::liveShortageStatusChanged);
+    connect(m_shortageMonitor, &ShortageMonitor::sampleUpdated,
+            this, &DeviceManager::liveShortageSampleUpdated);
+    connect(m_shortageMonitor, &ShortageMonitor::inventoryUpdated,
+            this, &DeviceManager::liveShortageInventoryUpdated);
+    connect(m_shortageMonitor, &ShortageMonitor::logMessage,
+            this, &DeviceManager::logMessage);
+    // 连接只在构造期建立一次：start/stop 只控制会话运行，不重复 connect，避免重复派单。
+    connect(m_shortageMonitor, &ShortageMonitor::dispatchRequested,
+            this, [this](int stationId) {
+        const quint64 taskId = m_lineManager
+            ? m_lineManager->reportShortageWithId(stationId, TaskSource::CustomerSystem)
+            : 0;
+        m_shortageMonitor->confirmDispatch(stationId, taskId, taskId != 0);
+    });
+    connect(m_lineManager, &LineManager::taskStarted,
+            m_shortageMonitor, &ShortageMonitor::onTaskStarted);
+    connect(m_lineManager, &LineManager::materialUnloaded,
+            m_shortageMonitor, &ShortageMonitor::onMaterialUnloaded);
+    connect(m_lineManager, &LineManager::taskFinished,
+            m_shortageMonitor, &ShortageMonitor::onTaskFinished);
 
     m_lineOrch = new LineOrchestrator(m_agvCtrl, m_huayanScheduler, this);
     // 编排器请求派单 → 经映射表解析后下发（复用 dispatchAgv）
@@ -407,6 +436,26 @@ void DeviceManager::stopShortageTest()
 {
     if (m_shortageTestSession) {
         m_shortageTestSession->stop();
+    }
+}
+
+void DeviceManager::startLiveShortage()
+{
+    if (!m_customSysScheduler || !m_shortageMonitor) {
+        return;
+    }
+
+    // 真实模式和测试模式必须互斥：先停测试会话，再复用现场 .228 配置启动生产会话。
+    stopShortageTest();
+    m_customSysScheduler->setEndpoint(QUrl(m_cfg.customSysEndpoint.trimmed()));
+    m_shortageMonitor->start();
+}
+
+void DeviceManager::stopLiveShortage()
+{
+    if (m_shortageMonitor) {
+        // 停生产只停止新增轮询与新增真实派单，不清运行期库存；库存保留由 monitor 自己保证。
+        m_shortageMonitor->stop();
     }
 }
 

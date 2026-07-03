@@ -2,7 +2,7 @@
 
 基于 **Qt 6 + C++17** 开发的工业仓储自动化上位机软件，运行于 Windows / Linux 工控机。机械臂通过 **华沿 SDK** 控制，AGV 通过 **Modbus TCP** 控制，视觉服务通过 **HTTP** 通信，扫码枪通过 **N-ScanHub SDK / TCP** 主动触发读取。
 
-当前主流程由 `LineManager + TaskExecutor` 驱动：现场 12 个工位发生缺料后进入 FIFO 队列，系统依次完成 AGV 前往取料位、机械臂视觉取料、夹紧前扫码、AGV 前往倒料位、机械臂倒料、AGV 前往码垛位、机械臂放置空箱，队列为空时 AGV 回到 LM1 待机。
+当前主流程由 `LineManager + TaskExecutor` 驱动：现场 12 个工位发生缺料后进入 FIFO 队列，系统依次完成 AGV 前往取料位、机械臂视觉取料、夹紧前扫码、AGV 前往倒料位、机械臂倒料、AGV 前往码垛位、机械臂放置空箱，队列为空时 AGV 回到 LM1 待机。当前调度监控已支持“模拟缺料 / 真实缺料”二选一：模拟缺料用于人工触发 FIFO，真实缺料通过客户现场 MES/PLC 信号计算后接入同一主调度。
 
 **GitHub**：https://github.com/ssrxiaoge2/robot_visual.git
 
@@ -60,12 +60,17 @@ wh-robot-visual/
 │   ├── palletscheduler.{h,cpp}     # 空箱码垛点位规划与已放数量缓存
 │   ├── palletparamdialog.{h,cpp}   # 码垛参数配置窗口
 │   ├── customSysScheduler.{h,cpp}  # 客户系统 REST API 连通性和日统计读取
+│   ├── shortagecalculator.{h,cpp}  # 真实缺料库存估算与缺料判定
+│   ├── shortagemonitor.{h,cpp}     # 真实缺料轮询、基线维护与主调度接线
+│   ├── shortagetestpanel.{h,cpp}   # 缺料信号计算测试面板（仅测试用途）
+│   ├── shortagetestsession.{h,cpp} # 缺料信号单独验证会话（不直接驱动主调度）
 │   ├── camerawindow.{h,cpp}        # 相机实时预览对话框
 │   ├── handeyedialog.{h,cpp}       # 手眼矩阵加载向导
 │   ├── deviceindicator.{h,cpp}     # LED 状态指示灯控件
 │   ├── workflowwidget.{h,cpp}      # 流程图可视化控件
 │   ├── workflowstep.h              # 流程步骤元数据
 │   └── themeswitch.{h,cpp}         # 深色/浅色主题切换
+├── tests/                          # Qt Test 与回归验证
 ├── scripts/
 │   └── agv_modbus_debug.py         # AGV Modbus 真机调试脚本
 ├── Log/                            # 运行日志（自动创建，yyyy-MM-dd log.txt）
@@ -119,7 +124,9 @@ python3 main_angle_depth_samseg_depth_http.py   # Flask 在 8080 端口监听
 1. 填写机械臂 / AGV / 视觉各设备 IP，点击「应用配置」建立连接
 2. 用各设备旁「测试」按钮验证 TCP 可达性
 3. 点击「Start」或顶部「▶ 开始运行」启动 `LineManager`，系统进入“等待缺料”
-4. 在「调度监控」中点击「工位1」到「工位12」模拟缺料，任务按 FIFO 顺序执行
+4. 在「调度监控」中选择缺料来源：
+   - 选择“模拟缺料”时，可点击「工位1」到「工位12」人工触发任务，按 FIFO 顺序执行
+   - 选择“真实缺料”时，由 `ShortageMonitor` 根据客户现场 MES/PLC 信号计算缺料并自动接入主调度
 5. 点击「Stop」执行急停语义：取消 AGV、停止机械臂、清空 Pending 队列并进入 Error
 6. 现场处理完成后点击「Reset Error」恢复到 Idle，再重新 Start
 7. AGV 调试面板可单独派单 / 取消 / 暂停 / 继续，便于联调
@@ -129,6 +136,8 @@ python3 main_angle_depth_samseg_depth_http.py   # Flask 在 8080 端口监听
 ## 12 工位缺料流程
 
 `LineManager` 是当前整线入口。它只负责队列、启停、回 LM1 和 Error 边界；单个工位的动作由 `TaskExecutor` 串行执行。系统启动后没有任务时保持“等待缺料”，收到缺料事件后创建一个任务，多个工位同时缺料时按 FIFO 依次执行。
+
+当调度监控切换到“真实缺料”时，缺料入口不再来自人工按钮，而是来自 `ShortageMonitor`。它会根据客户现场接口返回的产量、产品型号和生产方式，维护每个工位的预计库存；当某工位 `预计库存 <= 安全阈值` 时，向 `LineManager` 申请一个真实缺料任务。若该工位已有“已派单或执行中且尚未倒料”的真实缺料任务，则本轮只保留缺料状态，不重复派单；当前任务倒料成功后若仍缺料，再按 FIFO 队尾继续补下一箱。
 
 ```
 缺料入队       工位按钮 / 后续客户系统事件 → TaskQueue FIFO
@@ -228,8 +237,9 @@ AGV→码垛位     大多数工位到共享码垛区 LM16；工位12 到独立�
 | 功能 | 状态 | 说明 |
 |------|------|------|
 | UI 布局 + 深浅色主题 | 完成 | 2×2 设备状态网格，动画主题切换 |
-| 调度监控看板 | 完成 | Start / Stop / Reset Error，12 工位缺料模拟，当前任务与 FIFO 队列展示 |
+| 调度监控看板 | 完成 | Start / Stop / Reset Error，支持“模拟缺料 / 真实缺料”切换，展示当前任务与 FIFO 队列 |
 | 12 工位 FIFO 补料 | 完成 | `LineManager + TaskExecutor` 串行执行缺料任务，队列为空回 LM1 |
+| 真实缺料接入主调度 | 本阶段完成 | `ShortageMonitor` 根据客户现场缺料信号计算结果接入既有 FIFO，真实库存仅在倒料成功后加一箱 |
 | 华沿 SDK 机械臂调度 | 完成 | 取料（视觉闭环 + 夹紧前扫码）/ 收姿态 / 倒料 / 空箱码垛 |
 | AGV Modbus 监控 + 派单 | 完成 | 监控轮询 + 工位→站点映射 + 调试面板 |
 | AGV 严格到达判定 | 完成 | 同时校验导航状态、导航目标 LM 和当前物理 LM，避免残留到达误判 |
@@ -242,7 +252,7 @@ AGV→码垛位     大多数工位到共享码垛区 LM16；工位12 到独立�
 | 补光灯控制 | 完成 | Linux GPIO，Windows 静默跳过 |
 | 日志持久化 | 完成 | Log/<日期> log.txt |
 | 整线真机试跑 | 进行中 | 已修复多处真机问题，仍需现场验证 |
-| 客户系统自动入队 | 未实现 | 当前缺料入口仍以 UI 模拟按钮为主，客户系统 actualQty 暂未驱动 FIFO |
+| 客户系统自动入队 | 阶段完成 | 真实缺料已接入既有 FIFO；但初始库存、断线追算、换型挂单等规则仍待客户最终确认 |
 | M4 车队调度 / 多车互斥 | 设计中 | 设计文档已存在，源码当前仍是 SEER Modbus 单 AGV 主线 |
 
 ---
@@ -273,7 +283,8 @@ MainWindow（UI 层）
             ├── VisionHttpClient  视觉 HTTP + 手眼坐标变换
             ├── NScanScheduler    N-ScanHub 主动扫码
             ├── PalletScheduler   空箱码垛规划与缓存
-            └── CustomSysScheduler 客户系统 REST API 测试
+            ├── CustomSysScheduler 客户系统 REST API / PLC 轮询
+            └── ShortageMonitor   真实缺料计算接线与派单申请
 ```
 
 核心原则：
@@ -281,6 +292,7 @@ MainWindow（UI 层）
 - **MainWindow** 只做布局和信号转发，不含 Modbus / SDK / 网络逻辑
 - **DeviceManager** 是设备对象唯一所有者；调度扫码和 UI 测试扫码隔离，避免结果串线
 - **LineManager** 只管理整线状态、FIFO 队列、回 LM1 和 Error 边界，不直接调用 Modbus/SDK 原语
+- **ShortageMonitor** 只负责真实缺料轮询、预计库存维护和派单申请；真实库存仅在“倒料成功”这一既有成功事实到达后加一箱
 - **TaskExecutor** 只执行一个任务的高层动作，所有硬件细节委托给 AGV、机械臂、视觉、扫码、码垛模块
 - **控制器**（`HuayanScheduler` / `AgvController` / `VisionHttpClient` / `NScanScheduler` 等）由 `DeviceManager` 持有，不在别处 new
 
@@ -296,7 +308,7 @@ MainWindow（UI 层）
 | baseRzReg 基准 | `VisionHttpClient` 默认 0，需联机后设实际值 |
 | 手眼标定精度 | 当前误差约 2–3mm，必要时重标后 `setHandEyeMatrix()` 更新 |
 | 叉车货叉扩展 | 取放货需扩展货叉高度 / 到位寄存器 |
-| 客户系统自动派单 | 当前只做 REST 连通性和 actualQty 读取，缺料事件自动生成任务的规则待确认 |
+| 客户系统自动派单 | 当前版本已能将真实缺料接入既有 FIFO，但仍采用“安全阈值 + 一箱”初始估算，断线恢复不追算产量 |
 | M4 车队调度 | 多车互斥和外部地图资源锁仍是设计阶段，当前生产主线不依赖它 |
 
 ---

@@ -28,6 +28,8 @@ LineManager::LineManager(AgvController *agv,
             this, &LineManager::onExecutorTaskFailed);
     connect(m_executor, &TaskExecutor::systemError,
             this, &LineManager::onExecutorSystemError);
+    connect(m_executor, &TaskExecutor::materialUnloaded,
+            this, &LineManager::materialUnloaded);
     connect(m_executor, &TaskExecutor::logMessage,
             this, &LineManager::logMessage);
     connect(m_executor, &TaskExecutor::agvDispatchRequested,
@@ -107,6 +109,7 @@ void LineManager::stop()
         canceled.statusText = QStringLiteral("人工 Stop，当前任务已取消");
         canceled.lastError = reason;
         setCurrentTask(canceled);
+        emit taskFinished(canceled);
     } else {
         clearCurrentTask();
     }
@@ -146,36 +149,44 @@ void LineManager::resetError()
 
 bool LineManager::reportShortage(int stationId, TaskSource source)
 {
+    return reportShortageWithId(stationId, source) != 0;
+}
+
+quint64 LineManager::reportShortageWithId(int stationId, TaskSource source)
+{
     if (stationId < 1 || stationId > 12) {
         emit logMessage(QStringLiteral("[LineManager] 忽略非法缺料工位：%1").arg(stationId));
-        return false;
+        return 0;
     }
 
     if (m_state == LineSystemState::Error) {
         emit logMessage(QStringLiteral("[LineManager] 系统报警中，拒绝工位 %1 的缺料请求").arg(stationId));
-        return false;
+        return 0;
     }
 
-    m_queue.enqueue(stationId, source);
+    // 这里只在既有 enqueue/tryStartNext 流程外补充 taskId 回传和入队事实通知，
+    // 不增加去重、不改变 FIFO 顺序，也不改写 Idle/Running/ReturningHome 分支。
+    const Task task = m_queue.enqueue(stationId, source);
+    emit taskEnqueued(task);
     emitQueueChanged();
     emit logMessage(QStringLiteral("工位%1已加入送料队列，来源：%2")
                         .arg(stationId)
                         .arg(taskSourceText(source)));
 
     if (m_state == LineSystemState::Idle) {
-        return true;
+        return task.taskId;
     }
 
     if (m_state == LineSystemState::ReturningHome) {
         cancelReturnHomeForNewTask();
         tryStartNext();
-        return true;
+        return task.taskId;
     }
 
     if (m_state == LineSystemState::Running && !m_executor->isBusy()) {
         tryStartNext();
     }
-    return true;
+    return task.taskId;
 }
 
 void LineManager::onScanFinished(const NScanScheduler::ScanResult &result)
@@ -199,6 +210,7 @@ void LineManager::onExecutorTaskSucceeded(const Task &task)
         return;
     }
 
+    emit taskFinished(task);
     emit logMessage(QStringLiteral("工位%1送料完成").arg(task.stationId));
     if (m_queue.hasPending()) {
         tryStartNext();
@@ -215,6 +227,7 @@ void LineManager::onExecutorTaskFailed(const Task &task, const QString &reason)
         return;
     }
 
+    emit taskFinished(task);
     emit logMessage(QStringLiteral("工位%1送料失败：%2").arg(task.stationId).arg(reason));
     if (m_queue.hasPending()) {
         tryStartNext();
@@ -321,6 +334,7 @@ void LineManager::tryStartNext()
 
     setState(LineSystemState::Running, QStringLiteral("正在送料"));
     Task nextTask = m_queue.takeNext();
+    emit taskStarted(nextTask);
     emit logMessage(QStringLiteral("工位%1开始送料").arg(nextTask.stationId));
     m_executor->start(nextTask);
 }
@@ -398,6 +412,17 @@ void LineManager::clearPendingForError(const QString &reason)
     if (pendingCount <= 0) {
         emitQueueChanged();
         return;
+    }
+
+    // 这里只补充“哪些 Pending 被取消”的事实通知；真正的清队列时机、日志和后续报警顺序保持原样。
+    const QList<Task> pendingTasks = m_queue.pendingSnapshot();
+    for (Task pendingTask : pendingTasks) {
+        pendingTask.state = TaskState::Canceled;
+        pendingTask.step = TaskStep::Done;
+        pendingTask.stepIndex = 15;
+        pendingTask.statusText = QStringLiteral("系统清队列，任务已取消");
+        pendingTask.lastError = reason;
+        emit taskFinished(pendingTask);
     }
 
     emit logMessage(QStringLiteral("[LineManager] 清空 %1 个 Pending 任务：%2")

@@ -255,6 +255,44 @@ QString latestTaskResultText(const QString &prefix, const Task &task, const QStr
         .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")));
 }
 
+QString liveShortageStateText(LiveShortageTaskState state)
+{
+    switch (state) {
+    case LiveShortageTaskState::Normal:
+        return QStringLiteral("正常");
+    case LiveShortageTaskState::WaitingForQueue:
+        return QStringLiteral("缺料待入队");
+    case LiveShortageTaskState::Queued:
+        return QStringLiteral("已排队");
+    case LiveShortageTaskState::Running:
+        return QStringLiteral("执行中");
+    case LiveShortageTaskState::UnloadedFinishing:
+        return QStringLiteral("已倒料待任务完成");
+    case LiveShortageTaskState::CommunicationPaused:
+        return QStringLiteral("通信暂停");
+    case LiveShortageTaskState::ConfigurationError:
+        return QStringLiteral("配置异常");
+    case LiveShortageTaskState::WaitingOldProductTasks:
+        return QStringLiteral("换型等待旧任务完成");
+    }
+    return QStringLiteral("未知状态");
+}
+
+QString liveShortageSummaryText(const QString &statusText,
+                                bool healthy,
+                                const QString &productText,
+                                const QString &modeText,
+                                const QString &actualQtyText)
+{
+    const QString mesStatus = healthy ? QStringLiteral("正常") : QStringLiteral("异常/暂停");
+    return QStringLiteral("运行状态：%1\n产品：%2    方式：%3    MES日产量：%4    MES通信：%5\n提示：库存为估算初值，仅真实模式生效")
+        .arg(statusText.isEmpty() ? QStringLiteral("默认模拟缺料") : statusText)
+        .arg(productText.isEmpty() ? QStringLiteral("-") : productText)
+        .arg(modeText.isEmpty() ? QStringLiteral("-") : modeText)
+        .arg(actualQtyText.isEmpty() ? QStringLiteral("-") : actualQtyText)
+        .arg(mesStatus);
+}
+
 } // namespace
 
 // ============================================================
@@ -336,6 +374,38 @@ MainWindow::MainWindow(QWidget *parent)
         connect(m_shortageTestPanel, &ShortageTestPanel::stopTestRequested,
                 m_devMgr, &DeviceManager::stopShortageTest);
     }
+
+    connect(m_devMgr, &DeviceManager::liveShortageStatusChanged,
+            this, [this](const QString &text, bool healthy) {
+        if (!m_liveShortageSummaryLabel) {
+            return;
+        }
+        m_liveShortageSummaryLabel->setProperty("liveStatusText", text);
+        m_liveShortageSummaryLabel->setProperty("liveStatusHealthy", healthy);
+        m_liveShortageSummaryLabel->setText(liveShortageSummaryText(
+            text,
+            healthy,
+            m_liveShortageSummaryLabel->property("liveProductText").toString(),
+            m_liveShortageSummaryLabel->property("liveModeText").toString(),
+            m_liveShortageSummaryLabel->property("liveActualQtyText").toString()));
+    });
+    connect(m_devMgr, &DeviceManager::liveShortageSampleUpdated,
+            this, [this](qint64 actualQty, ProductModel product, ProductionMode mode) {
+        if (!m_liveShortageSummaryLabel) {
+            return;
+        }
+        m_liveShortageSummaryLabel->setProperty("liveProductText", productModelText(product));
+        m_liveShortageSummaryLabel->setProperty("liveModeText", productionModeText(mode));
+        m_liveShortageSummaryLabel->setProperty("liveActualQtyText", QString::number(actualQty));
+        m_liveShortageSummaryLabel->setText(liveShortageSummaryText(
+            m_liveShortageSummaryLabel->property("liveStatusText").toString(),
+            m_liveShortageSummaryLabel->property("liveStatusHealthy").toBool(),
+            productModelText(product),
+            productionModeText(mode),
+            QString::number(actualQty)));
+    });
+    connect(m_devMgr, &DeviceManager::liveShortageInventoryUpdated,
+            this, &MainWindow::updateLiveShortageTable);
 
     // 补光灯切换结果 / 配置应用结果
     connect(m_devMgr, &DeviceManager::lightChanged,
@@ -638,9 +708,34 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
     controlRow->addWidget(m_lineResetBtn);
     layout->addLayout(controlRow);
 
+    auto *sourceRow = new QHBoxLayout();
+    m_mockShortageRadio = new QRadioButton(QStringLiteral("模拟缺料"));
+    m_liveShortageRadio = new QRadioButton(QStringLiteral("真实缺料"));
+    m_mockShortageRadio->setObjectName(QStringLiteral("mockShortageRadio"));
+    m_liveShortageRadio->setObjectName(QStringLiteral("liveShortageRadio"));
+    m_mockShortageRadio->setChecked(true);
+    sourceRow->addWidget(m_mockShortageRadio);
+    sourceRow->addWidget(m_liveShortageRadio);
+    sourceRow->addStretch();
+    layout->addLayout(sourceRow);
+
     auto *stationTitle = new QLabel(QStringLiteral("模拟缺料"));
     stationTitle->setProperty("sectionTitle", true);
     layout->addWidget(stationTitle);
+
+    m_liveShortageSummaryLabel = new QLabel(liveShortageSummaryText(QStringLiteral("默认模拟缺料"),
+                                                                    true,
+                                                                    QString(),
+                                                                    QString(),
+                                                                    QString()));
+    m_liveShortageSummaryLabel->setWordWrap(true);
+    m_liveShortageSummaryLabel->setObjectName(QStringLiteral("liveShortageSummaryLabel"));
+    m_liveShortageSummaryLabel->setProperty("liveStatusText", QStringLiteral("默认模拟缺料"));
+    m_liveShortageSummaryLabel->setProperty("liveStatusHealthy", true);
+    m_liveShortageSummaryLabel->setProperty("liveProductText", QString());
+    m_liveShortageSummaryLabel->setProperty("liveModeText", QString());
+    m_liveShortageSummaryLabel->setProperty("liveActualQtyText", QString());
+    layout->addWidget(m_liveShortageSummaryLabel);
 
     auto *stationGrid = new QGridLayout();
     stationGrid->setHorizontalSpacing(4);
@@ -662,6 +757,27 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
         m_stationButtons.append(button);
     }
     layout->addLayout(stationGrid);
+
+    auto *liveTableTitle = new QLabel(QStringLiteral("真实缺料状态"));
+    liveTableTitle->setProperty("sectionTitle", true);
+    layout->addWidget(liveTableTitle);
+
+    m_liveShortageTable = new QTableWidget(kLineStationCount, 3, gbLine);
+    m_liveShortageTable->setObjectName(QStringLiteral("liveShortageTable"));
+    m_liveShortageTable->setHorizontalHeaderLabels({
+        QStringLiteral("工位"),
+        QStringLiteral("库存/安全线"),
+        QStringLiteral("状态")
+    });
+    m_liveShortageTable->verticalHeader()->setVisible(false);
+    m_liveShortageTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_liveShortageTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_liveShortageTable->setFocusPolicy(Qt::NoFocus);
+    m_liveShortageTable->setAlternatingRowColors(true);
+    m_liveShortageTable->setMinimumHeight(220);
+    m_liveShortageTable->horizontalHeader()->setStretchLastSection(true);
+    m_liveShortageTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    layout->addWidget(m_liveShortageTable);
 
     auto *queueTitle = new QLabel(QStringLiteral("FIFO 队列"));
     queueTitle->setProperty("sectionTitle", true);
@@ -696,6 +812,16 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
             m_devMgr->lineManager()->resetError();
         }
     });
+    connect(m_mockShortageRadio, &QRadioButton::toggled, this, [this](bool checked) {
+        if (checked) {
+            setLiveShortageMode(false);
+        }
+    });
+    connect(m_liveShortageRadio, &QRadioButton::toggled, this, [this](bool checked) {
+        if (checked) {
+            setLiveShortageMode(true);
+        }
+    });
 
     m_lineStateLabel->setText(QStringLiteral("未启动"));
     m_lineCurrentLabel->setText(QStringLiteral("当前无任务"));
@@ -703,6 +829,8 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
     m_lineAlarmLabel->setText(QStringLiteral("无"));
     m_lineLastDoneLabel->setText(QStringLiteral("暂无"));
     m_lineLastFailedLabel->setText(QStringLiteral("暂无"));
+    updateLiveShortageTable({});
+    setLiveShortageMode(false);
 
     leftPanel->addWidget(gbLine);
 }
@@ -1743,8 +1871,9 @@ void MainWindow::updateLineSystemState(LineSystemState state, const QString &tex
         m_lineStopBtn->setEnabled(canStop);
     if (m_lineResetBtn)
         m_lineResetBtn->setEnabled(canReset);
+    const bool liveModeEnabled = m_liveShortageRadio && m_liveShortageRadio->isChecked();
     for (QPushButton *button : std::as_const(m_stationButtons)) {
-        button->setEnabled(state != LineSystemState::Error);
+        button->setEnabled(state != LineSystemState::Error && !liveModeEnabled);
     }
 
     if (state != LineSystemState::Error && m_lineAlarmLabel) {
@@ -1842,6 +1971,65 @@ void MainWindow::updateLineCurrentTask(const Task &task)
     m_lastLineTaskStep = task.step;
     m_lastLineTaskState = task.state;
     m_hasLastLineTask = (task.taskId != 0);
+}
+
+void MainWindow::setLiveShortageMode(bool enabled)
+{
+    const bool lineInError = m_devMgr
+        && m_devMgr->lineManager()
+        && m_devMgr->lineManager()->state() == LineSystemState::Error;
+    for (QPushButton *button : std::as_const(m_stationButtons)) {
+        button->setEnabled(!enabled && !lineInError);
+    }
+
+    if (!m_devMgr) {
+        return;
+    }
+
+    if (enabled) {
+        DeviceManager::Config cfg;
+        buildConfig(cfg);
+        m_devMgr->setConfig(cfg);
+        m_devMgr->startLiveShortage();
+        return;
+    }
+
+    m_devMgr->stopLiveShortage();
+}
+
+void MainWindow::updateLiveShortageTable(const QList<LiveShortageStationSnapshot> &stations)
+{
+    if (!m_liveShortageTable) {
+        return;
+    }
+
+    m_liveShortageTable->setRowCount(kLineStationCount);
+    for (int row = 0; row < kLineStationCount; ++row) {
+        const int stationId = row + 1;
+        LiveShortageStationSnapshot snapshot;
+        snapshot.stationId = stationId;
+        snapshot.state = LiveShortageTaskState::Normal;
+
+        for (const LiveShortageStationSnapshot &candidate : stations) {
+            if (candidate.stationId == stationId) {
+                snapshot = candidate;
+                break;
+            }
+        }
+
+        auto *stationItem = new QTableWidgetItem(QStringLiteral("工位%1").arg(stationId));
+        const QString inventoryText = snapshot.safetyStock > 0
+            ? QStringLiteral("%1 / %2").arg(snapshot.estimatedAvailable).arg(snapshot.safetyStock)
+            : QStringLiteral("%1 / -").arg(snapshot.estimatedAvailable);
+        auto *inventoryItem = new QTableWidgetItem(inventoryText);
+        auto *stateItem = new QTableWidgetItem(liveShortageStateText(snapshot.state));
+        stationItem->setTextAlignment(Qt::AlignCenter);
+        inventoryItem->setTextAlignment(Qt::AlignCenter);
+        stateItem->setTextAlignment(Qt::AlignCenter);
+        m_liveShortageTable->setItem(row, 0, stationItem);
+        m_liveShortageTable->setItem(row, 1, inventoryItem);
+        m_liveShortageTable->setItem(row, 2, stateItem);
+    }
 }
 
 bool MainWindow::lineManagerOwnsTopLevelWorkflowUi() const

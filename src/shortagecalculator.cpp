@@ -146,6 +146,46 @@ bool ShortageCalculator::markRejected(int stationId)
     return m_stationStates[stationId - 1].awaitingAcceptance;
 }
 
+bool ShortageCalculator::recordReplenishment(int stationId, ProductModel product)
+{
+    // 这个接口只服务“真实倒料成功后同步纯计算库存”：
+    // - 修改前，ShortageCalculator 只能表达消耗，无法表达回补；
+    // - 修改后，只新增一箱库存回补能力，仍然不接触 FIFO/派单/任务流转。
+    // 因为旧主流程从未调用该新接口，所以 e1ffb3f 的既有行为不会被动改变。
+    if (stationId < 1 || stationId > kStationCount) {
+        return false;
+    }
+    if (!m_initialized) {
+        return false;
+    }
+    if (product != m_currentProduct) {
+        return false;
+    }
+
+    const MaterialConfig *config = configFor(stationId, product);
+    if (!config || !materialConfigHasConfirmedThresholds(*config)) {
+        return false;
+    }
+
+    StationRuntime &runtime = m_stationStates[stationId - 1];
+    if (!runtime.configured) {
+        return false;
+    }
+    if (isAdditionOverflow(runtime.estimatedAvailable, config->boxQuantity)) {
+        return false;
+    }
+
+    runtime.estimatedAvailable += config->boxQuantity;
+
+    // snapshot 语义要求 shortage/awaitingAcceptance/reason 能彼此对齐：
+    // - 配置合法且成功回补后，不再保留“配置缺失/初始化失败”类 reason；
+    // - 若回补后仍低于或等于安全线，则继续暴露 awaitingAcceptance=true，
+    //   让外部可以明确看到“虽然加过一箱，但这个工位仍处于缺料区间”。
+    runtime.reason.clear();
+    runtime.awaitingAcceptance = (runtime.estimatedAvailable <= config->safetyStock);
+    return true;
+}
+
 void ShortageCalculator::markCommunicationInterrupted()
 {
     if (m_initialized) {

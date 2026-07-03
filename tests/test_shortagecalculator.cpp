@@ -97,6 +97,8 @@ private slots:
     void negative_inventory_is_preserved();
     void missing_configuration_is_not_shortage();
     void multiplication_overflow_is_rejected();
+    void replenishment_adds_exactly_one_box();
+    void replenishment_rejects_wrong_product_or_bad_station();
 };
 
 void ShortageCalculatorTest::material_config_matches_workbook_examples()
@@ -265,6 +267,61 @@ void ShortageCalculatorTest::multiplication_overflow_is_rejected()
     const IngestResult result = calculator.ingest({std::numeric_limits<qint64>::max(), ProductModel::Model88, ProductionMode::L68});
     QVERIFY(!result.ok);
     QVERIFY(result.errorMessage.contains(QStringLiteral("溢出")));
+}
+
+void ShortageCalculatorTest::replenishment_adds_exactly_one_box()
+{
+    ShortageCalculator calculator(buildSyntheticConfigs());
+    calculator.initializeForProduct(ProductModel::Model88);
+    QVERIFY(calculator.ingest({1000, ProductModel::Model88, ProductionMode::L1998}).ok);
+    QVERIFY(calculator.ingest({1100, ProductModel::Model88, ProductionMode::L1998}).ok);
+
+    const QList<StationConsumption> beforeReplenishment = calculator.snapshot();
+    QCOMPARE(beforeReplenishment.at(0).estimatedAvailable, 40);
+    QVERIFY(beforeReplenishment.at(0).shortage);
+    QVERIFY(beforeReplenishment.at(0).awaitingAcceptance);
+
+    QVERIFY(calculator.recordReplenishment(1, ProductModel::Model88));
+
+    const QList<StationConsumption> afterReplenishment = calculator.snapshot();
+    QCOMPARE(afterReplenishment.at(0).estimatedAvailable, 140);
+    QVERIFY(!afterReplenishment.at(0).shortage);
+    QVERIFY(!afterReplenishment.at(0).awaitingAcceptance);
+    QCOMPARE(afterReplenishment.at(0).reason, QString());
+    QCOMPARE(afterReplenishment.at(1).estimatedAvailable,
+             beforeReplenishment.at(1).estimatedAvailable);
+}
+
+void ShortageCalculatorTest::replenishment_rejects_wrong_product_or_bad_station()
+{
+    ShortageCalculator calculator(buildSyntheticConfigs());
+    calculator.initializeForProduct(ProductModel::Model88);
+    QVERIFY(calculator.ingest({1000, ProductModel::Model88, ProductionMode::L1998}).ok);
+    QVERIFY(calculator.ingest({1100, ProductModel::Model88, ProductionMode::L1998}).ok);
+
+    const QList<StationConsumption> beforeInvalidRequests = calculator.snapshot();
+    QVERIFY(!calculator.recordReplenishment(0, ProductModel::Model88));
+    QVERIFY(!calculator.recordReplenishment(13, ProductModel::Model88));
+    QVERIFY(!calculator.recordReplenishment(1, ProductModel::Model92));
+    QCOMPARE(calculator.snapshot().at(0).estimatedAvailable,
+             beforeInvalidRequests.at(0).estimatedAvailable);
+    QCOMPARE(calculator.snapshot().at(0).awaitingAcceptance,
+             beforeInvalidRequests.at(0).awaitingAcceptance);
+
+    ShortageCalculator notInitialized(buildSyntheticConfigs());
+    const QList<StationConsumption> beforeInitialization = notInitialized.snapshot();
+    QVERIFY(!notInitialized.recordReplenishment(1, ProductModel::Model88));
+    QCOMPARE(notInitialized.snapshot().at(0).estimatedAvailable,
+             beforeInitialization.at(0).estimatedAvailable);
+
+    MaterialConfig singleStation{1, ProductModel::Model88, QStringLiteral("P1"), 100, 1, 40};
+    ShortageCalculator missingConfig({singleStation});
+    missingConfig.initializeForProduct(ProductModel::Model88);
+    const QList<StationConsumption> beforeMissingConfig = missingConfig.snapshot();
+    QVERIFY(!missingConfig.recordReplenishment(2, ProductModel::Model88));
+    QCOMPARE(missingConfig.snapshot().at(1).estimatedAvailable,
+             beforeMissingConfig.at(1).estimatedAvailable);
+    QCOMPARE(missingConfig.snapshot().at(1).reason, QStringLiteral("配置缺失"));
 }
 
 QTEST_MAIN(ShortageCalculatorTest)
