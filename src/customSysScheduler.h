@@ -54,8 +54,13 @@ public:
     QUrl endpoint() const { return m_endpoint; }
     void setEndpoint(const QUrl &endpoint);
 
+    /// 缺料测试与客户系统面板共用的默认入口，当前固定指向现场实测 MES 日产量接口。
     static QUrl defaultEndpoint();
+    /// .228 是现场实测通过的 MES 日产量接口地址，所有 MES 请求必须统一复用。
+    static QUrl mesDayEndpoint();
+    /// 兼容旧调用点的包装接口，始终返回 mesDayEndpoint()。
     static QUrl defaultMesDayEndpoint();
+    /// PLC 位读取固定入口；与 MES 地址分离，避免上层拼接协议细节。
     static QUrl defaultPlcBitEndpoint();
     static ParseResult parseDayReply(const QByteArray &payload);
     static PlcBitReply parsePlcBitReply(const QByteArray &payload,
@@ -64,7 +69,9 @@ public:
 public slots:
     void testConnectivity();
     void fetchDayData();
+    /// roundId 由上层轮询会话生成并原样透传，便于同轮聚合和丢弃迟到响应。
     virtual void fetchMesDayData(quint64 roundId);
+    /// 读取 PLC 位寄存器并把 roundId、地址范围原样带回给上层聚合同轮结果。
     virtual void fetchPlcBits(quint64 roundId, int startAddress, int length);
 
 signals:
@@ -92,6 +99,7 @@ private:
     // 用请求上下文区分 legacy 接口和 roundId 新契约，避免解析层掺入业务状态。
     struct RequestContext {
         Operation operation = Operation::Connectivity;
+        // roundId 属于上层会话契约数据，这里只负责透传，不重新解释业务含义。
         quint64 roundId = 0;
         int startAddress = 0;
         int length = 0;

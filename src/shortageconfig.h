@@ -14,7 +14,7 @@ enum class ProductModel { Model88, Model88R, Model92 };
 /**
  * @brief 客户现场 PLC 生产方式位映射。
  *
- * L68/L69/L1998 对应不同生产方式；开发版默认用 PLC 方式直接决定单件用量。
+ * L68/L69/L1998 对应不同生产方式；当前开发默认仍以 Excel 表格用量为准。
  */
 enum class ProductionMode { L68, L69, L1998 };
 
@@ -27,69 +27,83 @@ enum class ProductionMode { L68, L69, L1998 };
 enum class UsageStrategy { Spreadsheet, PlcMode };
 
 #ifndef SHORTAGE_USAGE_STRATEGY
-#define SHORTAGE_USAGE_STRATEGY UsageStrategy::PlcMode
+#define SHORTAGE_USAGE_STRATEGY UsageStrategy::Spreadsheet
 #endif
 
 /**
  * @brief 单工位、单产品的固定缺料配置。
  *
- * boxQuantity / spreadsheetUsage / safetyStock 来自
- * `xiancahngxitong/安全库存.xlsx`。当前仓库没有这 36 组确认数值，
- * 因此占位为 0；0 表示“尚未得到现场确认”，监控层不得据此自动派单。
+ * boxQuantity / spreadsheetUsage / safetyStock 固化自
+ * `xiancahngxitong/安全库存.xlsx`：
+ * - sheet2：88=左块 A-F row3-14，92=右块 K-P row3-14，88R=左块 A-F row19-30。
+ * - sheet1：共同主品号基表 B/C/D/F row22-44，空值按去后缀后的共同主品号回退。
+ * - 单位：每箱数量 / 用量 / 安全库存均按表格 ea 语义保存。
+ *
+ * 工位映射沿用现场既有 common partNumber 映射；工位 3 与工位 4 共用同一组 Excel 参数，
+ * 但运行期 stationId 必须继续独立计数。
  */
 struct MaterialConfig {
     int stationId = 0;               ///< 代码工位号，合法范围 1-12。
     ProductModel product = ProductModel::Model88; ///< 当前配置所属产品型号。
-    QString partNumber;              ///< 该工位用于回查 Excel 的主品号。
-    int boxQuantity = 0;             ///< 每箱数量；0 表示仓库中缺少已确认值。
-    int spreadsheetUsage = 0;        ///< 表格策略单件用量；0 表示仓库中缺少已确认值。
-    int safetyStock = 0;             ///< 安全库存阈值；0 表示仓库中缺少已确认值。
+    QString partNumber;              ///< 共同主品号；sheet2 后缀 WS/DE/BR/HT 回退时使用该键。
+    int boxQuantity = 0;             ///< 每箱数量；单位=ea。
+    int spreadsheetUsage = 0;        ///< 表格单件用量；单位=ea/件。
+    int safetyStock = 0;             ///< 安全库存阈值；单位=ea。
 };
 
 namespace shortageconfig_detail {
 
-// 当前仓库未包含 `安全库存.xlsx` 的 36 组最终数值；先用 0 明确表示“待补表”，
-// 防止系统在未确认阈值时误发现场缺料任务。
-inline constexpr int kPendingSpreadsheetValue = 0;
-
 inline const MaterialConfig kMaterialConfigs[] = {
-    {1, ProductModel::Model88, QStringLiteral("18117-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {1, ProductModel::Model88R, QStringLiteral("18117-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {1, ProductModel::Model92, QStringLiteral("18117-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {2, ProductModel::Model88, QStringLiteral("18167-RM700"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {2, ProductModel::Model88R, QStringLiteral("18167-RM700"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {2, ProductModel::Model92, QStringLiteral("18167-RM700"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    // 工位 3 当前按设计文档临时复制工位 4 的 Excel 参数，但累计和事件保持独立。
-    {3, ProductModel::Model88, QStringLiteral("18116-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {3, ProductModel::Model88R, QStringLiteral("18116-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {3, ProductModel::Model92, QStringLiteral("18116-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {4, ProductModel::Model88, QStringLiteral("18116-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {4, ProductModel::Model88R, QStringLiteral("18116-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {4, ProductModel::Model92, QStringLiteral("18116-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {5, ProductModel::Model88, QStringLiteral("18214-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {5, ProductModel::Model88R, QStringLiteral("18214-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {5, ProductModel::Model92, QStringLiteral("18214-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {6, ProductModel::Model88, QStringLiteral("18114-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {6, ProductModel::Model88R, QStringLiteral("18114-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {6, ProductModel::Model92, QStringLiteral("18114-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {7, ProductModel::Model88, QStringLiteral("18225-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {7, ProductModel::Model88R, QStringLiteral("18225-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {7, ProductModel::Model92, QStringLiteral("18225-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {8, ProductModel::Model88, QStringLiteral("18215-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {8, ProductModel::Model88R, QStringLiteral("18215-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {8, ProductModel::Model92, QStringLiteral("18215-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {9, ProductModel::Model88, QStringLiteral("18125-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {9, ProductModel::Model88R, QStringLiteral("18125-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {9, ProductModel::Model92, QStringLiteral("18125-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {10, ProductModel::Model88, QStringLiteral("18115-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {10, ProductModel::Model88R, QStringLiteral("18115-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {10, ProductModel::Model92, QStringLiteral("18115-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {11, ProductModel::Model88, QStringLiteral("18112-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {11, ProductModel::Model88R, QStringLiteral("18112-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {11, ProductModel::Model92, QStringLiteral("18112-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {12, ProductModel::Model88, QStringLiteral("18118-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {12, ProductModel::Model88R, QStringLiteral("18118-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
-    {12, ProductModel::Model92, QStringLiteral("18118-RM8S0"), kPendingSpreadsheetValue, kPendingSpreadsheetValue, kPendingSpreadsheetValue},
+    // 工位 1，18117-RM8S0：88 对应 sheet2 A13:F13 空用量/安全库存，按 sheet1 row42 回退；
+    // 88R 对应 sheet2 A29:F29；92 对应 sheet2 K13:P13。
+    {1, ProductModel::Model88, QStringLiteral("18117-RM8S0"), 250, 1, 1000},
+    {1, ProductModel::Model88R, QStringLiteral("18117-RM8S0"), 250, 1, 600},
+    {1, ProductModel::Model92, QStringLiteral("18117-RM8S0"), 250, 1, 600},
+    // 工位 2，18167-RM700：88 对应 sheet2 A12:F12；88R 对应 sheet2 A28:F28 空用量/安全库存，按 sheet1 row40 回退；
+    // 92 对应 sheet2 K12:P12 空用量/安全库存，按 sheet1 row40 回退。
+    {2, ProductModel::Model88, QStringLiteral("18167-RM700"), 250, 1, 600},
+    {2, ProductModel::Model88R, QStringLiteral("18167-RM700"), 250, 1, 1000},
+    {2, ProductModel::Model92, QStringLiteral("18167-RM700"), 250, 1, 1000},
+    // 工位 3 沿用工位 4 的共同主品号 18116-RM8S0；来源为 sheet2 A11:F11 / A27:F27 / K11:P11。
+    {3, ProductModel::Model88, QStringLiteral("18116-RM8S0"), 836, 1, 800},
+    {3, ProductModel::Model88R, QStringLiteral("18116-RM8S0"), 836, 1, 800},
+    {3, ProductModel::Model92, QStringLiteral("18116-RM8S0"), 836, 1, 800},
+    // 工位 4，18116-RM8S0：sheet2 明确值优先。
+    {4, ProductModel::Model88, QStringLiteral("18116-RM8S0"), 836, 1, 800},
+    {4, ProductModel::Model88R, QStringLiteral("18116-RM8S0"), 836, 1, 800},
+    {4, ProductModel::Model92, QStringLiteral("18116-RM8S0"), 836, 1, 800},
+    // 工位 5，18214-RM8S0：88=A10:F10，88R=A26:F26，92=K10:P10。
+    {5, ProductModel::Model88, QStringLiteral("18214-RM8S0"), 2000, 1, 2000},
+    {5, ProductModel::Model88R, QStringLiteral("18214-RM8S0"), 2000, 1, 2000},
+    {5, ProductModel::Model92, QStringLiteral("18214-RM8S0"), 2000, 1, 2000},
+    // 工位 6，18114-RM8S0：88=A9:F9，88R=A25:F25，92=K9:P9。
+    {6, ProductModel::Model88, QStringLiteral("18114-RM8S0"), 2000, 1, 2000},
+    {6, ProductModel::Model88R, QStringLiteral("18114-RM8S0"), 2000, 1, 2000},
+    {6, ProductModel::Model92, QStringLiteral("18114-RM8S0"), 2000, 1, 2000},
+    // 工位 7，18225-RM8S0：88=A8:F8，88R=A24:F24，92=K8:P8。
+    {7, ProductModel::Model88, QStringLiteral("18225-RM8S0"), 2000, 1, 2000},
+    {7, ProductModel::Model88R, QStringLiteral("18225-RM8S0"), 2000, 1, 2000},
+    {7, ProductModel::Model92, QStringLiteral("18225-RM8S0"), 2000, 1, 2000},
+    // 工位 8，18215-RM8S0：88=A7:F7，88R=A23:F23，92=K7:P7。
+    {8, ProductModel::Model88, QStringLiteral("18215-RM8S0"), 2000, 1, 2000},
+    {8, ProductModel::Model88R, QStringLiteral("18215-RM8S0"), 2000, 1, 2000},
+    {8, ProductModel::Model92, QStringLiteral("18215-RM8S0"), 2000, 1, 2000},
+    // 工位 9，18125-RM8S0：88=A6:F6，88R=A22:F22，92=K6:P6。
+    {9, ProductModel::Model88, QStringLiteral("18125-RM8S0"), 2000, 1, 2000},
+    {9, ProductModel::Model88R, QStringLiteral("18125-RM8S0"), 2000, 1, 2000},
+    {9, ProductModel::Model92, QStringLiteral("18125-RM8S0"), 2000, 1, 2000},
+    // 工位 10，18115-RM8S0：88=A5:F5，88R=A21:F21，92=K5:P5。
+    {10, ProductModel::Model88, QStringLiteral("18115-RM8S0"), 2000, 1, 2000},
+    {10, ProductModel::Model88R, QStringLiteral("18115-RM8S0"), 2000, 1, 2000},
+    {10, ProductModel::Model92, QStringLiteral("18115-RM8S0"), 2000, 1, 2000},
+    // 工位 11，18112-RM8S0：88=A4:F4，88R=A20:F20，92=K4:P4。
+    {11, ProductModel::Model88, QStringLiteral("18112-RM8S0"), 114, 1, 600},
+    {11, ProductModel::Model88R, QStringLiteral("18112-RM8S0"), 114, 1, 600},
+    {11, ProductModel::Model92, QStringLiteral("18112-RM8S0"), 114, 1, 600},
+    // 工位 12，18118-RM8S0：88=A14:F14，88R=A30:F30，92=K14:P14。
+    {12, ProductModel::Model88, QStringLiteral("18118-RM8S0"), 300, 1, 600},
+    {12, ProductModel::Model88R, QStringLiteral("18118-RM8S0"), 300, 1, 600},
+    {12, ProductModel::Model92, QStringLiteral("18118-RM8S0"), 300, 1, 600},
 };
 
 } // namespace shortageconfig_detail
@@ -122,13 +136,8 @@ inline bool materialConfigHasConfirmedThresholds(const MaterialConfig &config)
         && config.safetyStock > 0;
 }
 
-inline int usagePerProduct(const MaterialConfig &config, ProductionMode mode)
+inline int usagePerMode(ProductionMode mode)
 {
-    const UsageStrategy strategy = SHORTAGE_USAGE_STRATEGY;
-    if (strategy == UsageStrategy::Spreadsheet) {
-        return config.spreadsheetUsage;
-    }
-
     switch (mode) {
     case ProductionMode::L68:
     case ProductionMode::L69:
@@ -137,6 +146,15 @@ inline int usagePerProduct(const MaterialConfig &config, ProductionMode mode)
         return 1;
     }
     return 0;
+}
+
+inline int usagePerProduct(const MaterialConfig &config, ProductionMode mode)
+{
+    const UsageStrategy strategy = SHORTAGE_USAGE_STRATEGY;
+    if (strategy == UsageStrategy::Spreadsheet) {
+        return config.spreadsheetUsage;
+    }
+    return usagePerMode(mode);
 }
 
 inline QString productModelText(ProductModel product)

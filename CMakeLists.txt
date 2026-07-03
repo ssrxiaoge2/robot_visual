@@ -63,6 +63,10 @@ set(PROJECT_SOURCES
         src/shortageconfig.h
         src/shortagecalculator.cpp
         src/shortagecalculator.h
+        src/shortagetestpanel.cpp
+        src/shortagetestpanel.h
+        src/shortagetestsession.cpp
+        src/shortagetestsession.h
         src/shortagemonitor.cpp
         src/shortagemonitor.h
         src/palletscheduler.cpp
@@ -111,6 +115,84 @@ add_executable(shortage-monitor-test
 target_link_libraries(shortage-monitor-test PRIVATE Qt6::Test Qt6::Core Qt6::Network)
 target_include_directories(shortage-monitor-test PRIVATE src/)
 add_test(NAME shortage-monitor COMMAND shortage-monitor-test)
+
+add_executable(shortage-test-session-test
+    tests/test_shortagetestsession.cpp
+    src/shortagetestsession.cpp
+    src/shortagetestsession.h
+    src/shortagecalculator.cpp
+    src/shortagecalculator.h
+    src/shortageconfig.h
+    src/customSysScheduler.cpp
+    src/customSysScheduler.h
+)
+target_link_libraries(shortage-test-session-test PRIVATE Qt6::Test Qt6::Core Qt6::Network)
+target_include_directories(shortage-test-session-test PRIVATE src/)
+add_test(NAME shortage-test-session COMMAND shortage-test-session-test)
+
+set(HUAYAN_SDK_ROOT "${CMAKE_SOURCE_DIR}/3rd/HuaYansdk/HuayanRobotLibrary-C++-V1.0.15.0")
+
+add_executable(shortage-test-wiring-test
+    tests/test_shortagetestwiring.cpp
+    src/devicemanager.cpp
+    src/devicemanager.h
+    src/agvcontroller.cpp
+    src/agvcontroller.h
+    src/visionclient.cpp
+    src/visionclient.h
+    src/huayanScheduler.cpp
+    src/huayanScheduler.h
+    src/lineorchestrator.cpp
+    src/lineorchestrator.h
+    src/linemanager.cpp
+    src/linemanager.h
+    src/taskexecutor.cpp
+    src/taskexecutor.h
+    src/taskqueue.h
+    src/nscanscheduler.cpp
+    src/nscanscheduler.h
+    src/customSysScheduler.cpp
+    src/customSysScheduler.h
+    src/shortagecalculator.cpp
+    src/shortagecalculator.h
+    src/shortageconfig.h
+    src/shortagetestsession.cpp
+    src/shortagetestsession.h
+    src/palletscheduler.cpp
+    src/palletscheduler.h
+)
+target_link_libraries(shortage-test-wiring-test PRIVATE Qt6::Test Qt6::Core Qt6::Widgets Qt6::Network Qt6::SerialBus)
+target_include_directories(shortage-test-wiring-test PRIVATE src/)
+add_test(NAME shortage-test-wiring COMMAND shortage-test-wiring-test)
+set_tests_properties(shortage-test-wiring PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+target_include_directories(shortage-test-wiring-test PRIVATE "${HUAYAN_SDK_ROOT}/include")
+if(UNIX)
+    target_link_directories(shortage-test-wiring-test PRIVATE "${HUAYAN_SDK_ROOT}/Linux")
+    target_link_libraries(shortage-test-wiring-test PRIVATE "${HUAYAN_SDK_ROOT}/Linux/libHR_Pro.so")
+elseif(WIN32)
+    if(MSVC)
+        target_link_directories(shortage-test-wiring-test PRIVATE "${HUAYAN_SDK_ROOT}/MSVC")
+        target_link_libraries(shortage-test-wiring-test PRIVATE "${HUAYAN_SDK_ROOT}/MSVC/HR_Pro.lib")
+    elseif(MINGW)
+        target_link_directories(shortage-test-wiring-test PRIVATE "${HUAYAN_SDK_ROOT}/MinGW")
+        target_link_libraries(shortage-test-wiring-test PRIVATE "${HUAYAN_SDK_ROOT}/MinGW/libHR_Pro.dll.a")
+    endif()
+endif()
+
+add_executable(shortage-test-ui-test
+    tests/test_shortagetestui.cpp
+    src/shortagetestpanel.cpp
+    src/shortagetestpanel.h
+    src/deviceindicator.cpp
+    src/deviceindicator.h
+    src/shortageconfig.h
+    src/shortagecalculator.h
+)
+target_link_libraries(shortage-test-ui-test PRIVATE Qt6::Test Qt6::Core Qt6::Widgets)
+target_include_directories(shortage-test-ui-test PRIVATE src/)
+add_test(NAME shortage-test-ui COMMAND shortage-test-ui-test)
+set_tests_properties(shortage-test-ui PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # ── 奥比中光 SDK（仅 Linux 部署时链接，Windows 开发环境跳过）──
 if(UNIX)

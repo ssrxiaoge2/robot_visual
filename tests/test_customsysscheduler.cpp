@@ -7,6 +7,8 @@ class CustomSysSchedulerTest : public QObject
     Q_OBJECT
 
 private slots:
+    void defaultMesEndpointUsesVerifiedHost();
+    void defaultSchedulerUsesVerifiedMesEndpoint();
     void parseDayReply_success();
     void parseDayReply_error_data();
     void parseDayReply_error();
@@ -15,6 +17,20 @@ private slots:
     void parsePlcBitReply_error_data();
     void parsePlcBitReply_error();
 };
+
+void CustomSysSchedulerTest::defaultMesEndpointUsesVerifiedHost()
+{
+    QCOMPARE(CustomSysScheduler::mesDayEndpoint().toString(),
+             QStringLiteral("http://192.168.115.228:5084/api/MesData/day"));
+}
+
+void CustomSysSchedulerTest::defaultSchedulerUsesVerifiedMesEndpoint()
+{
+    CustomSysScheduler scheduler;
+    QCOMPARE(CustomSysScheduler::defaultEndpoint(),
+             CustomSysScheduler::mesDayEndpoint());
+    QCOMPARE(scheduler.endpoint(), CustomSysScheduler::mesDayEndpoint());
+}
 
 void CustomSysSchedulerTest::parseDayReply_success()
 {

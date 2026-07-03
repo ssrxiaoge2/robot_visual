@@ -39,9 +39,7 @@
 #include <QFormLayout>
 #include <QHeaderView>
 #include <QIntValidator>
-#include <QButtonGroup>
 #include <QMessageBox>
-#include <QRadioButton>
 #include <QScrollArea>
 #include <QSizePolicy>
 #include <QStringList>
@@ -321,30 +319,23 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_devMgr, &DeviceManager::nscanTestIdle,
             this, &MainWindow::onNScanIdle);
 
-    connect(m_devMgr, &DeviceManager::customSystemRequestStarted,
-            this, &MainWindow::onCustomSystemRequestStarted);
-    connect(m_devMgr, &DeviceManager::customSystemStatusChanged,
-            this, [this](bool ok, const QString &statusText) {
-        m_customSysVisualState = ok ? QStringLiteral("success") : QStringLiteral("error");
-        m_customSysIndicator->setStatus(
-            ok, ok ? QStringLiteral("连接正常") : statusText);
-        m_customSysInfoLabel->setText(
-            ok ? QStringLiteral("连接正常；HTTP 为无状态请求，读取数据会再次访问接口")
-               : QStringLiteral("连接失败：%1").arg(statusText));
-        m_customSysRawLabel->setText(QStringLiteral("原始 JSON 将打印到日志区"));
-        setCustomSystemInputsEnabled(true);
-        applyTheme(m_darkTheme);
-    });
-    connect(m_devMgr, &DeviceManager::customSystemDayDataReady,
-            this, &MainWindow::onCustomSystemDayDataReady);
-    connect(m_devMgr, &DeviceManager::customSystemRequestFailed,
-            this, &MainWindow::onCustomSystemRequestFailed);
-    connect(m_devMgr, &DeviceManager::shortageMonitorStatusChanged,
-            this, &MainWindow::onShortageMonitorStatusChanged);
-    connect(m_devMgr, &DeviceManager::shortageMonitorSampleUpdated,
-            this, &MainWindow::onShortageMonitorSampleUpdated);
-    connect(m_devMgr, &DeviceManager::shortageMonitorConsumptionUpdated,
-            this, &MainWindow::onShortageMonitorConsumptionUpdated);
+    if (m_shortageTestPanel) {
+        connect(m_devMgr, &DeviceManager::shortageTestStatusChanged,
+                m_shortageTestPanel, &ShortageTestPanel::setStatus);
+        connect(m_devMgr, &DeviceManager::shortageTestSampleUpdated,
+                m_shortageTestPanel, &ShortageTestPanel::setSample);
+        connect(m_devMgr, &DeviceManager::shortageTestInventoryUpdated,
+                m_shortageTestPanel, &ShortageTestPanel::setInventory);
+        connect(m_shortageTestPanel, &ShortageTestPanel::startTestRequested,
+                this, [this] {
+            DeviceManager::Config cfg;
+            buildConfig(cfg);
+            m_devMgr->setConfig(cfg);
+            m_devMgr->startShortageTest();
+        });
+        connect(m_shortageTestPanel, &ShortageTestPanel::stopTestRequested,
+                m_devMgr, &DeviceManager::stopShortageTest);
+    }
 
     // 补光灯切换结果 / 配置应用结果
     connect(m_devMgr, &DeviceManager::lightChanged,
@@ -960,111 +951,14 @@ void MainWindow::initNScanPanel(QVBoxLayout *leftPanel)
 }
 
 /**
- * @brief 初始化客户系统 REST API 通信测试面板。
+ * @brief 初始化缺料信号计算测试面板。
  *
- * 面板只通过 DeviceManager 发起请求；HTTP 和 JSON 解析由 CustomSysScheduler 处理。
+ * 面板只验证现场 MES/PLC 与 12 工位缺料计算，不包含主调度授权或来源切换。
  */
 void MainWindow::initCustomSystemPanel(QVBoxLayout *leftPanel)
 {
-    auto *group = new QGroupBox(QStringLiteral("缺料信号源"));
-    auto *layout = new QVBoxLayout(group);
-    layout->setSpacing(5);
-
-    auto *row1 = new QHBoxLayout();
-    m_customSysConnectBtn = new QPushButton(QStringLiteral("开始检测"));
-    m_customSysFetchBtn = new QPushButton(QStringLiteral("停止检测"));
-    m_customSysIndicator = new DeviceIndicator(QStringLiteral("现场系统"));
-    m_customSysIndicator->setStatus(false, QStringLiteral("模拟模式"));
-    m_customSysConnectBtn->setFixedHeight(28);
-    m_customSysFetchBtn->setFixedHeight(28);
-    row1->addWidget(m_customSysConnectBtn);
-    row1->addWidget(m_customSysFetchBtn);
-    row1->addStretch();
-    row1->addWidget(m_customSysIndicator);
-    layout->addLayout(row1);
-
-    m_shortageSourceGroup = new QButtonGroup(group);
-    m_shortageMockRadio = new QRadioButton(QStringLiteral("模拟缺料"));
-    m_shortageLiveRadio = new QRadioButton(QStringLiteral("现场系统"));
-    m_shortageSourceGroup->addButton(m_shortageMockRadio, 0);
-    m_shortageSourceGroup->addButton(m_shortageLiveRadio, 1);
-    m_shortageMockRadio->setChecked(true);
-
-    auto *sourceRow = new QHBoxLayout();
-    sourceRow->addWidget(m_shortageMockRadio);
-    sourceRow->addWidget(m_shortageLiveRadio);
-    sourceRow->addStretch();
-    layout->addLayout(sourceRow);
-
-    auto *line = new QFrame();
-    line->setFrameShape(QFrame::HLine);
-    line->setFrameShadow(QFrame::Sunken);
-    layout->addWidget(line);
-
-    auto *form = new QFormLayout();
-    form->setLabelAlignment(Qt::AlignRight | Qt::AlignTop);
-    m_customSysEndpointEdit = new QLineEdit(
-        CustomSysScheduler::defaultEndpoint().toString());
-    m_customSysEndpointEdit->setPlaceholderText(QStringLiteral("客户系统接口 URL"));
-    m_customSysEndpointEdit->setToolTip(QStringLiteral(
-        "现场电脑需先连接 WiFi WDAS_PA01；程序只验证该 HTTP 接口。"));
-    m_customSysEndpointEdit->hide();
-
-    m_customSysActualQtyEdit = new QLineEdit();
-    m_customSysActualQtyEdit->setReadOnly(true);
-    m_customSysActualQtyEdit->setPlaceholderText(QStringLiteral("尚未检测"));
-    m_shortageProductLabel = new QLabel(QStringLiteral("-"));
-    m_shortageModeLabel = new QLabel(QStringLiteral("-"));
-    m_shortageBitsLabel = new QLabel(QStringLiteral("-"));
-    m_shortageBitsLabel->setWordWrap(true);
-    m_customSysInfoLabel = new QLabel(QStringLiteral("模拟模式未启用现场轮询"));
-    m_customSysInfoLabel->setWordWrap(true);
-    m_customSysRawLabel = new QLabel(QStringLiteral("切换到现场系统后，点击开始检测才会轮询"));
-    m_customSysRawLabel->setWordWrap(true);
-    m_customSysRawLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    m_customSysRawLabel->setSizePolicy(QSizePolicy::Ignored, QSizePolicy::Preferred);
-    m_customSysRawLabel->setMaximumHeight(58);
-
-    form->addRow(QStringLiteral("actualQty:"), m_customSysActualQtyEdit);
-    form->addRow(QStringLiteral("产品:"), m_shortageProductLabel);
-    form->addRow(QStringLiteral("方式:"), m_shortageModeLabel);
-    form->addRow(QStringLiteral("L 位:"), m_shortageBitsLabel);
-    form->addRow(QStringLiteral("状态:"), m_customSysInfoLabel);
-    form->addRow(QStringLiteral("说明:"), m_customSysRawLabel);
-    layout->addLayout(form);
-
-    m_shortageStateTable = new QTableWidget(12, 5, group);
-    m_shortageStateTable->setHorizontalHeaderLabels(
-        {QStringLiteral("工位"),
-         QStringLiteral("累计"),
-         QStringLiteral("安全库存"),
-         QStringLiteral("每箱"),
-         QStringLiteral("待接收")});
-    m_shortageStateTable->verticalHeader()->setVisible(false);
-    m_shortageStateTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
-    m_shortageStateTable->setSelectionMode(QAbstractItemView::NoSelection);
-    m_shortageStateTable->setFocusPolicy(Qt::NoFocus);
-    m_shortageStateTable->setAlternatingRowColors(true);
-    m_shortageStateTable->setMinimumHeight(220);
-    m_shortageStateTable->horizontalHeader()->setStretchLastSection(true);
-    m_shortageStateTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    for (int row = 0; row < 12; ++row) {
-        m_shortageStateTable->setItem(row, 0, new QTableWidgetItem(QStringLiteral("工位%1").arg(row + 1)));
-        for (int column = 1; column < 5; ++column) {
-            m_shortageStateTable->setItem(row, column, new QTableWidgetItem(QStringLiteral("-")));
-        }
-    }
-    layout->addWidget(m_shortageStateTable);
-
-    connect(m_customSysConnectBtn, &QPushButton::clicked,
-            this, &MainWindow::onCustomSystemConnect);
-    connect(m_customSysFetchBtn, &QPushButton::clicked,
-            this, &MainWindow::onCustomSystemFetch);
-    connect(m_shortageSourceGroup, &QButtonGroup::idClicked,
-            this, [this](int) { onShortageSourceChanged(); });
-
-    leftPanel->addWidget(group);
-    updateShortageSourceUi();
+    m_shortageTestPanel = new ShortageTestPanel(this);
+    leftPanel->addWidget(m_shortageTestPanel);
 }
 
 
@@ -1497,26 +1391,6 @@ void MainWindow::applyTheme(bool dark)
               "border-radius:3px; padding:3px; font-family:monospace; font-size:10px;");
     }
 
-    if (m_customSysActualQtyEdit) {
-        QString stateColor = dark ? QStringLiteral("#b8b8b8")
-                                  : QStringLiteral("#444444");
-        if (m_customSysVisualState == QStringLiteral("running"))
-            stateColor = dark ? QStringLiteral("#66b7ff") : QStringLiteral("#0067b8");
-        else if (m_customSysVisualState == QStringLiteral("success"))
-            stateColor = dark ? QStringLiteral("#65d887") : QStringLiteral("#107c10");
-        else if (m_customSysVisualState == QStringLiteral("error"))
-            stateColor = dark ? QStringLiteral("#ff7b72") : QStringLiteral("#c42b1c");
-
-        m_customSysActualQtyEdit->setStyleSheet(QStringLiteral(
-            "QLineEdit { color:%1; font-weight:bold; }").arg(stateColor));
-        m_customSysInfoLabel->setStyleSheet(QStringLiteral(
-            "color:%1; font-weight:bold;").arg(stateColor));
-        m_customSysRawLabel->setStyleSheet(dark
-            ? "color:#9fc5e8; background:#202226; border:1px solid #444;"
-              "border-radius:3px; padding:3px; font-family:monospace; font-size:10px;"
-            : "color:#35536f; background:#f7f7f7; border:1px solid #ccc;"
-              "border-radius:3px; padding:3px; font-family:monospace; font-size:10px;");
-    }
 }
 
 // ── 读取 UI 控件 → Config 结构体 ────────────────────────────
@@ -1534,8 +1408,7 @@ void MainWindow::buildConfig(DeviceManager::Config &cfg) const
     cfg.cameraIP   = m_editCameraIP->text().trimmed();
     cfg.cameraPort = 8080; // 视觉服务固定端口（Flask HTTP）
     cfg.scannerIP  = m_editScannerIP->text().trimmed();
-    if (m_customSysEndpointEdit)
-        cfg.customSysEndpoint = m_customSysEndpointEdit->text().trimmed();
+    cfg.customSysEndpoint = CustomSysScheduler::defaultEndpoint().toString();
     // agvPort 默认 502，无对应 UI 控件（Modbus 标准端口）
     // 机械臂 SDK 复用 robotIP（端口固定 10003）
     cfg.huayanIP   = cfg.robotIP;
@@ -1768,16 +1641,6 @@ void MainWindow::setNScanInputsEnabled(bool enabled)
     m_nscanTriggerBtn->setEnabled(enabled);
 }
 
-void MainWindow::onCustomSystemConnect()
-{
-    DeviceManager::Config cfg;
-    buildConfig(cfg);
-    m_devMgr->setConfig(cfg);
-    m_devMgr->startShortageMonitoring();
-    updateShortageSourceUi();
-}
-
-
 void MainWindow::onPalletConfig()
 {
     if (m_palletDialog) {
@@ -1798,185 +1661,6 @@ void MainWindow::onPalletConfig()
     dialog->show();
     dialog->raise();
     dialog->activateWindow();
-}
-
-void MainWindow::onCustomSystemFetch()
-{
-    m_devMgr->stopShortageMonitoring();
-    updateShortageSourceUi();
-}
-
-void MainWindow::onShortageSourceChanged()
-{
-    if (!m_shortageMockRadio || !m_shortageLiveRadio || !m_devMgr) {
-        return;
-    }
-
-    if (m_shortageMockRadio->isChecked()) {
-        m_devMgr->stopShortageMonitoring();
-        m_customSysIndicator->setStatus(false, QStringLiteral("模拟模式"));
-        m_customSysInfoLabel->setText(QStringLiteral("模拟模式未启用现场轮询"));
-        m_customSysRawLabel->setText(QStringLiteral("切换到现场系统后，点击开始检测才会轮询"));
-    }
-    updateShortageSourceUi();
-}
-
-void MainWindow::onShortageMonitorStatusChanged(const QString &text, bool healthy)
-{
-    if (!m_customSysIndicator || !m_customSysInfoLabel) {
-        return;
-    }
-    m_customSysIndicator->setStatus(healthy, text);
-    m_customSysInfoLabel->setText(text);
-    updateShortageSourceUi();
-}
-
-void MainWindow::onShortageMonitorSampleUpdated(qint64 actualQty,
-                                                ProductModel product,
-                                                ProductionMode mode,
-                                                QHash<QString, bool> bits)
-{
-    if (m_customSysActualQtyEdit) {
-        m_customSysActualQtyEdit->setText(QString::number(actualQty));
-    }
-    if (m_shortageProductLabel) {
-        m_shortageProductLabel->setText(productModelText(product));
-    }
-    if (m_shortageModeLabel) {
-        m_shortageModeLabel->setText(productionModeText(mode));
-    }
-    if (m_shortageBitsLabel) {
-        QStringList parts;
-        for (const QString &name : {QStringLiteral("L68"), QStringLiteral("L69"),
-                                    QStringLiteral("L71"), QStringLiteral("L72"),
-                                    QStringLiteral("L73"), QStringLiteral("L1998")}) {
-            parts.append(QStringLiteral("%1=%2").arg(name, bits.value(name) ? QStringLiteral("1")
-                                                                            : QStringLiteral("0")));
-        }
-        m_shortageBitsLabel->setText(parts.join(QStringLiteral("  ")));
-    }
-}
-
-void MainWindow::onShortageMonitorConsumptionUpdated(QList<StationConsumption> stations)
-{
-    if (!m_shortageStateTable) {
-        return;
-    }
-
-    for (const StationConsumption &station : stations) {
-        const int row = station.stationId - 1;
-        if (row < 0 || row >= m_shortageStateTable->rowCount()) {
-            continue;
-        }
-        m_shortageStateTable->item(row, 1)->setText(QString::number(station.accumulated));
-        m_shortageStateTable->item(row, 2)->setText(
-            station.safetyStock > 0 ? QString::number(station.safetyStock) : QStringLiteral("待补"));
-        m_shortageStateTable->item(row, 3)->setText(
-            station.boxQuantity > 0 ? QString::number(station.boxQuantity) : QStringLiteral("待补"));
-        m_shortageStateTable->item(row, 4)->setText(
-            station.awaitingAcceptance ? QStringLiteral("是") : QStringLiteral("否"));
-    }
-}
-
-void MainWindow::onCustomSystemRequestStarted(const QString &operation)
-{
-    setCustomSystemInputsEnabled(false);
-    m_customSysVisualState = QStringLiteral("running");
-    m_customSysIndicator->setStatus(false, operation + QStringLiteral("中..."));
-    m_customSysInfoLabel->setText(QStringLiteral("等待客户系统返回..."));
-    m_customSysRawLabel->setText(QStringLiteral("原始 JSON 将打印到日志区"));
-    m_customSysRawLabel->setToolTip(QString());
-    if (operation.contains(QStringLiteral("读取")))
-        m_customSysActualQtyEdit->setPlaceholderText(QStringLiteral("读取中..."));
-    applyTheme(m_darkTheme);
-}
-
-void MainWindow::onCustomSystemDayDataReady(const CustomSysScheduler::DayRecord &record,
-                                            const QString &rawJson)
-{
-    setCustomSystemInputsEnabled(true);
-    m_customSysVisualState = QStringLiteral("success");
-    m_customSysIndicator->setStatus(true, QStringLiteral("读取成功"));
-    m_customSysActualQtyEdit->setText(QString::number(record.actualQty));
-    m_customSysActualQtyEdit->setToolTip(QStringLiteral("客户接口 actualQty 字段"));
-
-    const QString line = record.lineName.isEmpty() ? record.lineId : record.lineName;
-    const QString dateText = record.statDate.isValid()
-        ? record.statDate.toString(QStringLiteral("yyyy-MM-dd"))
-        : QStringLiteral("-");
-    const QString parsedSummary = QStringLiteral("line=%1 date=%2 plan=%3 ok=%4 ng=%5")
-                                      .arg(line.isEmpty() ? QStringLiteral("-") : line)
-                                      .arg(dateText)
-                                      .arg(record.planQty)
-                                      .arg(record.okQty)
-                                      .arg(record.ngQty);
-    m_customSysInfoLabel->setText(parsedSummary);
-
-    m_customSysRawLabel->setText(QStringLiteral("完整原始 JSON 已打印到日志区"));
-    m_customSysRawLabel->setToolTip(rawJson.isEmpty() ? QStringLiteral("无原始返回") : rawJson);
-    log(QStringLiteral("[客户系统] 解析摘要：actualQty=%1，%2")
-            .arg(record.actualQty)
-            .arg(parsedSummary));
-    log(QStringLiteral("[客户系统] 原始返回：%1")
-            .arg(rawJson.isEmpty() ? QStringLiteral("<empty>") : rawJson));
-    applyTheme(m_darkTheme);
-}
-
-void MainWindow::onCustomSystemRequestFailed(const QString &operation,
-                                             const QString &errorMessage,
-                                             const QString &rawJson)
-{
-    setCustomSystemInputsEnabled(true);
-    m_customSysVisualState = QStringLiteral("error");
-    m_customSysIndicator->setStatus(false, QStringLiteral("请求失败"));
-    m_customSysInfoLabel->setText(QStringLiteral("%1失败：%2").arg(operation, errorMessage));
-    m_customSysInfoLabel->setToolTip(errorMessage);
-    // 失败时不覆盖旧 actualQty，避免把上一次成功数据误认为本次结果。
-    m_customSysActualQtyEdit->setPlaceholderText(QStringLiteral("读取失败"));
-    m_customSysRawLabel->setText(rawJson.isEmpty()
-        ? QStringLiteral("无原始 JSON，错误详见日志")
-        : QStringLiteral("失败时原始返回已打印到日志区"));
-    m_customSysRawLabel->setToolTip(rawJson.isEmpty() ? errorMessage : rawJson);
-    log(QStringLiteral("[客户系统] %1失败：%2").arg(operation, errorMessage));
-    if (!rawJson.isEmpty())
-        log(QStringLiteral("[客户系统] 失败原始返回：%1").arg(rawJson));
-    applyTheme(m_darkTheme);
-}
-
-void MainWindow::setCustomSystemInputsEnabled(bool enabled)
-{
-    if (m_customSysEndpointEdit)
-        m_customSysEndpointEdit->setEnabled(enabled);
-    if (m_shortageMockRadio)
-        m_shortageMockRadio->setEnabled(enabled);
-    if (m_shortageLiveRadio)
-        m_shortageLiveRadio->setEnabled(enabled);
-    if (m_customSysConnectBtn)
-        m_customSysConnectBtn->setEnabled(enabled);
-    if (m_customSysFetchBtn)
-        m_customSysFetchBtn->setEnabled(enabled);
-}
-
-void MainWindow::updateShortageSourceUi()
-{
-    const bool liveMode = m_shortageLiveRadio && m_shortageLiveRadio->isChecked();
-    const bool running = m_devMgr && m_devMgr->shortageMonitor()
-        && m_devMgr->shortageMonitor()->isRunning();
-    const LineSystemState lineState = (m_devMgr && m_devMgr->lineManager())
-        ? m_devMgr->lineManager()->state()
-        : LineSystemState::Idle;
-    const bool stationButtonsEnabled = !liveMode && lineState != LineSystemState::Error;
-
-    for (QPushButton *button : std::as_const(m_stationButtons)) {
-        button->setEnabled(stationButtonsEnabled);
-    }
-
-    if (m_customSysConnectBtn) {
-        m_customSysConnectBtn->setEnabled(liveMode && !running);
-    }
-    if (m_customSysFetchBtn) {
-        m_customSysFetchBtn->setEnabled(liveMode && running);
-    }
 }
 
 /// "手眼标定矩阵"按钮回调：打开向导，用户确认后将矩阵写入视觉系统
@@ -2059,7 +1743,9 @@ void MainWindow::updateLineSystemState(LineSystemState state, const QString &tex
         m_lineStopBtn->setEnabled(canStop);
     if (m_lineResetBtn)
         m_lineResetBtn->setEnabled(canReset);
-    updateShortageSourceUi();
+    for (QPushButton *button : std::as_const(m_stationButtons)) {
+        button->setEnabled(state != LineSystemState::Error);
+    }
 
     if (state != LineSystemState::Error && m_lineAlarmLabel) {
         m_lineAlarmLabel->setText(QStringLiteral("无"));

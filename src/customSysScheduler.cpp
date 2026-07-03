@@ -15,7 +15,8 @@ namespace {
 constexpr int kRequestTimeoutMs = 3000;
 
 // MES/PLC 固定端点集中定义在解析层，主线程只传递轮次和地址范围。
-const char *kMesDayEndpoint = "http://192.168.115.229:5084/api/MesData/day";
+// .228 是客户现场实测可用的 MES 地址，测试面板与后续会话实现都必须复用它。
+const char *kMesDayEndpoint = "http://192.168.115.228:5084/api/MesData/day";
 const char *kPlcBitEndpoint = "http://192.168.115.228:5084/api/PlcData/GetLBitRegister";
 
 // 这些固定地址属于协议层常量，供主线程后续接线时直接复用。
@@ -56,12 +57,18 @@ void CustomSysScheduler::setEndpoint(const QUrl &endpoint)
 
 QUrl CustomSysScheduler::defaultEndpoint()
 {
-    return defaultMesDayEndpoint();
+    return mesDayEndpoint();
+}
+
+QUrl CustomSysScheduler::mesDayEndpoint()
+{
+    // .228 已由现场联调实测确认，禁止在其他调用点各自维护 MES 地址。
+    return QUrl(QString::fromLatin1(kMesDayEndpoint));
 }
 
 QUrl CustomSysScheduler::defaultMesDayEndpoint()
 {
-    return QUrl(QString::fromLatin1(kMesDayEndpoint));
+    return mesDayEndpoint();
 }
 
 QUrl CustomSysScheduler::defaultPlcBitEndpoint()
@@ -83,6 +90,7 @@ void CustomSysScheduler::fetchMesDayData(quint64 roundId)
 {
     RequestContext context;
     context.operation = Operation::FetchMesDayData;
+    // roundId 只由上层会话解释；调度器负责随请求发送并在回调中原样带回。
     context.roundId = roundId;
     context.url = m_endpoint;
     sendGet(context);
@@ -107,6 +115,7 @@ void CustomSysScheduler::fetchPlcBits(quint64 roundId, int startAddress, int len
 
     RequestContext context;
     context.operation = Operation::FetchPlcBits;
+    // roundId 是上层轮询会话透传字段，调度器不改写它，直接用于回调聚合。
     context.roundId = roundId;
     context.startAddress = startAddress;
     context.length = length;

@@ -232,23 +232,14 @@ DeviceManager::DeviceManager(QObject *parent)
     connect(lineScanWorker, &NScanWorker::finished,
             m_lineManager, &LineManager::onScanFinished, Qt::QueuedConnection);
 
-    m_shortageMonitor = new ShortageMonitor(m_customSysScheduler, this);
-    connect(m_shortageMonitor, &ShortageMonitor::logMessage,
-            this, &DeviceManager::logMessage);
-    connect(m_shortageMonitor, &ShortageMonitor::statusChanged,
-            this, &DeviceManager::shortageMonitorStatusChanged);
-    connect(m_shortageMonitor, &ShortageMonitor::sampleUpdated,
-            this, &DeviceManager::shortageMonitorSampleUpdated);
-    connect(m_shortageMonitor, &ShortageMonitor::consumptionUpdated,
-            this, &DeviceManager::shortageMonitorConsumptionUpdated);
-    connect(m_shortageMonitor, &ShortageMonitor::shortageRequested,
-            this, [this](int stationId) {
-        const bool accepted = m_lineManager
-            && m_lineManager->reportShortage(stationId, TaskSource::CustomerSystem);
-        if (m_shortageMonitor) {
-            m_shortageMonitor->confirmShortageAccepted(stationId, accepted);
-        }
-    });
+    // 现场缺料测试只验证 MES/PLC 通信和 12 工位计算，不允许接入 LineManager/FIFO。
+    m_shortageTestSession = new ShortageTestSession(m_customSysScheduler, this);
+    connect(m_shortageTestSession, &ShortageTestSession::statusChanged,
+            this, &DeviceManager::shortageTestStatusChanged);
+    connect(m_shortageTestSession, &ShortageTestSession::sampleUpdated,
+            this, &DeviceManager::shortageTestSampleUpdated);
+    connect(m_shortageTestSession, &ShortageTestSession::inventoryUpdated,
+            this, &DeviceManager::shortageTestInventoryUpdated);
 
     m_lineOrch = new LineOrchestrator(m_agvCtrl, m_huayanScheduler, this);
     // 编排器请求派单 → 经映射表解析后下发（复用 dispatchAgv）
@@ -403,19 +394,19 @@ void DeviceManager::fetchCustomSystemDayData()
     m_customSysScheduler->fetchDayData();
 }
 
-void DeviceManager::startShortageMonitoring()
+void DeviceManager::startShortageTest()
 {
-    if (!m_customSysScheduler || !m_shortageMonitor) {
+    if (!m_customSysScheduler || !m_shortageTestSession) {
         return;
     }
     m_customSysScheduler->setEndpoint(QUrl(m_cfg.customSysEndpoint.trimmed()));
-    m_shortageMonitor->start();
+    m_shortageTestSession->start();
 }
 
-void DeviceManager::stopShortageMonitoring()
+void DeviceManager::stopShortageTest()
 {
-    if (m_shortageMonitor) {
-        m_shortageMonitor->stop();
+    if (m_shortageTestSession) {
+        m_shortageTestSession->stop();
     }
 }
 

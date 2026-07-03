@@ -14,17 +14,16 @@
 #include <QVBoxLayout>
 
 #include "deviceindicator.h"
-#include "workflowwidget.h"
 #include "devicemanager.h"
+#include "shortagetestpanel.h"
 #include "themeswitch.h"
+#include "workflowwidget.h"
 #include "agvcontroller.h"
 
 class HandEyeDialog;
 class HuayanScheduler;
 class PalletParamDialog;
 class PalletScheduler;
-class QButtonGroup;
-class QRadioButton;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -54,23 +53,8 @@ private slots:
     void onNScanClear();
     void onNScanFinished(const NScanScheduler::ScanResult &result);
     void onNScanIdle();
-    void onCustomSystemConnect();
-    void onCustomSystemFetch();
-    void onShortageSourceChanged();
     // 打开空箱码垛配置窗口；窗口只做配置/仿真，不启动真实机械臂流程。
     void onPalletConfig();
-    void onCustomSystemRequestStarted(const QString &operation);
-    void onCustomSystemDayDataReady(const CustomSysScheduler::DayRecord &record,
-                                    const QString &rawJson);
-    void onCustomSystemRequestFailed(const QString &operation,
-                                     const QString &errorMessage,
-                                     const QString &rawJson);
-    void onShortageMonitorStatusChanged(const QString &text, bool healthy);
-    void onShortageMonitorSampleUpdated(qint64 actualQty,
-                                        ProductModel product,
-                                        ProductionMode mode,
-                                        QHash<QString, bool> bits);
-    void onShortageMonitorConsumptionUpdated(QList<StationConsumption> stations);
     void onHandEyeCalib();
     void onHuayanConnect();
     void onHuayanDisconnect();
@@ -112,8 +96,6 @@ private:
     void refreshResolvedLabel();
     void updateAgvMonitor(const AgvMonitorData &d);
     void setNScanInputsEnabled(bool enabled);
-    void setCustomSystemInputsEnabled(bool enabled);
-    void updateShortageSourceUi();
     void updateLineSystemState(LineSystemState state, const QString &text); ///< 只更新状态/报警控件。
     void updateLineQueue(const QList<Task> &tasks);                         ///< 只展示未完成任务快照。
     void updateLineCurrentTask(const Task &task);                           ///< 更新当前任务和最近结果文案。
@@ -200,22 +182,8 @@ private:
     int              m_nscanSuccessCount      = 0;
     QString          m_nscanVisualState       = QStringLiteral("idle");
 
-    // ── 客户系统通信测试面板 ────────────────────────────────
-    QLineEdit       *m_customSysEndpointEdit  = nullptr;
-    QPushButton     *m_customSysConnectBtn    = nullptr;
-    QPushButton     *m_customSysFetchBtn      = nullptr;
-    DeviceIndicator *m_customSysIndicator     = nullptr;
-    QButtonGroup    *m_shortageSourceGroup    = nullptr;
-    QRadioButton    *m_shortageMockRadio      = nullptr;
-    QRadioButton    *m_shortageLiveRadio      = nullptr;
-    QLineEdit       *m_customSysActualQtyEdit = nullptr;
-    QLabel          *m_customSysInfoLabel     = nullptr;
-    QLabel          *m_customSysRawLabel      = nullptr;
-    QLabel          *m_shortageProductLabel   = nullptr;
-    QLabel          *m_shortageModeLabel      = nullptr;
-    QLabel          *m_shortageBitsLabel      = nullptr;
-    QTableWidget    *m_shortageStateTable     = nullptr;
-    QString          m_customSysVisualState   = QStringLiteral("idle");
+    // ── 缺料信号计算测试面板：只展示测试状态，不做现场缺料授权 ─────
+    ShortageTestPanel *m_shortageTestPanel = nullptr;
 
     // ── 空箱码垛配置面板：只持有配置入口和当前打开的单例对话框 ─────────
     QPushButton *m_btnPalletConfig = nullptr;
