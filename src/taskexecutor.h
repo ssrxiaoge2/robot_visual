@@ -45,6 +45,19 @@ public slots:
 signals:
     /// 任一任务步骤/文案变化时发出完整任务快照。
     void taskUpdated(const Task &task);
+    /**
+     * @brief ArmUnload 的完整机械臂倒料阶段成功后立刻发出一次。
+     *
+     * 修改前：外部只能等整个任务成功，无法知道“物料已经真实进入工位”的更早事实。
+     * 修改后：在不改变既有状态流的前提下，把“倒料已发生”作为独立事实暴露给上层。
+     *
+     * 这个信号的唯一合法触发点只能是 ArmUnload -> StowAfterUnload 的既有成功转换：
+     * - 更早发出会把“尚未完成实际倒料”误判为已补料；
+     * - 更晚发出会把码垛/收姿态失败错误地和倒料事实绑在一起。
+     *
+     * 它只表示“料已经倒入工位”，不表示整任务成功，也不意味着 FIFO 可以由此被改写。
+     */
+    void materialUnloaded(const Task &task);
     /// 全流程成功完成（含码垛 commit 和最终收姿态）。
     void taskSucceeded(const Task &task);
     /// 任务级失败且安全收姿态成功；LineManager 可继续下一任务。

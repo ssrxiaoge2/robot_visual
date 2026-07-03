@@ -790,6 +790,14 @@ PLC 响应契约为 `{"success":true,"data":[{"address":"L71","value":true}],"ti
 
 ### 19.8 验收与注释
 
+#### 2026-07-02 实现回填
+
+- 任务 19-22 已按开发版范围落地到 `CustomSysScheduler`、`ShortageCalculator`、`ShortageMonitor`、`LineManager`、`DeviceManager` 和 `MainWindow`。
+- 默认策略保持为 `SHORTAGE_USAGE_STRATEGY = UsageStrategy::PlcMode`，监听周期固定 `5000ms`、单轮超时固定 `3000ms`，与本节设计保持一致。
+- 任务 17 所需的 12 工位 × 3 产品 `boxQuantity / spreadsheetUsage / safetyStock` 现场确认值未随仓库提供，当前 `src/shortageconfig.h` 先写入保守占位值 `0`；这意味着开发版不会基于未确认阈值自动派单，待现场数值确认后再替换。
+- 新增静态回归脚本 `scripts/test_shortage_source_ui.py`、`tests/test_shortage_line_integration.py`，用于在缺少现场网络和编译器时，先验证 UI 接线与 FIFO 接线不回退。
+- 当前文档只回填已完成的离线实现与验证边界；真实网络、60 秒连续运行、PLC 三选一和现场自动入队仍需到客户现场逐项验收，不能用离线结果替代。
+
 自动验证覆盖 MES/PLC 解析、失败契约、地址/类型错误、两种策略、sheet2 回退、首次基线、正常增量、多阈值及余数、十二工位独立、工位3/4独立、产品/方式切换、`actualQty` 清零、断线恢复、FIFO 拒收/接收、模式切换不清 FIFO、同轮聚合/超时/过期响应。现场联调覆盖真实四请求、5 秒监听、切换、缺料入队、来源显示和模式互斥。离线通过不代表十二工位现场验收完成。
 
 新增类、枚举、结构体、配置、宏、成员、信号槽和状态跳转必须按第 16 节写详尽中文注释。每个实施任务单列源码注释要求与注释验收清单；注释与实现不一致时不得完成或申请提交。

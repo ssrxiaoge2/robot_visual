@@ -28,6 +28,8 @@ LineManager::LineManager(AgvController *agv,
             this, &LineManager::onExecutorTaskFailed);
     connect(m_executor, &TaskExecutor::systemError,
             this, &LineManager::onExecutorSystemError);
+    connect(m_executor, &TaskExecutor::materialUnloaded,
+            this, &LineManager::materialUnloaded);
     connect(m_executor, &TaskExecutor::logMessage,
             this, &LineManager::logMessage);
     connect(m_executor, &TaskExecutor::agvDispatchRequested,
@@ -83,15 +85,11 @@ void LineManager::start()
         return;
     }
 
-    // Running 同时表示“执行任务”和“已启动但等待任务”；是否忙碌由 executor 区分。
     setState(LineSystemState::Running, QStringLiteral("等待缺料"));
-
     if (m_queue.hasPending()) {
         tryStartNext();
         return;
     }
-
-    // LM1 是空闲待机点，不是每次任务链路的强制起点；只有当前没有待执行任务时才回站待机。
     returnHomeIfNeeded();
 }
 
@@ -103,8 +101,6 @@ void LineManager::stop()
     }
 
     const QString reason = QStringLiteral("人工 Stop 急停");
-
-    // 现场需要人工介入，所以清空队列并禁止继续派单。
     if (m_currentTask.taskId != 0 && m_currentTask.state == TaskState::Running) {
         Task canceled = m_currentTask;
         canceled.state = TaskState::Canceled;
@@ -113,12 +109,12 @@ void LineManager::stop()
         canceled.statusText = QStringLiteral("人工 Stop，当前任务已取消");
         canceled.lastError = reason;
         setCurrentTask(canceled);
+        emit taskFinished(canceled);
     } else {
         clearCurrentTask();
     }
 
     stopReturnHomeTracking();
-
     if (m_agv) {
         m_agv->cancelNavigation();
     }
@@ -151,39 +147,46 @@ void LineManager::resetError()
     emit logMessage(QStringLiteral("[LineManager] 已复位到 Idle，等待重新 Start"));
 }
 
-void LineManager::reportShortage(int stationId)
+bool LineManager::reportShortage(int stationId, TaskSource source)
+{
+    return reportShortageWithId(stationId, source) != 0;
+}
+
+quint64 LineManager::reportShortageWithId(int stationId, TaskSource source)
 {
     if (stationId < 1 || stationId > 12) {
         emit logMessage(QStringLiteral("[LineManager] 忽略非法缺料工位：%1").arg(stationId));
-        return;
+        return 0;
     }
 
     if (m_state == LineSystemState::Error) {
         emit logMessage(QStringLiteral("[LineManager] 系统报警中，拒绝工位 %1 的缺料请求").arg(stationId));
-        return;
+        return 0;
     }
 
-    // 每次点击都生成独立任务，不按工位去重；客户可能连续需要多个料箱。
-    const Task task = m_queue.enqueue(stationId, TaskSource::UiMock);
-    Q_UNUSED(task);
-
+    // 这里只在既有 enqueue/tryStartNext 流程外补充 taskId 回传和入队事实通知，
+    // 不增加去重、不改变 FIFO 顺序，也不改写 Idle/Running/ReturningHome 分支。
+    const Task task = m_queue.enqueue(stationId, source);
+    emit taskEnqueued(task);
     emitQueueChanged();
-    emit logMessage(QStringLiteral("工位%1已加入送料队列").arg(stationId));
+    emit logMessage(QStringLiteral("工位%1已加入送料队列，来源：%2")
+                        .arg(stationId)
+                        .arg(taskSourceText(source)));
 
     if (m_state == LineSystemState::Idle) {
-        return;
+        return task.taskId;
     }
 
     if (m_state == LineSystemState::ReturningHome) {
-        // 新任务优先于空闲回站；取消回 LM1 是正常调度切换，不属于 AGV 故障。
         cancelReturnHomeForNewTask();
         tryStartNext();
-        return;
+        return task.taskId;
     }
 
     if (m_state == LineSystemState::Running && !m_executor->isBusy()) {
         tryStartNext();
     }
+    return task.taskId;
 }
 
 void LineManager::onScanFinished(const NScanScheduler::ScanResult &result)
@@ -207,9 +210,8 @@ void LineManager::onExecutorTaskSucceeded(const Task &task)
         return;
     }
 
+    emit taskFinished(task);
     emit logMessage(QStringLiteral("工位%1送料完成").arg(task.stationId));
-
-    // 连续任务之间不回 LM1，直接启动队首可减少无效往返。
     if (m_queue.hasPending()) {
         tryStartNext();
         return;
@@ -225,10 +227,8 @@ void LineManager::onExecutorTaskFailed(const Task &task, const QString &reason)
         return;
     }
 
-    // 任务失败只影响当前单，不影响后续 FIFO 调度；后面有单就继续，没有单再回 LM1。
+    emit taskFinished(task);
     emit logMessage(QStringLiteral("工位%1送料失败：%2").arg(task.stationId).arg(reason));
-
-    // 能走到此信号说明 TaskExecutor 已成功完成安全收姿态，因此允许继续队列。
     if (m_queue.hasPending()) {
         tryStartNext();
         return;
@@ -241,11 +241,9 @@ void LineManager::onExecutorTaskFailed(const Task &task, const QString &reason)
 void LineManager::onExecutorSystemError(const Task &task, const QString &reason)
 {
     Q_UNUSED(task);
-
     if (m_manualStopInProgress) {
         return;
     }
-
     enterError(reason);
 }
 
@@ -253,7 +251,6 @@ void LineManager::onAgvMonitorUpdated(const AgvMonitorData &data)
 {
     m_lastAgvMonitor = data;
     m_hasAgvMonitor = true;
-
     if (!m_returnHomeActive) {
         return;
     }
@@ -266,14 +263,10 @@ void LineManager::onAgvMonitorUpdated(const AgvMonitorData &data)
     if (data.navStatus == static_cast<quint16>(AgvController::NavStatus::Failed)
         || data.navStatus == static_cast<quint16>(AgvController::NavStatus::Canceled)
         || data.navStatus == static_cast<quint16>(AgvController::NavStatus::Timeout)) {
-        static const char *kStatusText[] = {"", "", "", "", "", "失败", "取消", "超时"};
-        enterError(QStringLiteral("AGV 回 LM1 %1（navStatus=%2）")
-                       .arg(QString::fromUtf8(kStatusText[data.navStatus]))
-                       .arg(data.navStatus));
+        enterError(QStringLiteral("AGV 回 LM1 失败，navStatus=%1").arg(data.navStatus));
         return;
     }
 
-    // 与任务导航相同：必须先看到本次回站开始运动，不能消费上一单残留 Arrived。
     if (!m_returnHomeSeenMoving) {
         return;
     }
@@ -292,7 +285,6 @@ void LineManager::onAgvErrorOccurred(const QString &message)
     if (!m_returnHomeActive) {
         return;
     }
-
     enterError(QStringLiteral("AGV 回 LM1 通信错误：%1").arg(message));
 }
 
@@ -301,8 +293,7 @@ void LineManager::onReturnHomeTimeout()
     if (!m_returnHomeActive) {
         return;
     }
-
-    enterError(QStringLiteral("AGV 回 LM1 超时（%1 ms）").arg(kReturnHomeTimeoutMs));
+    enterError(QStringLiteral("AGV 回 LM1 超时：%1 ms").arg(kReturnHomeTimeoutMs));
 }
 
 void LineManager::setState(LineSystemState state, const QString &text)
@@ -334,19 +325,16 @@ void LineManager::tryStartNext()
     if (m_state == LineSystemState::Error || m_state == LineSystemState::Idle) {
         return;
     }
-
     if (m_executor->isBusy() || !m_queue.hasPending()) {
         return;
     }
-
     if (m_returnHomeActive) {
         cancelReturnHomeForNewTask();
     }
 
     setState(LineSystemState::Running, QStringLiteral("正在送料"));
-
-    // takeNext() 严格取 FIFO 队首，并把该副本标记为 Running。
     Task nextTask = m_queue.takeNext();
+    emit taskStarted(nextTask);
     emit logMessage(QStringLiteral("工位%1开始送料").arg(nextTask.stationId));
     m_executor->start(nextTask);
 }
@@ -356,23 +344,20 @@ void LineManager::returnHomeIfNeeded()
     if (m_state == LineSystemState::Error || m_state == LineSystemState::Idle) {
         return;
     }
-
     if (m_executor->isBusy() || m_queue.hasPending()) {
         return;
     }
-
     if (!m_agv) {
         enterError(QStringLiteral("LineManager 未注入 AGV，无法回 LM1"));
         return;
     }
 
-    // 已经物理位于 LM1 且没有活动导航时无需重复派单，直接保持等待缺料。
     if (m_hasAgvMonitor
         && m_lastAgvMonitor.curStation == kHomeLm
         && m_lastAgvMonitor.navStatus != static_cast<quint16>(AgvController::NavStatus::Waiting)
         && m_lastAgvMonitor.navStatus != static_cast<quint16>(AgvController::NavStatus::Running)) {
         setState(LineSystemState::Running, QStringLiteral("等待缺料"));
-        emit logMessage(QStringLiteral("[LineManager] 当前已在 LM1 待机，保持等待缺料"));
+        emit logMessage(QStringLiteral("[LineManager] 当前已在 LM1 待命，保持等待缺料"));
         return;
     }
 
@@ -381,7 +366,7 @@ void LineManager::returnHomeIfNeeded()
     m_returnHomeSeenMoving = false;
     m_returnHomeTimeout->start(kReturnHomeTimeoutMs);
     setState(LineSystemState::ReturningHome, QStringLiteral("回待机点"));
-    emit logMessage(QStringLiteral("[LineManager] 当前无待执行任务，AGV 返回 LM1 待机"));
+    emit logMessage(QStringLiteral("[LineManager] 当前无待执行任务，AGV 返回 LM1 待命"));
     emit agvDispatchRequested(kHomeLm);
 }
 
@@ -391,7 +376,6 @@ void LineManager::cancelReturnHomeForNewTask()
         return;
     }
 
-    // 主动取消回 LM1 是正常切换，不能当 AGV fatal；真正的失败只看未被打断时的回站结果。
     emit logMessage(QStringLiteral("[LineManager] 回 LM1 途中收到新任务，主动取消回站并切换到送料"));
     stopReturnHomeTracking();
     if (m_agv) {
@@ -408,9 +392,7 @@ void LineManager::stopReturnHomeTracking()
 
 void LineManager::enterError(const QString &reason)
 {
-    // 整线 Error 是设备安全边界：先停止所有在途动作，再清 Pending，最后通知 UI。
     stopReturnHomeTracking();
-
     if (m_agv) {
         m_agv->cancelNavigation();
     }
@@ -418,7 +400,6 @@ void LineManager::enterError(const QString &reason)
         m_arm->stop();
     }
 
-    // 现场需要人工介入，所以清空队列并禁止继续派单。
     clearPendingForError(reason);
     setState(LineSystemState::Error, QStringLiteral("系统报警：%1").arg(reason));
     emit alarmRaised(reason);
@@ -431,6 +412,17 @@ void LineManager::clearPendingForError(const QString &reason)
     if (pendingCount <= 0) {
         emitQueueChanged();
         return;
+    }
+
+    // 这里只补充“哪些 Pending 被取消”的事实通知；真正的清队列时机、日志和后续报警顺序保持原样。
+    const QList<Task> pendingTasks = m_queue.pendingSnapshot();
+    for (Task pendingTask : pendingTasks) {
+        pendingTask.state = TaskState::Canceled;
+        pendingTask.step = TaskStep::Done;
+        pendingTask.stepIndex = 15;
+        pendingTask.statusText = QStringLiteral("系统清队列，任务已取消");
+        pendingTask.lastError = reason;
+        emit taskFinished(pendingTask);
     }
 
     emit logMessage(QStringLiteral("[LineManager] 清空 %1 个 Pending 任务：%2")

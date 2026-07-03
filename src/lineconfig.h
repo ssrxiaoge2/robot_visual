@@ -165,6 +165,17 @@ inline QString taskStateText(TaskState state)
 }
 
 /// 生成统一日志前缀，例如 [T#18 S05][AGV]，便于跨设备追踪同一任务。
+inline QString taskSourceText(TaskSource source)
+{
+    switch (source) {
+    case TaskSource::UiMock:
+        return QStringLiteral("模拟");
+    case TaskSource::CustomerSystem:
+        return QStringLiteral("现场");
+    }
+    return QStringLiteral("未知来源");
+}
+
 inline QString formatTaskPrefix(const Task &task, const QString &stage)
 {
     return QStringLiteral("[T#%1 S%2][%3]")

@@ -14,10 +14,11 @@ class PalletScheduler;
 class TaskExecutor;
 
 /**
- * @brief 12 工位连续补料的整线状态机和 FIFO 调度入口。
+ * @brief 十二工位连续补料的整线状态机和 FIFO 入口。
  *
- * LineManager 决定何时启动下一任务、何时回 LM1、何时清空队列进入 Error；
- * 单个任务内部动作委托给 TaskExecutor。对象运行在 UI 主线程，不直接调用设备 SDK。
+ * LineManager 负责 Start/Stop/Reset、FIFO 启停、回 LM1 和 Error 边界。
+ * 单任务内部动作继续委托给 TaskExecutor；reportShortage() 的返回值只表示
+ * FIFO 是否接受该缺料事件，不表示送料是否完成。
  */
 class LineManager : public QObject
 {
@@ -35,23 +36,40 @@ public:
     Task currentTask() const;
 
 public slots:
-    /// Idle -> Running；有 Pending 时直接执行，无任务时确保 AGV 回 LM1。
     void start();
-    /// 人工急停语义：取消设备、清 Pending、当前任务 Canceled，并进入 Error。
     void stop();
-    /// 仅 Error 状态有效；回 Idle，但不自动重新启动任务。
     void resetError();
-    /// 接收一次独立缺料事件；同一工位允许重复调用并生成不同 taskId。
-    void reportShortage(int stationId);
-    /// 仅转发调度专用扫码结果给当前 TaskExecutor。
+    /**
+     * @brief 兼容旧调用点的缺料入口，只返回“FIFO 是否接受该请求”。
+     *
+     * 修改前后该接口的队列校验、Idle/Running/ReturningHome 分支都保持原样；
+     * 新增真实缺料接线后，上层若需要拿到任务号，应改调 reportShortageWithId()，
+     * 而不是在这里推断是否入队成功。
+     */
+    bool reportShortage(int stationId, TaskSource source = TaskSource::UiMock);
+    /**
+     * @brief 在不改变既有入队/启动顺序的前提下，返回本次缺料事件对应的任务号。
+     *
+     * @param stationId 缺料工位，必须为 1..12。
+     * @param source 任务来源；真实缺料接线使用 CustomerSystem，模拟按钮仍使用 UiMock。
+     * @return 非 0 表示任务已成功创建并获得 taskId；0 表示参数非法或系统正处于 Error，
+     *         此时不会新增任务，也不会改变 e1ffb3f 既有主流程。
+     */
+    quint64 reportShortageWithId(int stationId, TaskSource source);
     void onScanFinished(const NScanScheduler::ScanResult &result);
 
 signals:
-    /// 系统状态或客户显示文案变化。
     void systemStateChanged(LineSystemState state, const QString &text);
-    /// 当前 Running 任务加全部 Pending 任务的 UI 快照。
     void queueChanged(QList<Task> tasks);
     void currentTaskChanged(Task task);
+    /// 任务已创建并追加到 FIFO 队尾后发出；只增加通知，不改变队列算法。
+    void taskEnqueued(Task task);
+    /// 任务从 FIFO 取出并交给 TaskExecutor 启动后发出；对应既有 takeNext() 时刻。
+    void taskStarted(Task task);
+    /// TaskExecutor 报告真实倒料完成后原样向上转发；不参与库存计算。
+    void materialUnloaded(Task task);
+    /// 任务进入成功/失败/取消终态时发出；Stop/Error 仅补通知，不改变原清理顺序。
+    void taskFinished(Task task);
     void alarmRaised(QString reason);
     void logMessage(QString message);
     void agvDispatchRequested(int lm);
@@ -67,38 +85,35 @@ private slots:
     void onReturnHomeTimeout();
 
 private:
-    static constexpr int kHomeLm = 1;                 ///< 队列为空时的 AGV 待机点。
-    static constexpr int kReturnHomeTimeoutMs = 120000; ///< 回 LM1 超时，单位 ms。
+    static constexpr int kHomeLm = 1;
+    static constexpr int kReturnHomeTimeoutMs = 120000;
 
     void setState(LineSystemState state, const QString &text);
     void setCurrentTask(const Task &task);
     void clearCurrentTask();
     void emitQueueChanged();
-    /// 条件允许时从 FIFO 取队首并启动；忙碌/Idle/Error 时无动作。
     void tryStartNext();
-    /// 队列耗尽后的统一出口：已在 LM1 则等待，否则进入 ReturningHome。
     void returnHomeIfNeeded();
-    /// 回站途中来新任务时的正常切换，不应把主动 cancel 当成 AGV fatal。
     void cancelReturnHomeForNewTask();
     void stopReturnHomeTracking();
     void enterError(const QString &reason);
     void clearPendingForError(const QString &reason);
 
-    AgvController *m_agv = nullptr;            ///< 非拥有指针；用于回站监控和 Stop。
-    HuayanScheduler *m_arm = nullptr;          ///< 非拥有指针；Stop 时立即停止机械臂。
-    TaskExecutor *m_executor = nullptr;        ///< QObject 子对象；一次只执行一个任务。
-    QTimer *m_returnHomeTimeout = nullptr;     ///< 仅 ReturningHome 期间启用。
+    AgvController *m_agv = nullptr;        ///< 非拥有指针；由 DeviceManager 统一持有。
+    HuayanScheduler *m_arm = nullptr;      ///< 非拥有指针；Stop/Error 时立即停机械臂。
+    TaskExecutor *m_executor = nullptr;    ///< 子对象；一次只执行一个任务。
+    QTimer *m_returnHomeTimeout = nullptr; ///< ReturningHome 阶段的独立超时器。
 
-    TaskQueue m_queue;                                  ///< 仅含 Pending 的 FIFO。
-    Task m_currentTask;                                 ///< 当前 Running/终态任务快照。
-    LineSystemState m_state = LineSystemState::Idle;    ///< 整线状态。
-    QString m_stateText = QStringLiteral("未启动");     ///< 面向现场 UI 的状态文案。
+    TaskQueue m_queue;
+    Task m_currentTask;
+    LineSystemState m_state = LineSystemState::Idle;
+    QString m_stateText = QStringLiteral("未启动");
 
-    bool m_manualStopInProgress = false; ///< 防止 Stop 内同步信号重复处理任务终态。
-    bool m_returnHomeActive = false;     ///< 当前是否由 LineManager 独立跟踪回 LM1。
-    bool m_returnHomeSeenMoving = false; ///< 已看到回站导航进入 Waiting/Running。
-    bool m_hasAgvMonitor = false;        ///< m_lastAgvMonitor 是否至少更新过一次。
-    AgvMonitorData m_lastAgvMonitor;     ///< 最近 AGV 快照，仅供回 LM1 状态机使用。
+    bool m_manualStopInProgress = false;
+    bool m_returnHomeActive = false;
+    bool m_returnHomeSeenMoving = false;
+    bool m_hasAgvMonitor = false;
+    AgvMonitorData m_lastAgvMonitor;
 };
 
 #endif // LINEMANAGER_H

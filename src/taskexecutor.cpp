@@ -274,6 +274,9 @@ void TaskExecutor::onArmStageCompleted(const QString &stageName)
                      QStringLiteral("AGV 前往倒料位 LM%1").arg(m_stationCfg->unloadLm));
         break;
     case ExecState::ArmUnload:
+        // 这里是“实际倒料已经完成”且“原状态机即将进入倒料后收姿态”的唯一既有成功节点。
+        // 新增信号只补充事实通知，不挪动后续状态转换，因此不会改变 e1ffb3f 的动作顺序。
+        emit materialUnloaded(m_task);
         enterState(ExecState::StowAfterUnload, QStringLiteral("倒料完成，机械臂收姿态"));
         break;
     case ExecState::StowAfterUnload:

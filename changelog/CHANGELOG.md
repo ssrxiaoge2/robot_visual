@@ -5,6 +5,67 @@
 
 ---
 
+## 2026-07-04 | v0.2.6 | 真实缺料接入主调度
+
+### 变更
+- 在不改动 `e1ffb3f99a3258c7204af3950e3a815a2fffa436` 既有主流程边界的前提下，新增 `ShortageCalculator::recordReplenishment()`，将“倒料成功后加一箱”的库存回写规则正式纳入真实缺料链路。
+- 重写 `ShortageMonitor` 的生产语义：基于 MES/PLC 轮询结果维护各工位预计库存，按“安全阈值 + 一箱”完成首次基线，在持续缺料时按 FIFO 队尾逐箱续补，并阻止同工位在“已派单或执行中且尚未倒料”时重复派单。
+- 为 `TaskExecutor` / `LineManager` / `DeviceManager` 增加真实缺料接线，补充任务入队、开始、倒料成功、结束等事实信号；倒料成功信号只挂在既有状态机成功节点，不改变原动作顺序。
+- 调度监控面板新增“模拟缺料 / 真实缺料”二选一；真实模式下启用三列工位状态表，仅用于主调度监控，不再把测试面板作为生产入口。
+- 新增并补强 Qt Test，覆盖真实缺料初始基线、持续缺料续补、通信超时与恢复、换型等待旧任务、UI 切换和接线回归等关键边界。
+- 调整 CMake IDE 分组，让 Qt Creator 中的主程序 target 与测试 target 分开展示，减少测试 target 对主工程视图的占用。
+
+### 风险与说明
+- 首次进入真实模式时，当前仍按临时决策使用“安全阈值 + 一箱”作为预计库存初值；该规则以及断线恢复、换型挂单、持续补料上限等仍需客户最终确认。
+- 缺料信号计算测试面板保持测试用途，不作为真实缺料生产入口。
+- `docs/superpowers/specs/2026-07-03-live-shortage-dispatch-design.md` 与 `docs/superpowers/plans/2026-07-03-live-shortage-dispatch.md` 仍是历史草稿，不建议纳入本次提交。
+
+### 验证
+- `cmake -S . -B build` 通过。
+- `ctest --test-dir build --output-on-failure` 通过（10 / 10）。
+- `git diff --check` 无输出。
+
+### 文件
+- `CMakeLists.txt`
+- `src/devicemanager.cpp`
+- `src/devicemanager.h`
+- `src/linemanager.cpp`
+- `src/linemanager.h`
+- `src/mainwindow.cpp`
+- `src/mainwindow.h`
+- `src/shortagecalculator.cpp`
+- `src/shortagecalculator.h`
+- `src/shortagemonitor.cpp`
+- `src/shortagemonitor.h`
+- `src/taskexecutor.cpp`
+- `src/taskexecutor.h`
+- `tests/test_live_shortage_baseline.cpp`
+- `tests/test_live_shortage_dispatch.cpp`
+- `tests/test_live_shortage_ui.cpp`
+- `tests/test_live_shortage_wiring.cpp`
+- `tests/test_shortagecalculator.cpp`
+- `tests/test_shortagemonitor.cpp`
+- `tests/test_shortagetestwiring.cpp`
+- `docs/superpowers/specs/2026-07-03-main-dispatch-live-shortage-design.md`
+- `docs/superpowers/plans/2026-07-03-main-dispatch-live-shortage.md`
+- `README.md`
+- `changelog/CHANGELOG.md`
+
+---
+
+## 2026-07-02 | v0.2.5 | 客户现场缺料信号实施阶段（开发版）
+
+### 变更
+- 新增 `shortageconfig.h`、`ShortageCalculator`、`ShortageMonitor` 与对应 Qt Test，用于承接客户现场缺料信号的配置、纯计算与四请求聚合。
+- 扩展 `CustomSysScheduler`，补充 MES/PLC 四类请求解析、轮次透传和 PLC 位返回结构，供现场轮询监听复用。
+- 将现场缺料事件接入 `LineManager` / `DeviceManager` FIFO，保留 `TaskSource` 来源信息，并在主窗口中增加“模拟缺料 / 现场系统”切换、监控状态面板和 FIFO 来源列。
+- 新增 `scripts/test_shortage_source_ui.py` 与 `tests/test_shortage_line_integration.py`，用于静态回归检查 UI 接线和 FIFO 接线。
+
+### 风险与说明
+- 任务 17 依赖的 12 工位 × 3 产品现场确认阈值未随仓库提供；当前 `src/shortageconfig.h` 先写入保守占位值 `0`，避免未确认阈值误触发自动派单。
+- 当前已完成离线静态验证与单元测试代码补齐；完整 CMake 构建仍受本机缺少可用编译器/生成器约束，不能将其记为已通过。
+- 本次只完成开发版接线与离线验证，不宣称客户现场联调/验收完成。
+
 ## 2026-07-01 | v0.2.4 | 左侧面板 UI 优化与补光灯权限脚本
 
 ### 变更
