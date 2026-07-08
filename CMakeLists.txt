@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.16)
 
-project(wh-robot-visual VERSION 0.2.3 LANGUAGES CXX)
+project(wh-robot-visual VERSION 0.2.4 LANGUAGES CXX)
 
 set(CMAKE_AUTOUIC ON)
 set(CMAKE_AUTOMOC ON)
@@ -20,6 +20,12 @@ add_compile_definitions(
 
 find_package(Qt6 REQUIRED COMPONENTS Widgets Network SerialBus)
 include(GNUInstallDirs)
+
+# ── 自动化测试（与 src 业务代码分离，Qt Creator 中显示为独立 tests 目录）──
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
 
 # 调度文件职责：lineconfig/taskqueue 定义模型，taskexecutor 执行单任务，
 # linemanager 管理整线状态和 FIFO；它们与设备控制器编译进同一 Qt 程序。

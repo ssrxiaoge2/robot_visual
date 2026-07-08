@@ -4,6 +4,9 @@
 #include <QObject>
 #include <QString>
 #include <QStringList>
+#include <QtGlobal>
+
+#include "lineconfig.h"
 
 class QTimer;
 struct PalletPose;
@@ -42,7 +45,10 @@ public:
 
     /// 当前任务按工位注入的示教器函数名。
     struct StationArmFunctions {
-        QString captureFunc;     ///< 拍照初始位，同时用作夹取后的安全抬升位。
+        QString captureFunc;     ///< 拍照初始位；CaptureFunc 模式下也作为夹后安全离开位。
+        AfterGripMode afterGripMode = AfterGripMode::CaptureFunc; ///< 夹紧后离开策略；默认兼容旧逻辑。
+        QString afterGripFunc;                                    ///< CustomFunc 模式下使用的夹后安全离开函数。
+        double grabZClearance = 425.0;                            ///< 本工位 Z 下探余量(mm)。
         QString unloadPointFunc; ///< 倒料前准备点。
         QString unloadFunc;      ///< 实际翻转/倾倒动作。
     };
@@ -100,6 +106,73 @@ public:
     void setSpeedOverride(int percent);  // 运动速度倍率 1~100(%)，可经 UI 实时调整
     void resetArm();                     // 机械臂复位（调用 Func_fuwei）
 
+    /// 计算抓取 Z 下探量。
+    ///
+    /// 公式：下探量 = 视觉深度 - 工位余量；结果被限制在 0 到 maxDescend。
+    /// 余量越大，下探越少；余量越小，下探越多。
+    static double calculateGrabDescend(double visionDepth,
+                                       double grabZClearance,
+                                       double maxDescend)
+    {
+        return qBound(0.0, visionDepth - grabZClearance, maxDescend);
+    }
+
+    /// 根据夹后策略解析实际要调用的函数名。
+    ///
+    /// shouldRun 返回 false 表示夹紧后不调用任何函数，阶段一可直接完成。
+    /// CaptureFunc 返回拍照函数；CustomFunc 返回独立夹后安全离开函数。
+    static QString resolveAfterGripFunction(AfterGripMode mode,
+                                            const QString &captureFunc,
+                                            const QString &afterGripFunc,
+                                            bool *shouldRun)
+    {
+        if (mode == AfterGripMode::None) {
+            if (shouldRun)
+                *shouldRun = false;
+            return QString();
+        }
+        if (shouldRun)
+            *shouldRun = true;
+        return mode == AfterGripMode::CustomFunc ? afterGripFunc : captureFunc;
+    }
+
+    /// 命令门控判定结果。
+    enum class CommandReadiness {
+        ReadyToDispatch, ///< 当前状态允许立即下发下一条命令。
+        Wait,            ///< 当前状态暂不允许下发，继续等待。
+        Error            ///< 状态信息本身不可用，必须 fail-closed。
+    };
+
+    /// 纯判定：根据机器人状态决定当前命令是否允许下发。
+    static CommandReadiness evaluateCommandReadiness(int movingState,
+                                                     int pauseState,
+                                                     int fsmRet,
+                                                     const QString &fsmText)
+    {
+        if (movingState != 0 || pauseState != 0)
+            return CommandReadiness::Wait;
+        if (fsmRet != 0)
+            return CommandReadiness::Error;
+        const QString normalizedFsm = fsmText.trimmed().toLower();
+        if (normalizedFsm.contains(QStringLiteral("programstopped"))
+            || normalizedFsm.contains(QStringLiteral("robotinmoving")))
+            return CommandReadiness::Wait;
+        if (normalizedFsm.contains(QStringLiteral("auto"))
+            || normalizedFsm.contains(QStringLiteral("standby"))
+            || normalizedFsm.contains(QStringLiteral("ready"))
+            || normalizedFsm.contains(QStringLiteral("idle")))
+            return CommandReadiness::ReadyToDispatch;
+        return CommandReadiness::Wait;
+    }
+
+    /// 纯判定：统一命令门控是否还能登记新的待执行命令。
+    ///
+    /// 这里显式拒绝覆盖旧待命令，避免 UI 手动命令或阶段切换边缘把上一条还未真正下发的命令挤掉。
+    static bool canQueuePendingCommand(bool hasPendingCommand, bool hasActiveCommand)
+    {
+        return !hasPendingCommand && !hasActiveCommand;
+    }
+
 public slots:
     void setGrabOffset(double x, double y, double z, double rz);
     void onVisionNoObject();
@@ -142,7 +215,7 @@ private:
         WaitPreGripScan,         ///< 夹紧前安全暂停，等待扫码决策。
         MoveToPickup,            ///< 旧步骤名，保留枚举兼容性。
         CloseGripper,            ///< 调用夹紧示教函数。
-        LiftLoad,                ///< 回拍照位，将料箱抬到运输安全高度。
+        LiftLoad,                ///< 按工位夹后策略离开抓取位，必要时回安全高度。
         MoveToUnload,            ///< 旧 StageTwo 的卸料位移动。
         FlipUnload,              ///< 旧 StageTwo 翻转动作。
         ReleaseLoad,             ///< 旧 StageTwo 松爪动作。
@@ -212,6 +285,56 @@ private:
                       const QString &cmdId   = QStringLiteral("0"),
                       const QString &ucsName = QStringLiteral("Base"));
     bool setGripper(bool open);
+
+    /// 待下发的 SDK 运动命令类型。
+    ///
+    /// RunFunc：调用示教器函数，如 Func_captureX / Func_daoliaoX。
+    /// MoveRelTool：工具坐标系相对移动，视觉微调、搜索、Z 下探使用。
+    /// MoveRelBase：基坐标系相对移动，码垛 offset 使用。
+    /// MoveJ：绝对笛卡尔 MoveJ，倒料位/空箱位等示教点使用。
+    enum class PendingCommandKind {
+        None,
+        RunFunc,
+        MoveRelTool,
+        MoveRelBase,
+        MoveJ
+    };
+
+    /// 统一命令门控使用的待执行命令。
+    ///
+    /// timeoutMs 是命令执行后的到位等待超时，不是状态门控超时。
+    struct PendingCommand {
+        PendingCommandKind kind = PendingCommandKind::None;
+        QString label;        ///< 日志标签，说明阶段和动作，便于现场追踪 20018。
+        QString funcName;     ///< kind=RunFunc 时使用。
+        int poseId = 0;       ///< kind=MoveRelTool/MoveRelBase 时使用，0~5=X/Y/Z/Rx/Ry/Rz。
+        int direction = 1;    ///< 相对移动方向，0=负向，1=正向。
+        double distance = 0;  ///< 相对移动距离(mm或deg，取决于 poseId)。
+        Pose targetPose;      ///< kind=MoveJ 时使用的绝对目标位姿。
+        QString cmdId = QStringLiteral("0");      ///< kind=MoveJ 时透传给 SDK 的命令编号。
+        QString ucsName = QStringLiteral("Base"); ///< kind=MoveJ 时使用的用户坐标系。
+        int timeoutMs = 30000; ///< 到位等待超时，单位 ms，默认 30000ms。
+        QStringList params;   ///< 兼容旧码垛脚本等带参数的 RunFunc。
+    };
+
+    /// 在真正下发 SDK 命令前先做一次控制器状态门控。
+    ///
+    /// 该入口只负责登记待执行命令并启动/立即执行状态检查，不会直接调用 SDK 运动原语；
+    /// 若控制器仍处于 moving/pause/ProgramStopped，则延后到可执行时再下发，避免串行命令撞 20018。
+    bool beginCommandWhenReady(const PendingCommand &cmd);
+    /// 轮询控制器当前是否允许下发下一条命令。
+    ///
+    /// 检查 moving/pause/error/FSM 状态；若发现 ProgramStopped，仅在本轮命令门控中执行一次 GrpReset，
+    /// 并持续等待可执行状态。出现错误或超时会清空待命令并走统一错误出口。
+    bool pollCommandReady();
+    /// 在命令门控通过后，执行真实的 SDK 下发。
+    ///
+    /// 只有这个入口允许真正调用 HRIF_RunFunc / HRIF_MoveRelL；成功后接管到位轮询，
+    /// 失败则立即走统一错误处理，确保所有运动命令的安全语义一致。
+    bool dispatchReadyCommand(const PendingCommand &cmd);
+    bool hasActiveRobotCommand() const; ///< 当前是否仍有已下发但尚未完成的 SDK 命令。
+    void stopVisionWaitTimeout();       ///< 收到视觉结果后关闭 WaitForVision 的超时保护，避免误判为执行中命令。
+
     bool executeRunFunc(const QString &funcName, int timeoutMs = 30000);
     bool executeGripFunc();
     bool executeFlipUnload();
@@ -220,14 +343,20 @@ private:
     void startWaitForIdle(int timeoutMs = 30000);
     void resetAndProceed();  // GrpReset 后延时再下发首条指令，避开 20018 ProgramStopped
     void completeStage();    // 阶段收尾：先 stop() 再发完成信号，避免重置刚启动的下一阶段
+    quint64 nextCallbackSeq(); ///< 生成延迟回调序号，避免旧 singleShot 推进新阶段。
 
     QString stageName(Stage stage) const;
     static int stepIndexFor(StageStep step);
 
     QTimer *m_pollTimer    = nullptr; ///< 每 100ms 查询机器人运动状态。
     QTimer *m_timeoutTimer = nullptr; ///< 当前单条 SDK 动作的超时保护。
+    QTimer *m_commandReadyTimer = nullptr; ///< SDK 命令下发前的状态门控轮询定时器。
     int     m_pollCount    = 0;       ///< 当前动作已轮询次数，用于极短动作兜底。
     bool    m_hasSeenMoving = false;  // 是否已观察到运动真正开始（避免启动延迟误判完成）
+    PendingCommand m_pendingCommand;       ///< 当前等待状态可执行后再下发的命令。
+    int m_commandReadyElapsedMs = 0;       ///< 已等待可执行状态的时间(ms)。
+    bool m_commandResetIssued = false;     ///< 本轮门控是否已对 ProgramStopped 执行过 GrpReset。
+    quint64 m_commandSeq = 0;              ///< 命令序号，防止旧 singleShot 回调推进新阶段。
 
     Stage m_stage = Stage::None;              ///< 当前业务阶段。
     StageStep m_stageStep = StageStep::None;  ///< 当前阶段内步骤。
@@ -274,6 +403,9 @@ private:
     QString m_stowFuncName        = QStringLiteral("Func_yun_xing_zhong");
     QString m_unloadPointFuncName = QStringLiteral("Func_daoliao_1_point");
     QString m_unloadFuncName      = QStringLiteral("Func_daoliao");
+    AfterGripMode m_afterGripMode = AfterGripMode::CaptureFunc; ///< 当前任务夹紧后离开策略，由 lineconfig 注入。
+    QString m_afterGripFuncName;                                ///< 当前任务夹后安全离开函数名，CustomFunc 时必须非空。
+    double m_grabZClearance = 425.0;                            ///< 当前任务 Z 下探余量(mm)，替代全局固定值。
 };
 
 #endif // HUAYANSCHEDULER_H
