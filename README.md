@@ -167,13 +167,13 @@ AGV→码垛位     大多数工位到共享码垛区 LM16；工位12 到独立�
 |------|---------|---------|---------------|--------------|----------|------------|
 | 1 | LM3 | LM3 | `Func_capture1` | `Func_daoliao1` | `Func_fanzhuan` | 共享码垛区 LM16 |
 | 2 | LM4 | LM4 | `Func_capture2` | `Func_daoliao2` | `Func_fanzhuan` | 共享码垛区 LM16 |
-| 3 | LM5 | LM9 | `Func_capture3` | `Func_daoliao3` | `Func_fanzhuan` | 共享码垛区 LM16 |
-| 4 | LM5 | LM9 | `Func_capture4` | `Func_daoliao4` | `Func_fanzhuan` | 共享码垛区 LM16 |
-| 5 | LM5 | LM10 | `Func_capture5` | `Func_daoliao5` | `Func_fanzhuan` | 共享码垛区 LM16 |
-| 6 | LM6 | LM10 | `Func_capture6` | `Func_daoliao6` | `Func_fanzhuan` | 共享码垛区 LM16 |
-| 7 | LM6 | LM11 | `Func_capture7` | `Func_daoliao7` | `Func_fanzhuan` | 共享码垛区 LM16 |
-| 8 | LM6 | LM11 | `Func_capture8` | `Func_daoliao8` | `Func_fanzhuan` | 共享码垛区 LM16 |
-| 9 | LM7 | LM12 | `Func_capture9` | `Func_daoliao9` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 3 | LM24 | LM9 | `Func_capture3` | `Func_daoliao3` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 4 | LM24 | LM9 | `Func_capture4` | `Func_daoliao4` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 5 | LM23 | LM10 | `Func_capture5` | `Func_daoliao5` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 6 | LM22 | LM10 | `Func_capture6` | `Func_daoliao6` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 7 | LM21 | LM11 | `Func_capture7` | `Func_daoliao7` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 8 | LM19 | LM11 | `Func_capture8` | `Func_daoliao8` | `Func_fanzhuan` | 共享码垛区 LM16 |
+| 9 | LM20 | LM12 | `Func_capture9` | `Func_daoliao9` | `Func_fanzhuan` | 共享码垛区 LM16 |
 | 10 | LM7 | LM12 | `Func_capture10` | `Func_daoliao10` | `Func_fanzhuan` | 共享码垛区 LM16 |
 | 11 | LM7 | LM7 | `Func_capture11` | `Func_daoliao11` | `Func_fanzhuan` | 共享码垛区 LM16 |
 | 12 | LM15 | LM15 | `Func_capture12` | `Func_daoliao12` | `Func_fanzhuan` | 工位12独立码垛区 LM17 |

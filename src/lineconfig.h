@@ -96,7 +96,7 @@ namespace lineconfig_detail {
 // Z 下探余量按现场箱型显式写入每个工位：1-11 为篮筐，12 为紫框。
 // 公式保持不变：descend = visionZ - grabZClearance。
 // 1-11 现场现象是下降偏多，因此相对旧值 425.0 应调大；12 下降偏少，因此应调小。
-static constexpr double kLargeBasketGrabZClearance = 450.0;
+static constexpr double kLargeBasketGrabZClearance = 417.0;
 static constexpr double kPurpleBasketGrabZClearance = 380.0;
 
 // 集中配置表是现场点位/示教函数的唯一来源；修改前必须与 AGV 地图和示教器核对。
