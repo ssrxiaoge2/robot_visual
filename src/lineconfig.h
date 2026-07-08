@@ -22,6 +22,20 @@ enum class TaskState { Pending, Running, Succeeded, Failed, Canceled };
 /// 缺料任务的来源；v1 仅使用 UiMock，CustomerSystem 为后续客户接口预留。
 enum class TaskSource { UiMock, CustomerSystem };
 
+/// 夹紧后的机械臂离开策略。
+///
+/// None：夹紧后不额外回拍照/安全位，阶段一直接完成，适用于 1/2/11/12 等
+///       取料点与后续路径已经安全衔接的工位。
+/// CaptureFunc：兼容旧逻辑，夹紧后复用 captureFunc 回安全高度；仅适用于
+///              captureFunc 本身就是单点或安全回位路径的工位。
+/// CustomFunc：夹紧后调用 afterGripFunc；用于 captureFunc 带过渡点、不能
+///             作为夹后回位路径复用的工位。
+enum class AfterGripMode {
+    None,
+    CaptureFunc,
+    CustomFunc
+};
+
 /// 面向 UI 和日志的业务步骤，比 TaskExecutor 内部 ExecState 更稳定、更粗粒度。
 enum class TaskStep {
     Waiting,             ///< 等待调度或正在装载配置。
@@ -62,8 +76,11 @@ struct StationTaskConfig {
     int unloadLm = 0;                           ///< 仙工地图倒料站数字 LM。
     PalletArea palletArea = PalletArea::LargeBox; ///< 空箱最终使用的码垛区。
     QString captureFunc;                        ///< 示教器拍照/抬升安全位函数名。
+    AfterGripMode afterGripMode = AfterGripMode::CaptureFunc; ///< 夹紧后的离开策略，不能再隐式等同 captureFunc。
+    QString afterGripFunc;                                    ///< afterGripMode=CustomFunc 时调用的夹后安全离开函数。
     QString unloadPointFunc;                    ///< 示教器倒料准备点函数名。
     QString unloadFunc;                         ///< 示教器翻转倒料函数名。
+    double grabZClearance = 425.0;              ///< Z 下探余量(mm)：下探量=视觉Z-grabZClearance。
 };
 
 /// 一个码垛区的 AGV 站点和机械臂函数配置。
@@ -76,20 +93,26 @@ struct PalletAreaTaskConfig {
 
 namespace lineconfig_detail {
 
+// Z 下探余量按现场箱型显式写入每个工位：1-11 为篮筐，12 为紫框。
+// 公式保持不变：descend = visionZ - grabZClearance。
+// 1-11 现场现象是下降偏多，因此相对旧值 425.0 应调大；12 下降偏少，因此应调小。
+static constexpr double kLargeBasketGrabZClearance = 450.0;
+static constexpr double kPurpleBasketGrabZClearance = 380.0;
+
 // 集中配置表是现场点位/示教函数的唯一来源；修改前必须与 AGV 地图和示教器核对。
 inline const StationTaskConfig kStationTaskConfigs[] = {
-    {1, 3, 3, PalletArea::LargeBox, QStringLiteral("Func_capture1"), QStringLiteral("Func_daoliao1"), QStringLiteral("Func_fanzhuan")},
-    {2, 4, 4, PalletArea::LargeBox, QStringLiteral("Func_capture2"), QStringLiteral("Func_daoliao2"), QStringLiteral("Func_fanzhuan")},
-    {3, 5, 9, PalletArea::LargeBox, QStringLiteral("Func_capture3"), QStringLiteral("Func_daoliao3"), QStringLiteral("Func_fanzhuan")},
-    {4, 5, 9, PalletArea::LargeBox, QStringLiteral("Func_capture4"), QStringLiteral("Func_daoliao4"), QStringLiteral("Func_fanzhuan")},
-    {5, 5, 10, PalletArea::LargeBox, QStringLiteral("Func_capture5"), QStringLiteral("Func_daoliao5"), QStringLiteral("Func_fanzhuan")},
-    {6, 6, 10, PalletArea::LargeBox, QStringLiteral("Func_capture6"), QStringLiteral("Func_daoliao6"), QStringLiteral("Func_fanzhuan")},
-    {7, 6, 11, PalletArea::LargeBox, QStringLiteral("Func_capture7"), QStringLiteral("Func_daoliao7"), QStringLiteral("Func_fanzhuan")},
-    {8, 6, 11, PalletArea::LargeBox, QStringLiteral("Func_capture8"), QStringLiteral("Func_daoliao8"), QStringLiteral("Func_fanzhuan")},
-    {9, 7, 12, PalletArea::LargeBox, QStringLiteral("Func_capture9"), QStringLiteral("Func_daoliao9"), QStringLiteral("Func_fanzhuan")},
-    {10, 7, 12, PalletArea::LargeBox, QStringLiteral("Func_capture10"), QStringLiteral("Func_daoliao10"), QStringLiteral("Func_fanzhuan")},
-    {11, 7, 7, PalletArea::LargeBox, QStringLiteral("Func_capture11"), QStringLiteral("Func_daoliao11"), QStringLiteral("Func_fanzhuan")},
-    {12, 15, 15, PalletArea::SmallBox, QStringLiteral("Func_capture12"), QStringLiteral("Func_daoliao12"), QStringLiteral("Func_fanzhuan")},
+    {1, 3, 3, PalletArea::LargeBox, QStringLiteral("Func_capture1"), AfterGripMode::None, QString(), QStringLiteral("Func_daoliao1"), QStringLiteral("Func_fanzhuan"), kLargeBasketGrabZClearance},
+    {2, 4, 4, PalletArea::LargeBox, QStringLiteral("Func_capture2"), AfterGripMode::None, QString(), QStringLiteral("Func_daoliao2"), QStringLiteral("Func_fanzhuan"), kLargeBasketGrabZClearance},
+    {3, 24, 9, PalletArea::LargeBox, QStringLiteral("Func_capture3"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao3"), QStringLiteral("Func_fanzhuan"), kLargeBasketGrabZClearance},
+    {4, 24, 9, PalletArea::LargeBox, QStringLiteral("Func_capture4"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao4"), QStringLiteral("Func_fanzhuan"), kLargeBasketGrabZClearance},
+    {5, 23, 10, PalletArea::LargeBox, QStringLiteral("Func_capture5"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao5"), QStringLiteral("Func_fanzhuan"), kLargeBasketGrabZClearance},
+    {6, 22, 10, PalletArea::LargeBox, QStringLiteral("Func_capture6"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao6"), QStringLiteral("Func_fanzhuan"), kLargeBasketGrabZClearance},
+    {7, 21, 11, PalletArea::LargeBox, QStringLiteral("Func_capture7"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao7"), QStringLiteral("Func_fanzhuan"), kLargeBasketGrabZClearance},
+    {8, 19, 11, PalletArea::LargeBox, QStringLiteral("Func_capture8"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao8"), QStringLiteral("Func_fanzhuan"), kLargeBasketGrabZClearance},
+    {9, 20, 12, PalletArea::LargeBox, QStringLiteral("Func_capture9"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao9"), QStringLiteral("Func_fanzhuan"), kLargeBasketGrabZClearance},
+    {10, 7, 12, PalletArea::LargeBox, QStringLiteral("Func_capture10"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao10"), QStringLiteral("Func_fanzhuan"), kLargeBasketGrabZClearance},
+    {11, 7, 7, PalletArea::LargeBox, QStringLiteral("Func_capture11"), AfterGripMode::None, QString(), QStringLiteral("Func_daoliao11"), QStringLiteral("Func_fanzhuan"), kLargeBasketGrabZClearance},
+    {12, 15, 15, PalletArea::SmallBox, QStringLiteral("Func_capture12"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao12"), QStringLiteral("Func_fanzhuan"), kPurpleBasketGrabZClearance},
 };
 
 // 码垛 LM16/17 目前是设计阶段占位值，投产前必须替换为现场真实站点。

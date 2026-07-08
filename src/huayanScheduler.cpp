@@ -30,10 +30,9 @@ static constexpr double kMaxSearchDescend  = 80.0; // 搜索累计安全上限(m
 // 复位后立即下发 RunFunc 会撞 20018，须等控制器状态切换。机器人空闲时无此延迟需求。
 static constexpr int    kResetSettleMs     = 1000;
 
-// Z 下探参数：下探量 = 视觉深度 - kGrabZClearance，受 kMaxDescend 上限约束
-// kGrabZClearance 标定法：固定一物体，记视觉深度 D 和能夹到的下探量 H，则 = D - H
+// Z 下探参数：下探量 = 视觉深度 - grabZClearance，受 kMaxDescend 上限约束
+// grabZClearance 标定法：固定一物体，记视觉深度 D 和能夹到的下探量 H，则 = D - H
 //   （本例 D=1048, H=640 → 408）。此值对不同深度通用，视觉深度变化时下探量自动适应。
-static constexpr double kGrabZClearance = 425.0;   // 视觉深度与实际下探量的标定差(mm)
 static constexpr double kMaxDescend     = 1078.0;  // 下探安全上限(mm)，正常不应触发截断
 static constexpr bool   kZDescendInvert = false;   // Z 下探方向；若实际朝反方向，改 true
 static constexpr double kOffsetIgnoreDistance = 0.5; // 码垛平移死区(mm)
@@ -88,6 +87,10 @@ HuayanScheduler::HuayanScheduler(QObject *parent)
     m_timeoutTimer = new QTimer(this);
     m_timeoutTimer->setSingleShot(true);
     connect(m_timeoutTimer, &QTimer::timeout, this, &HuayanScheduler::onStepTimeout);
+
+    m_commandReadyTimer = new QTimer(this);
+    m_commandReadyTimer->setInterval(100);
+    connect(m_commandReadyTimer, &QTimer::timeout, this, &HuayanScheduler::pollCommandReady);
 
     // 阶段一改为调用示教器函数（Func_capture / Func_jiajin），
     // 拍照位/抓取/抬升的姿态与轨迹全部由示教器保证，不再硬编码坐标
@@ -266,6 +269,11 @@ void HuayanScheduler::setStationFunctions(const StationArmFunctions &funcs)
     // 只覆盖非空字段，保留默认函数名，保证现有测试面板仍可单独调试。
     if (!funcs.captureFunc.isEmpty())
         m_captureFuncName = funcs.captureFunc;
+    // 夹后策略和 Z 余量来自 lineconfig 的当前工位配置。
+    // 这两个值必须随任务注入，不能用全局固定值，否则工位12和带过渡点工位会复用错误路径。
+    m_afterGripMode = funcs.afterGripMode;
+    m_afterGripFuncName = funcs.afterGripFunc;
+    m_grabZClearance = funcs.grabZClearance;
     if (!funcs.unloadPointFunc.isEmpty())
         m_unloadPointFuncName = funcs.unloadPointFunc;
     if (!funcs.unloadFunc.isEmpty())
@@ -413,13 +421,22 @@ void HuayanScheduler::startPalletPlace(const PalletPose &offset)
 
 bool HuayanScheduler::rejectStageStartWhileActionRunning(const QString &stageName)
 {
-    if (m_action == Action::None)
-        return false;
+    if (m_action != Action::None) {
+        const QString msg = QStringLiteral("%1启动失败：当前独立动作执行中").arg(stageName);
+        emit logMessage(msg);
+        emit stageError(msg);
+        return true;
+    }
 
-    const QString msg = QStringLiteral("%1启动失败：当前独立动作执行中").arg(stageName);
-    emit logMessage(msg);
-    emit stageError(msg);
-    return true;
+    const bool hasPendingCommand = m_pendingCommand.kind != PendingCommandKind::None;
+    if (!canQueuePendingCommand(hasPendingCommand, hasActiveRobotCommand())) {
+        const QString msg = QStringLiteral("%1启动失败：机械臂仍有命令执行中").arg(stageName);
+        emit logMessage(msg);
+        emit stageError(msg);
+        return true;
+    }
+
+    return false;
 }
 
 void HuayanScheduler::startStageOne()
@@ -429,6 +446,9 @@ void HuayanScheduler::startStageOne()
     if (!ensureConnected())
         return;
 
+    // 手动松爪等非阶段命令也会启动等待轮询；开启新阶段前先清掉遗留轮询/门控状态，
+    // 避免旧命令完成回调误推进新阶段。
+    stopPollingAndTimers();
     clearActionState();
     m_stage = Stage::StageOne;
     m_stageStep = StageStep::MoveToSurvey;
@@ -452,6 +472,8 @@ void HuayanScheduler::startStageTwo()
     if (!ensureConnected())
         return;
 
+    // 新阶段启动前先切断旧命令的轮询尾巴，避免跨阶段误推进。
+    stopPollingAndTimers();
     clearActionState();
     m_stage = Stage::StageTwo;
     m_stageStep = StageStep::MoveToUnload;
@@ -473,6 +495,8 @@ void HuayanScheduler::startStageThree()
         return;
     }
 
+    // 新阶段启动前先切断旧命令的轮询尾巴，避免跨阶段误推进。
+    stopPollingAndTimers();
     clearActionState();
     m_stage = Stage::StageThree;
     m_stageStep = StageStep::ExecuteStackingFunction;
@@ -489,6 +513,8 @@ void HuayanScheduler::startStow()
     if (!ensureConnected())
         return;
 
+    // 新阶段启动前先切断旧命令的轮询尾巴，避免跨阶段误推进。
+    stopPollingAndTimers();
     clearActionState();
     m_stage = Stage::Stow;
     m_stageStep = StageStep::StowArm;
@@ -505,6 +531,8 @@ void HuayanScheduler::startUnload()
     if (!ensureConnected())
         return;
 
+    // 新阶段启动前先切断旧命令的轮询尾巴，避免跨阶段误推进。
+    stopPollingAndTimers();
     clearActionState();
     m_stage = Stage::Unload;
     m_stageStep = StageStep::MoveToUnloadPoint;
@@ -518,9 +546,12 @@ void HuayanScheduler::resetAndProceed()
 {
     // GrpReset 退出 ProgramStopped 是异步的，复位后延时再下发首条指令；
     // 等待期间若被 stop() 打断（m_stage 置 None）则不再继续
-    HRIF_GrpReset(m_boxID, m_rbtID);
-    QTimer::singleShot(kResetSettleMs, this, [this] {
-        if (m_stage != Stage::None)
+    const quint64 seq = nextCallbackSeq();
+    const int resetRet = HRIF_GrpReset(m_boxID, m_rbtID);
+    if (resetRet != 0)
+        emit logMessage(QStringLiteral("[警告] resetAndProceed 调用 GrpReset 失败：%1").arg(resetRet));
+    QTimer::singleShot(kResetSettleMs, this, [this, seq] {
+        if (seq == m_commandSeq && m_stage != Stage::None)
             proceedStage();
     });
 }
@@ -538,6 +569,7 @@ void HuayanScheduler::stop(bool emitStoppedLog)
 {
     stopPollingAndTimers();
     requestRobotStop();
+    ++m_commandSeq; // 让已经排队的 singleShot 回调全部失效，避免旧阶段推进新阶段。
     clearActionState();
     m_searchDescendCount = 0;
     m_searchDescendedMm = 0.0;
@@ -590,8 +622,11 @@ void HuayanScheduler::onPollTick()
         m_timeoutTimer->stop();
         if (m_action == Action::PalletPlace && m_actionStep == ActionStep::MovePalletOffset) {
             m_palletMoveIdx++;
-            QTimer::singleShot(300, this, [this] {
-                if (m_action == Action::PalletPlace && m_actionStep == ActionStep::MovePalletOffset)
+            const quint64 seq = nextCallbackSeq();
+            QTimer::singleShot(300, this, [this, seq] {
+                if (seq == m_commandSeq
+                    && m_action == Action::PalletPlace
+                    && m_actionStep == ActionStep::MovePalletOffset)
                     executeNextPalletMove();
             });
             return;
@@ -604,8 +639,11 @@ void HuayanScheduler::onPollTick()
         if (m_stage == Stage::StageOne && m_stageStep == StageStep::SearchDescend) {
             emit logMessage(QStringLiteral("[阶段一] 搜索下移完成，等待视觉稳定后重新检测"));
             m_stageStep = StageStep::WaitForVision;
-            QTimer::singleShot(kVisionSettleMs, this, [this] {
-                if (m_stage == Stage::StageOne && m_stageStep == StageStep::WaitForVision)
+            const quint64 seq = nextCallbackSeq();
+            QTimer::singleShot(kVisionSettleMs, this, [this, seq] {
+                if (seq == m_commandSeq
+                    && m_stage == Stage::StageOne
+                    && m_stageStep == StageStep::WaitForVision)
                     proceedStage();
             });
             return;
@@ -615,8 +653,11 @@ void HuayanScheduler::onPollTick()
             m_grabMoveIdx++;
             // 运动结束后机器人状态切换有滞后(nMovingState=0 但仍 RobotInMoving)，
             // 高速下稍等再发下一轴，避免 20018 RobotInMoving
-            QTimer::singleShot(300, this, [this] {
-                if (m_stage == Stage::StageOne && m_stageStep == StageStep::MoveToGrab)
+            const quint64 seq = nextCallbackSeq();
+            QTimer::singleShot(300, this, [this, seq] {
+                if (seq == m_commandSeq
+                    && m_stage == Stage::StageOne
+                    && m_stageStep == StageStep::MoveToGrab)
                     executeNextGrabMove();
             });
         } else {
@@ -742,7 +783,7 @@ void HuayanScheduler::executeCurrentStep()
             executeNextGrabMove();
             break;
         case StageStep::DescendZ: {
-            const double descend = qBound(0.0, m_grabOffset.z - kGrabZClearance, kMaxDescend);
+            const double descend = calculateGrabDescend(m_grabOffset.z, m_grabZClearance, kMaxDescend);
             if (descend < 1.0) {
                 emit logMessage(QStringLiteral("[阶段一] 无需 Z 下探，已到扫码/夹取前位置"));
                 m_stageStep = m_preGripScanEnabled ? StageStep::WaitPreGripScan : StageStep::CloseGripper;
@@ -751,17 +792,14 @@ void HuayanScheduler::executeCurrentStep()
             }
             emit logMessage(QStringLiteral("[阶段一] Z 下探 %1mm（视觉深度 %2 - 余量 %3，上限 %4）")
                                 .arg(descend, 0, 'f', 1).arg(m_grabOffset.z, 0, 'f', 1)
-                                .arg(kGrabZClearance, 0, 'f', 1).arg(kMaxDescend, 0, 'f', 1));
-            int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, 2,
-                                     kZDescendInvert ? 0 : 1, descend, 1);
-            if (nRet != 0) {
-                const QString detail = describeError(m_boxID, nRet);
-                emitOperationError(detail.isEmpty()
-                    ? QStringLiteral("Z 下探失败：%1").arg(nRet)
-                    : QStringLiteral("Z 下探失败：%1（%2）").arg(nRet).arg(detail));
-                break;
-            }
-            startWaitForIdle();
+                                .arg(m_grabZClearance, 0, 'f', 1).arg(kMaxDescend, 0, 'f', 1));
+            PendingCommand cmd;
+            cmd.kind = PendingCommandKind::MoveRelTool;
+            cmd.label = QStringLiteral("Z 下探");
+            cmd.poseId = 2;
+            cmd.direction = kZDescendInvert ? 0 : 1;
+            cmd.distance = descend;
+            beginCommandWhenReady(cmd);
             break;
         }
         case StageStep::WaitPreGripScan:
@@ -779,10 +817,31 @@ void HuayanScheduler::executeCurrentStep()
             emit logMessage(QStringLiteral("[阶段一] 调用夹紧函数 %1").arg(m_gripFuncName));
             executeGripFunc();
             break;
-        case StageStep::LiftLoad:
-            emit logMessage(QStringLiteral("[阶段一] 抬升（调用拍照位函数 %1 回到安全高度）").arg(m_captureFuncName));
-            executeRunFunc(m_captureFuncName);
+        case StageStep::LiftLoad: {
+            // 夹紧后的离开路径不能再隐式等同拍照路径。
+            // 工位12的 Func_capture12 包含“过渡点→拍照点”，夹后复用会导致去倒料前多绕路；
+            // 其他工位未来也可能增加过渡点，因此这里按 lineconfig 的 afterGripMode 执行。
+            bool shouldRunAfterGrip = false;
+            const QString afterGripFunc = resolveAfterGripFunction(m_afterGripMode,
+                                                                    m_captureFuncName,
+                                                                    m_afterGripFuncName,
+                                                                    &shouldRunAfterGrip);
+            if (!shouldRunAfterGrip) {
+                emit logMessage(QStringLiteral("[阶段一] 夹紧后配置为不回安全位，直接完成取料阶段"));
+                m_stageStep = StageStep::None;
+                proceedStage();
+                break;
+            }
+            if (afterGripFunc.isEmpty()) {
+                emitOperationError(QStringLiteral("[阶段一] 夹后策略需要函数，但函数名为空"));
+                break;
+            }
+            emit logMessage(m_afterGripMode == AfterGripMode::CustomFunc
+                ? QStringLiteral("[阶段一] 夹紧后调用安全离开函数 %1").arg(afterGripFunc)
+                : QStringLiteral("[阶段一] 夹紧后复用拍照位函数 %1 回安全高度").arg(afterGripFunc));
+            executeRunFunc(afterGripFunc);
             break;
+        }
         case StageStep::None:
             completeStage();
             break;
@@ -874,15 +933,13 @@ void HuayanScheduler::proceedAction()
             return;
         }
         {
-            int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, 5, 1, kRotateToolAngle, 1);
-            if (nRet != 0) {
-                const QString detail = describeError(m_boxID, nRet);
-                emitOperationError(detail.isEmpty()
-                    ? QStringLiteral("工具旋转失败：%1").arg(nRet)
-                    : QStringLiteral("工具旋转失败：%1（%2）").arg(nRet).arg(detail));
-                return;
-            }
-            startWaitForIdle();
+            PendingCommand cmd;
+            cmd.kind = PendingCommandKind::MoveRelTool;
+            cmd.label = QStringLiteral("工具旋转");
+            cmd.poseId = 5;
+            cmd.direction = 1;
+            cmd.distance = kRotateToolAngle;
+            beginCommandWhenReady(cmd);
         }
         break;
     case Action::PalletPlace:
@@ -915,15 +972,13 @@ void HuayanScheduler::proceedAction()
             }
 
             const int direction = delta >= 0.0 ? 1 : 0;
-            int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, 1, direction, qAbs(delta), 1);
-            if (nRet != 0) {
-                const QString detail = describeError(m_boxID, nRet);
-                actionError(detail.isEmpty()
-                    ? QStringLiteral("扫码搜索 Y 轴移动失败：%1").arg(nRet)
-                    : QStringLiteral("扫码搜索 Y 轴移动失败：%1（%2）").arg(nRet).arg(detail));
-                return;
-            }
-            startWaitForIdle();
+            PendingCommand cmd;
+            cmd.kind = PendingCommandKind::MoveRelTool;
+            cmd.label = QStringLiteral("扫码搜索 Y 轴移动");
+            cmd.poseId = 1;
+            cmd.direction = direction;
+            cmd.distance = qAbs(delta);
+            beginCommandWhenReady(cmd);
             break;
         }
         case ActionStep::None:
@@ -992,18 +1047,13 @@ bool HuayanScheduler::executeNextPalletMove()
                         .arg(axisName[mv.poseId])
                         .arg(mv.direction ? QStringLiteral("正向") : QStringLiteral("负向"))
                         .arg(mv.distance, 0, 'f', 1));
-
-    int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, mv.poseId, mv.direction, mv.distance, 0);
-    if (nRet != 0) {
-        const QString detail = describeError(m_boxID, nRet);
-        emitOperationError(detail.isEmpty()
-            ? QStringLiteral("码垛相对移动失败：%1").arg(nRet)
-            : QStringLiteral("码垛相对移动失败：%1（%2）").arg(nRet).arg(detail));
-        return false;
-    }
-
-    startWaitForIdle();
-    return true;
+    PendingCommand cmd;
+    cmd.kind = PendingCommandKind::MoveRelBase;
+    cmd.label = QStringLiteral("码垛相对移动");
+    cmd.poseId = mv.poseId;
+    cmd.direction = mv.direction;
+    cmd.distance = mv.distance;
+    return beginCommandWhenReady(cmd);
 }
 
 void HuayanScheduler::clearActionState()
@@ -1057,8 +1107,13 @@ void HuayanScheduler::stopPollingAndTimers()
 {
     m_pollTimer->stop();
     m_timeoutTimer->stop();
+    m_commandReadyTimer->stop();
     m_pollCount = 0;
     m_hasSeenMoving = false;
+    m_pendingCommand = PendingCommand();
+    m_commandReadyElapsedMs = 0;
+    m_commandResetIssued = false;
+    ++m_commandSeq;
 }
 
 void HuayanScheduler::requestRobotStop()
@@ -1099,29 +1154,21 @@ bool HuayanScheduler::executeMoveJ(double x, double y, double z,
     if (!ensureConnected())
         return false;
 
-    int nRet = HRIF_MoveJ(m_boxID, m_rbtID,
-                          x, y, z, rx, ry, rz,
-                          0, 0, 0, 0, 0, 0,
-                          kTcpName.toStdString(), ucsName.toStdString(),
-                          kMoveVelocity, kMoveAcceleration, kMoveRadius,
-                          0, 0, 0, 0,
-                          cmdId.toStdString());
-    if (nRet != 0) {
-        const QString detail = describeError(m_boxID, nRet);
-        emitOperationError(detail.isEmpty()
-            ? QStringLiteral("移动指令失败：%1").arg(nRet)
-            : QStringLiteral("移动指令失败：%1（%2）").arg(nRet).arg(detail));
-        return false;
-    }
-
-    startWaitForIdle();
-    return true;
+    PendingCommand cmd;
+    cmd.kind = PendingCommandKind::MoveJ;
+    cmd.label = QStringLiteral("MoveJ %1").arg(ucsName);
+    cmd.targetPose = Pose{x, y, z, rx, ry, rz};
+    cmd.cmdId = cmdId;
+    cmd.ucsName = ucsName;
+    return beginCommandWhenReady(cmd);
 }
 
 void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 {
     if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision)
         return;
+
+    stopVisionWaitTimeout();
 
     auto sameDirection = [](double a, double b) {
         return (a >= 0.0 && b >= 0.0) || (a < 0.0 && b < 0.0);
@@ -1207,6 +1254,8 @@ void HuayanScheduler::onVisionNoObject()
         return;
     }
 
+    stopVisionWaitTimeout();
+
     const double nextDescendMm = m_searchDescendedMm + kSearchDescendStep;
     if (nextDescendMm > kMaxSearchDescend) {
         // 80mm 是保守默认值，防止算法一直识别不到时机械臂持续下移触碰料箱。
@@ -1229,20 +1278,19 @@ void HuayanScheduler::onVisionNoObject()
                         .arg(m_searchDescendedMm, 0, 'f', 1)
                         .arg(kMaxSearchDescend, 0, 'f', 1));
 
-    int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, 2,
-                             kZDescendInvert ? 0 : 1, kSearchDescendStep, 1);
-    if (nRet != 0) {
-        m_stageStep = StageStep::WaitForVision;
-        m_searchDescendCount--;
-        m_searchDescendedMm -= kSearchDescendStep;
-        const QString detail = describeError(m_boxID, nRet);
-        emitOperationError(detail.isEmpty()
-            ? QStringLiteral("搜索下移失败：%1").arg(nRet)
-            : QStringLiteral("搜索下移失败：%1（%2）").arg(nRet).arg(detail));
-        return;
+    PendingCommand cmd;
+    cmd.kind = PendingCommandKind::MoveRelTool;
+    cmd.label = QStringLiteral("搜索下移");
+    cmd.poseId = 2;
+    cmd.direction = kZDescendInvert ? 0 : 1;
+    cmd.distance = kSearchDescendStep;
+    if (!beginCommandWhenReady(cmd)) {
+        if (m_stage == Stage::StageOne && m_stageStep == StageStep::SearchDescend) {
+            m_stageStep = StageStep::WaitForVision;
+            m_searchDescendCount--;
+            m_searchDescendedMm -= kSearchDescendStep;
+        }
     }
-
-    startWaitForIdle();
 }
 
 void HuayanScheduler::onVisionErrorForPickup(const QString &msg)
@@ -1251,6 +1299,8 @@ void HuayanScheduler::onVisionErrorForPickup(const QString &msg)
         emit logMessage(QStringLiteral("[阶段一] 收到视觉错误，但当前不在等待视觉阶段，忽略：%1").arg(msg));
         return;
     }
+
+    stopVisionWaitTimeout();
 
     // 通信/解析错误不代表目标不在视野内，继续下移没有意义，应直接按视觉异常失败处理。
     emitOperationError(QStringLiteral("[阶段一] 视觉推理失败：%1").arg(msg));
@@ -1262,8 +1312,11 @@ bool HuayanScheduler::executeNextGrabMove()
         // 本次 XY 微调完成，回到拍照状态，等视觉出新帧后重新检测（闭环）
         emit logMessage(QStringLiteral("[阶段一] 本次微调完成，等待视觉更新后重新检测"));
         m_stageStep = StageStep::WaitForVision;
-        QTimer::singleShot(kVisionSettleMs, this, [this] {
-            if (m_stage == Stage::StageOne && m_stageStep == StageStep::WaitForVision)
+        const quint64 seq = nextCallbackSeq();
+        QTimer::singleShot(kVisionSettleMs, this, [this, seq] {
+            if (seq == m_commandSeq
+                && m_stage == Stage::StageOne
+                && m_stageStep == StageStep::WaitForVision)
                 proceedStage();
         });
         return true;
@@ -1282,18 +1335,13 @@ bool HuayanScheduler::executeNextGrabMove()
                         .arg(mv.direction ? QStringLiteral("正向") : QStringLiteral("负向"))
                         .arg(mv.distance, 0, 'f', 1));
 
-    // nToolMotion=1：在工具(TCP)坐标系下做相对运动
-    int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, mv.poseId, mv.direction, mv.distance, 1);
-    if (nRet != 0) {
-        const QString detail = describeError(m_boxID, nRet);
-        emitOperationError(detail.isEmpty()
-            ? QStringLiteral("相对运动失败：%1").arg(nRet)
-            : QStringLiteral("相对运动失败：%1（%2）").arg(nRet).arg(detail));
-        return false;
-    }
-
-    startWaitForIdle();
-    return true;
+    PendingCommand cmd;
+    cmd.kind = PendingCommandKind::MoveRelTool;
+    cmd.label = QStringLiteral("相对运动 %1").arg(axisName[mv.poseId]);
+    cmd.poseId = mv.poseId;
+    cmd.direction = mv.direction;
+    cmd.distance = mv.distance;
+    return beginCommandWhenReady(cmd);
 }
 
 void HuayanScheduler::setSurveyPose(const HuayanScheduler::Pose &p)
@@ -1306,19 +1354,8 @@ void HuayanScheduler::releaseGripper()
     if (!ensureConnected())
         return;
 
-    // 阶段结束后机器人可能处于 ProgramStopped 态，先复位再调用
-    HRIF_GrpReset(m_boxID, m_rbtID);
-
-    std::vector<string> params;
-    int nRet = HRIF_RunFunc(m_boxID, m_releaseFuncName.toStdString(), params);
-    if (nRet != 0) {
-        const QString detail = describeError(m_boxID, nRet);
-        emit stageError(detail.isEmpty()
-            ? QStringLiteral("松开夹爪失败：%1").arg(nRet)
-            : QStringLiteral("松开夹爪失败：%1（%2）").arg(nRet).arg(detail));
-        return;
-    }
-    emit logMessage(QStringLiteral("已调用松开夹爪 %1").arg(m_releaseFuncName));
+    if (executeRunFunc(m_releaseFuncName, 30000))
+        emit logMessage(QStringLiteral("已请求松开夹爪 %1").arg(m_releaseFuncName));
 }
 
 void HuayanScheduler::setSpeedOverride(int percent)
@@ -1341,74 +1378,39 @@ bool HuayanScheduler::setGripper(bool open)
     }
 
     // 夹爪是 IO 动作，nMovingState 不反映其状态，固定等待 1.5s 让气动/伺服完成动作
-    QTimer::singleShot(1500, this, [this] {
-        if (m_stage != Stage::None) {
+    const quint64 seq = nextCallbackSeq();
+    QTimer::singleShot(1500, this, [this, seq] {
+        if (seq == m_commandSeq && m_stage != Stage::None) {
             advanceStep();
             proceedStage();
         }
     });
     return true;
+}
+
+quint64 HuayanScheduler::nextCallbackSeq()
+{
+    return ++m_commandSeq;
 }
 
 bool HuayanScheduler::executeRunFunc(const QString &funcName, int timeoutMs)
 {
-    if (!ensureConnected())
-        return false;
-
-    std::vector<string> params;
-    int nRet = HRIF_RunFunc(m_boxID, funcName.toStdString(), params);
-    if (nRet != 0) {
-        const QString detail = describeError(m_boxID, nRet);
-        emitOperationError(detail.isEmpty()
-            ? QStringLiteral("调用函数 %1 失败：%2").arg(funcName).arg(nRet)
-            : QStringLiteral("调用函数 %1 失败：%2（%3）").arg(funcName).arg(nRet).arg(detail));
-        return false;
-    }
-
-    startWaitForIdle(timeoutMs);
-    return true;
+    PendingCommand cmd;
+    cmd.kind = PendingCommandKind::RunFunc;
+    cmd.label = QStringLiteral("RunFunc %1").arg(funcName);
+    cmd.funcName = funcName;
+    cmd.timeoutMs = timeoutMs;
+    return beginCommandWhenReady(cmd);
 }
 
 bool HuayanScheduler::executeGripFunc()
 {
-    if (!ensureConnected())
-        return false;
-
-    std::vector<string> params;
-    int nRet = HRIF_RunFunc(m_boxID, m_gripFuncName.toStdString(), params);
-    if (nRet != 0) {
-        const QString detail = describeError(m_boxID, nRet);
-        emitOperationError(detail.isEmpty()
-            ? QStringLiteral("调用夹紧函数失败：%1").arg(nRet)
-            : QStringLiteral("调用夹紧函数失败：%1（%2）").arg(nRet).arg(detail));
-        return false;
-    }
-
-    // 夹爪是 IO/气动动作，nMovingState 不反映其状态，固定等待让动作完成
-    QTimer::singleShot(2500, this, [this] {
-        if (m_stage != Stage::None) {
-            advanceStep();
-            proceedStage();
-        }
-    });
-    return true;
+    return executeRunFunc(m_gripFuncName, 5000);
 }
 
 bool HuayanScheduler::executeFlipUnload()
 {
-    // 调用华研端脚本函数完成卸料翻转动作
-    if (!ensureConnected())
-        return false;
-
-    std::vector<string> params;
-    int nRet = HRIF_RunFunc(m_boxID, kFlipFuncName.toStdString(), params);
-    if (nRet != 0) {
-        emitOperationError(QStringLiteral("卸料翻转脚本执行失败：%1").arg(nRet));
-        return false;
-    }
-
-    startWaitForIdle(60000);  // 翻转脚本最长等待 60s
-    return true;
+    return executeRunFunc(kFlipFuncName, 60000);
 }
 
 bool HuayanScheduler::executeStackingFunction()
@@ -1423,18 +1425,197 @@ bool HuayanScheduler::executeStackingFunction()
         return false;
     }
 
-    std::vector<string> params;
-    for (const QString &entry : m_stackingParams)
-        params.push_back(entry.toStdString());
+    PendingCommand cmd;
+    cmd.kind = PendingCommandKind::RunFunc;
+    cmd.label = QStringLiteral("RunFunc %1").arg(m_stackingFuncName);
+    cmd.funcName = m_stackingFuncName;
+    cmd.timeoutMs = 120000;
+    cmd.params = m_stackingParams;
+    return beginCommandWhenReady(cmd);
+}
 
-    int nRet = HRIF_RunFunc(m_boxID, m_stackingFuncName.toStdString(), params);
-    if (nRet != 0) {
-        emitOperationError(QStringLiteral("码垛脚本执行失败：%1").arg(nRet));
+bool HuayanScheduler::hasActiveRobotCommand() const
+{
+    return m_pollTimer->isActive()
+        || (m_timeoutTimer->isActive() && m_stageStep != StageStep::WaitForVision);
+}
+
+void HuayanScheduler::stopVisionWaitTimeout()
+{
+    if (m_stage == Stage::StageOne
+        && m_stageStep == StageStep::WaitForVision
+        && m_timeoutTimer->isActive()) {
+        emit logMessage(QStringLiteral("[阶段一] 已收到视觉结果，停止 WaitForVision 超时定时器"));
+        m_timeoutTimer->stop();
+    }
+}
+
+bool HuayanScheduler::beginCommandWhenReady(const PendingCommand &cmd)
+{
+    if (!ensureConnected())
+        return false;
+
+    const bool hasPendingCommand = m_pendingCommand.kind != PendingCommandKind::None;
+    if (!canQueuePendingCommand(hasPendingCommand, false)) {
+        const QString msg = QStringLiteral("待下发命令仍未执行，拒绝覆盖：old=%1 new=%2")
+                                .arg(m_pendingCommand.label, cmd.label);
+        emitOperationError(msg);
+        return false;
+    }
+    if (!canQueuePendingCommand(false, hasActiveRobotCommand())) {
+        const QString msg = QStringLiteral("机械臂仍有命令执行中，拒绝插入新命令：%1").arg(cmd.label);
+        emitOperationError(msg);
         return false;
     }
 
-    startWaitForIdle(120000);  // 码垛脚本最长等待 120s
+    // 每次命令下发前都重新检查控制器状态。
+    // 20018 的现场根因是串行命令之间只判断“不运动”，没有确认控制器已允许下一条命令。
+    ++m_commandSeq;
+    m_pendingCommand = cmd;
+    m_commandReadyElapsedMs = 0;
+    m_commandResetIssued = false;
+    return pollCommandReady();
+}
+
+bool HuayanScheduler::pollCommandReady()
+{
+    if (m_pendingCommand.kind == PendingCommandKind::None)
+        return false;
+
+    int nMovingState = 0;
+    int nEnableState = 0;
+    int nErrorState = 0;
+    int nErrorCode = 0;
+    int nErrorAxis = 0;
+    int nBreaking = 0;
+    int nPause = 0;
+    int nBlendingDone = 0;
+    int nRet = HRIF_ReadRobotFlags(m_boxID, m_rbtID,
+                                   nMovingState, nEnableState, nErrorState,
+                                   nErrorCode, nErrorAxis, nBreaking,
+                                   nPause, nBlendingDone);
+    if (nRet != 0) {
+        const QString msg = QStringLiteral("命令前读取机器人状态失败：%1").arg(nRet);
+        m_pendingCommand = PendingCommand();
+        m_commandReadyTimer->stop();
+        emitOperationError(msg);
+        return false;
+    }
+
+    if (nErrorState != 0) {
+        const QString detail = describeError(m_boxID, nErrorCode);
+        const QString msg = detail.isEmpty()
+            ? QStringLiteral("命令前机器人报错，错误码：%1").arg(nErrorCode)
+            : QStringLiteral("命令前机器人报错，错误码：%1（%2）").arg(nErrorCode).arg(detail);
+        m_pendingCommand = PendingCommand();
+        m_commandReadyTimer->stop();
+        emitOperationError(msg);
+        return false;
+    }
+
+    int nCurFSM = 0;
+    string strCurFSM;
+    const int fsmRet = HRIF_ReadCurFSM(m_boxID, m_rbtID, nCurFSM, strCurFSM);
+    const QString fsmText = fsmRet == 0 ? QString::fromStdString(strCurFSM) : QStringLiteral("unknown");
+    const CommandReadiness readiness = evaluateCommandReadiness(nMovingState, nPause, fsmRet, fsmText);
+    if (readiness == CommandReadiness::Wait) {
+        m_commandReadyElapsedMs += m_commandReadyTimer->interval();
+        if (fsmRet == 0
+            && fsmText.contains(QStringLiteral("ProgramStopped"), Qt::CaseInsensitive)
+            && !m_commandResetIssued) {
+            emit logMessage(QStringLiteral("[华沿] 命令前检测到 ProgramStopped，执行 GrpReset 后等待可执行状态：%1")
+                                .arg(m_pendingCommand.label));
+            const int resetRet = HRIF_GrpReset(m_boxID, m_rbtID);
+            if (resetRet != 0)
+                emit logMessage(QStringLiteral("[警告] 命令前 GrpReset 失败：%1").arg(resetRet));
+            m_commandResetIssued = true;
+        }
+    } else if (readiness == CommandReadiness::Error) {
+        const QString msg = QStringLiteral("命令前读取 FSM 失败：ret=%1，label=%2").arg(fsmRet).arg(m_pendingCommand.label);
+        m_pendingCommand = PendingCommand();
+        m_commandReadyTimer->stop();
+        emitOperationError(msg);
+        return false;
+    } else {
+        PendingCommand cmd = m_pendingCommand;
+        m_pendingCommand = PendingCommand();
+        m_commandReadyTimer->stop();
+        return dispatchReadyCommand(cmd);
+    }
+
+    static constexpr int kCommandReadyTimeoutMs = 8000;
+    if (m_commandReadyElapsedMs >= kCommandReadyTimeoutMs) {
+        const QString msg = QStringLiteral("命令前等待机器人可执行状态超时：%1（moving=%2 pause=%3 fsmRet=%4 fsm=%5/%6）")
+            .arg(m_pendingCommand.label)
+            .arg(nMovingState)
+            .arg(nPause)
+            .arg(fsmRet)
+            .arg(nCurFSM)
+            .arg(fsmText);
+        m_pendingCommand = PendingCommand();
+        m_commandReadyTimer->stop();
+        emitOperationError(msg);
+        return false;
+    }
+
+    if (!m_commandReadyTimer->isActive())
+        m_commandReadyTimer->start();
     return true;
+}
+
+bool HuayanScheduler::dispatchReadyCommand(const PendingCommand &cmd)
+{
+    if (cmd.kind == PendingCommandKind::RunFunc) {
+        std::vector<string> params;
+        for (const QString &entry : cmd.params)
+            params.push_back(entry.toStdString());
+        int nRet = HRIF_RunFunc(m_boxID, cmd.funcName.toStdString(), params);
+        if (nRet != 0) {
+            const QString detail = describeError(m_boxID, nRet);
+            emitOperationError(detail.isEmpty()
+                ? QStringLiteral("调用函数 %1 失败：%2").arg(cmd.funcName).arg(nRet)
+                : QStringLiteral("调用函数 %1 失败：%2（%3）").arg(cmd.funcName).arg(nRet).arg(detail));
+            return false;
+        }
+        startWaitForIdle(cmd.timeoutMs);
+        return true;
+    }
+
+    if (cmd.kind == PendingCommandKind::MoveRelTool || cmd.kind == PendingCommandKind::MoveRelBase) {
+        const int toolMotion = cmd.kind == PendingCommandKind::MoveRelTool ? 1 : 0;
+        int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, cmd.poseId, cmd.direction, cmd.distance, toolMotion);
+        if (nRet != 0) {
+            const QString detail = describeError(m_boxID, nRet);
+            emitOperationError(detail.isEmpty()
+                ? QStringLiteral("%1失败：%2").arg(cmd.label).arg(nRet)
+                : QStringLiteral("%1失败：%2（%3）").arg(cmd.label).arg(nRet).arg(detail));
+            return false;
+        }
+        startWaitForIdle(cmd.timeoutMs);
+        return true;
+    }
+
+    if (cmd.kind == PendingCommandKind::MoveJ) {
+        int nRet = HRIF_MoveJ(m_boxID, m_rbtID,
+                              cmd.targetPose.x, cmd.targetPose.y, cmd.targetPose.z,
+                              cmd.targetPose.rx, cmd.targetPose.ry, cmd.targetPose.rz,
+                              0, 0, 0, 0, 0, 0,
+                              kTcpName.toStdString(), cmd.ucsName.toStdString(),
+                              kMoveVelocity, kMoveAcceleration, kMoveRadius,
+                              0, 0, 0, 0,
+                              cmd.cmdId.toStdString());
+        if (nRet != 0) {
+            const QString detail = describeError(m_boxID, nRet);
+            emitOperationError(detail.isEmpty()
+                ? QStringLiteral("%1失败：%2").arg(cmd.label).arg(nRet)
+                : QStringLiteral("%1失败：%2（%3）").arg(cmd.label).arg(nRet).arg(detail));
+            return false;
+        }
+        startWaitForIdle(cmd.timeoutMs);
+        return true;
+    }
+
+    return false;
 }
 
 void HuayanScheduler::resetArm()

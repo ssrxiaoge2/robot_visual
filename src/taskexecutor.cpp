@@ -102,6 +102,9 @@ void TaskExecutor::start(const Task &task)
 
     HuayanScheduler::StationArmFunctions stationFuncs;
     stationFuncs.captureFunc = m_stationCfg->captureFunc;
+    stationFuncs.afterGripMode = m_stationCfg->afterGripMode;
+    stationFuncs.afterGripFunc = m_stationCfg->afterGripFunc;
+    stationFuncs.grabZClearance = m_stationCfg->grabZClearance;
     stationFuncs.unloadPointFunc = m_stationCfg->unloadPointFunc;
     stationFuncs.unloadFunc = m_stationCfg->unloadFunc;
     m_arm->setStationFunctions(stationFuncs);
@@ -258,11 +261,16 @@ void TaskExecutor::onArmStageCompleted(const QString &stageName)
     case ExecState::PreGripScan:
     case ExecState::RotateForScan:
         if (m_stationCfg->pickupLm == m_stationCfg->unloadLm) {
+            const bool returnedToCaptureSafety = m_stationCfg->afterGripMode != AfterGripMode::None;
             emit logMessage(prefix(QStringLiteral("AGV"))
-                            + QStringLiteral(" 取料已回拍照安全高度，取料位与倒料位同一 LM%1，跳过 AGV 导航，直接进入倒料准备点")
+                            + (returnedToCaptureSafety
+                                   ? QStringLiteral(" 取料已回拍照安全高度，取料位与倒料位同一 LM%1，跳过 AGV 导航，直接进入倒料准备点")
+                                   : QStringLiteral(" 取料完成后无需回拍照安全高度，取料位与倒料位同一 LM%1，跳过 AGV 导航，直接进入倒料准备点"))
                                   .arg(m_stationCfg->unloadLm));
             enterState(ExecState::ArmUnload,
-                       QStringLiteral("取料已回拍照安全高度，同站工位直接进入倒料准备点"));
+                       returnedToCaptureSafety
+                           ? QStringLiteral("取料已回拍照安全高度，同站工位直接进入倒料准备点")
+                           : QStringLiteral("取料完成后无需回拍照安全高度，同站工位直接进入倒料准备点"));
             break;
         }
 

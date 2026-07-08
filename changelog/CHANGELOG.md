@@ -5,6 +5,20 @@
 
 ---
 
+## 2026-07-08 | v0.2.4 | 工位12取料站点对齐、抓取余量修正与 AGV 步骤超时调整
+
+### 变更
+- 保持当前已现场验证通过的工位12取料站点配置，与 RoboShop 当前使用配置一致。
+- 将 1-11 工位篮筐抓取 Z 余量 kLargeBasketGrabZClearance 调整为 450.0，减少夹爪下探量。
+- 保持工位12紫框抓取 Z 余量 kPurpleBasketGrabZClearance = 380.0，与当前现场验证结果一致。
+- 将 TaskExecutor 中每个 AGV 导航步骤上限时间调整为 120000 ms，与文档和现场调试预期一致。
+
+### 文件
+- src/lineconfig.h
+- src/taskexecutor.h
+- changelog/CHANGELOG.md
+
+---
 ## 2026-07-01 | v0.2.4 | 左侧面板 UI 优化与补光灯权限脚本
 
 ### 变更
