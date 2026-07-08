@@ -256,10 +256,8 @@ void TaskExecutor::onArmStageCompleted(const QString &stageName)
     emit logMessage(prefix(QStringLiteral("ARM"))
                     + QStringLiteral(" %1 已完成").arg(stageName));
 
-    switch (m_state) {
-    case ExecState::ArmPickup:
-    case ExecState::PreGripScan:
-    case ExecState::RotateForScan:
+    // 统一处理阶段一完成，避免不同扫码路径漏推进。
+    if (isPickupCompletionState(m_state)) {
         if (m_stationCfg->pickupLm == m_stationCfg->unloadLm) {
             const bool returnedToCaptureSafety = m_stationCfg->afterGripMode != AfterGripMode::None;
             emit logMessage(prefix(QStringLiteral("AGV"))
@@ -271,11 +269,14 @@ void TaskExecutor::onArmStageCompleted(const QString &stageName)
                        returnedToCaptureSafety
                            ? QStringLiteral("取料已回拍照安全高度，同站工位直接进入倒料准备点")
                            : QStringLiteral("取料完成后无需回拍照安全高度，同站工位直接进入倒料准备点"));
-            break;
+            return;
         }
 
         enterState(ExecState::StowAfterPickup, QStringLiteral("取料完成，机械臂收姿态"));
-        break;
+        return;
+    }
+
+    switch (m_state) {
     case ExecState::StowAfterPickup:
         startAgvStep(ExecState::AgvToUnload,
                      m_stationCfg->unloadLm,
@@ -574,6 +575,20 @@ bool TaskExecutor::isAgvNavigationState(ExecState state) const
     return state == ExecState::AgvToPickup
         || state == ExecState::AgvToUnload
         || state == ExecState::AgvToPallet;
+}
+
+// 扫码搜索成功后状态会停在 PreGripScanSearchReturn，但机械臂阶段一完成仍代表取料已完成。
+bool TaskExecutor::isPickupCompletionState(ExecState state) const
+{
+    switch (state) {
+    case ExecState::ArmPickup:
+    case ExecState::PreGripScan:
+    case ExecState::PreGripScanSearchReturn:
+    case ExecState::RotateForScan:
+        return true;
+    default:
+        return false;
+    }
 }
 
 bool TaskExecutor::resolveTaskConfigs()

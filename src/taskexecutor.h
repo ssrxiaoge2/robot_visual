@@ -117,6 +117,7 @@ private:
     TaskStep taskStepForState(ExecState state) const;
     int stepIndexForTaskStep(TaskStep step) const;
     bool isAgvNavigationState(ExecState state) const;
+    bool isPickupCompletionState(ExecState state) const;
 
     /// 从静态配置表解析当前工位和码垛区；失败时内部已发 systemError。
     bool resolveTaskConfigs();

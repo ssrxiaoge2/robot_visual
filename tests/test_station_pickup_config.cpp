@@ -147,6 +147,12 @@ int main()
                 "executeMoveJ() 必须通过统一待命令门控下发 MoveJ");
     requireTrue(taskExecutorSource.contains(QStringLiteral("取料完成后无需回拍照安全高度")),
                 "同 LM 工位日志必须区分是否真的回过拍照安全高度");
+    requireTrue(taskExecutorSource.contains(QStringLiteral("isPickupCompletionState")),
+                "TaskExecutor 必须集中判断阶段一完成状态");
+    requireTrue(taskExecutorSource.contains(QStringLiteral("case ExecState::PreGripScanSearchReturn:")),
+                "扫码搜索成功回原夹取位后，阶段一完成必须继续推进");
+    requireTrue(taskExecutorSource.contains(QStringLiteral("if (isPickupCompletionState(m_state))")),
+                "onArmStageCompleted 必须使用取料完成状态 helper");
     requireTrue(schedulerSource.contains(QStringLiteral("++m_commandSeq; // 让已经排队的 singleShot 回调全部失效")),
                 "stop() 必须显式失效已排队的 singleShot 回调");
     requireTrue(schedulerSource.contains(QStringLiteral("nextCallbackSeq()")),
