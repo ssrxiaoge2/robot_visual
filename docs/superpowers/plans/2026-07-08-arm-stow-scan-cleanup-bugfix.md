@@ -1,14 +1,14 @@
 # 机械臂收姿态、扫码搜索与 Cleanup 修复实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **给执行代理：** 必须使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 按任务逐项实施。本计划使用 checkbox（`- [ ]`）跟踪进度。
 
-**Goal:** 修复三类现场 Bug：倒料后收姿态按工位配置、扫码搜索成功后任务继续推进、Cleanup 收姿态按华沿 SDK RunFunc/FSM 语义等待并记录诊断。
+**目标：** 修复三类现场 Bug：倒料后收姿态按工位配置、扫码搜索成功后任务继续推进、Cleanup 收姿态按华沿 SDK RunFunc/FSM 语义等待并记录诊断。
 
-**Architecture:** 保持现有 `TaskExecutor` 负责任务编排、`HuayanScheduler` 负责机械臂动作、`lineconfig.h` 负责工位差异配置的边界。工位差异进入配置表；状态机只增加缺失分支和 RunFunc 完成判定，不改变已有正常流程语义。
+**架构：** 保持现有 `TaskExecutor` 负责任务编排、`HuayanScheduler` 负责机械臂动作、`lineconfig.h` 负责工位差异配置的边界。工位差异进入配置表；状态机只增加缺失分支和 RunFunc 完成判定，不改变已有正常流程语义。
 
-**Tech Stack:** C++17、Qt、CMake/CTest、华沿 HRIF SDK、现有 `test_station_pickup_config` C++ 回归测试。
+**技术栈：** C++17、Qt、CMake/CTest、华沿 HRIF SDK、现有 `test_station_pickup_config` C++ 回归测试。
 
-## Global Constraints
+## 全局约束
 
 - 不改动原有正常流程逻辑：首轮扫码成功、取料后收姿态、倒料、码垛失败转任务失败等既有语义保持不变。
 - 不使用 Python 作为验证测试；新增或修改的自动化验证使用 C++/CMake 或现有 CTest。
@@ -29,6 +29,15 @@
 - `tests/CMakeLists.txt`：保留或登记 C++ 测试目标；不新增 Python 测试。
 - `changelog/CHANGELOG.md`：记录本次三个 Bug 修复和现场验证要点。
 
+## 全局命名与注释要求
+
+- 新增变量名必须表达业务场景，不使用泛化名称。倒料后收姿态函数统一命名为 `stowAfterUnloadFunc`，表示“倒料完成后从当前倒料点回运行安全位的示教器函数”。
+- 新增一次性收姿态函数接口统一命名为 `setNextStowFunction(const QString &funcName)`，表示“只影响下一次 `startStow()` 调用”，不能被误解为永久修改默认收姿态函数。
+- 新增扫码完成状态 helper 统一命名为 `isPickupCompletionState(ExecState state) const`，表示“阶段一完成后是否应按取料完成推进”。
+- 新增机器人状态诊断结构体统一命名为 `RobotStateSnapshot`，字段必须保留 `movingState`、`pauseState`、`errorState`、`errorCode`、`nCurFSM`、`strCurFSM`、`valid`。
+- 所有新增注释使用中文，注释说明业务原因和安全边界，不逐行复述代码。
+- 修改 `TaskExecutor` 状态推进时，注释必须说明“为什么该状态允许进入取料完成分支”；修改 `HuayanScheduler` RunFunc 等待时，注释必须说明“华沿 SDK demo 中 34 表示 ScriptRunning，RunFunc 未结束前不能下发下一条 RunFunc”。
+
 ## 现场分析摘要
 
 问题 1 根因明确：当前 `HuayanScheduler::startStow()` 固定调用 `Func_yun_xing_zhong`，无法表达工位 3 从倒料点经示教器过渡点回安全点的路径。应新增 12 工位配置项，默认仍为 `Func_yun_xing_zhong`。
@@ -37,22 +46,37 @@
 
 问题 3 直接故障位置明确，最终根因需靠诊断确认：工位 5 正常取料、倒料和倒料后收姿态均成功，异常发生在码垛函数缺失后的 Cleanup 收姿态。华沿 SDK demo 显示 `RunFunc()` 后应等待 FSM 离开 `34 ScriptRunning`，因此本次按 RunFunc/FSM 时序补强，不做工位 5 专属修复。
 
-### Task 1: Bug 1 - 倒料后收姿态函数按工位配置
+### 任务 1：Bug 1 - 倒料后收姿态函数按工位配置
 
-**Files:**
-- Modify: `robot_visual20260625/robot_visual/src/lineconfig.h`
-- Modify: `robot_visual20260625/robot_visual/src/huayanScheduler.h`
-- Modify: `robot_visual20260625/robot_visual/src/huayanScheduler.cpp`
-- Modify: `robot_visual20260625/robot_visual/src/taskexecutor.cpp`
-- Modify: `robot_visual20260625/robot_visual/tests/test_station_pickup_config.cpp`
+**文件：**
+- 修改：`robot_visual20260625/robot_visual/src/lineconfig.h`
+- 修改：`robot_visual20260625/robot_visual/src/huayanScheduler.h`
+- 修改：`robot_visual20260625/robot_visual/src/huayanScheduler.cpp`
+- 修改：`robot_visual20260625/robot_visual/src/taskexecutor.cpp`
+- 修改：`robot_visual20260625/robot_visual/tests/test_station_pickup_config.cpp`
 
-**Interfaces:**
-- Consumes: existing `StationTaskConfig`, `HuayanScheduler::StationArmFunctions`, `HuayanScheduler::startStow()`.
-- Produces: `StationTaskConfig::stowAfterUnloadFunc`, `StationArmFunctions::stowAfterUnloadFunc`, `HuayanScheduler::setNextStowFunction(const QString &funcName)`.
+**接口：**
+- 使用现有接口：`StationTaskConfig`、`HuayanScheduler::StationArmFunctions`、`HuayanScheduler::startStow()`。
+- 新增接口：`StationTaskConfig::stowAfterUnloadFunc`、`StationArmFunctions::stowAfterUnloadFunc`、`HuayanScheduler::setNextStowFunction(const QString &funcName)`。
 
-- [ ] **Step 1: Write the failing C++ config test**
+**新增/修改的函数、接口、变量：**
+- `StationTaskConfig::stowAfterUnloadFunc`：新增 `QString` 字段，配置当前工位倒料后回运行安全位的示教器函数。
+- `lineconfig_detail::kStationTaskConfigs`：每个工位新增一个配置值；工位 3 使用 `Func_yun_xing_zhong_s3`，其他工位使用 `Func_yun_xing_zhong`。
+- `HuayanScheduler::StationArmFunctions::stowAfterUnloadFunc`：新增 `QString` 字段，用于从 `TaskExecutor` 注入工位配置。
+- `HuayanScheduler::setNextStowFunction(const QString &funcName)`：新增 public 方法，只设置下一次 `startStow()` 要调用的函数。
+- `HuayanScheduler::m_nextStowFuncName`：新增 private 成员，一次性保存下一次收姿态函数名，使用后必须清空。
+- `TaskExecutor::start()`：给 `stationFuncs.stowAfterUnloadFunc` 赋值。
+- `TaskExecutor::enterState(ExecState::StowAfterUnload, ...)`：调用 `setNextStowFunction(m_stationCfg->stowAfterUnloadFunc)` 后再 `startStow()`。
 
-Edit `tests/test_station_pickup_config.cpp` and add these checks after the existing `s12` config checks:
+**必须增加的中文注释：**
+- 在 `StationTaskConfig::stowAfterUnloadFunc` 字段旁注释：这是“倒料后”从当前倒料点回运行安全位的函数，不是夹紧后回安全高度函数。
+- 在工位 3 配置行附近注释：工位 3 的示教器函数内部包含“倒料点 -> 过渡点 -> 安全点”的路径。
+- 在 `setNextStowFunction()` 声明旁注释：该接口只影响下一次收姿态，不修改 UI/手动路径默认函数。
+- 在 `TaskExecutor::enterState()` 的 `StowAfterUnload` 分支注释：只有倒料后收姿态走工位配置；取料后、码垛后、Cleanup 保持原默认函数。
+
+- [ ] **步骤 1：编写失败的 C++ 配置测试**
+
+编辑 `tests/test_station_pickup_config.cpp`，在现有 `s12` 配置检查之后加入：
 
 ```cpp
     const StationTaskConfig *s3 = stationConfig(3);
@@ -72,7 +96,7 @@ Edit `tests/test_station_pickup_config.cpp` and add these checks after the exist
     }
 ```
 
-Also add static source checks near existing `schedulerSource` checks:
+在已有 `schedulerSource` 检查附近再加入静态源码检查：
 
 ```cpp
     requireTrue(schedulerSource.contains(QStringLiteral("setNextStowFunction")),
@@ -81,22 +105,22 @@ Also add static source checks near existing `schedulerSource` checks:
                 "TaskExecutor 必须在倒料后收姿态前注入当前工位函数");
 ```
 
-- [ ] **Step 2: Run the C++ test and verify it fails**
+- [ ] **步骤 2：运行 C++ 测试并确认失败**
 
-Run from `robot_visual20260625/robot_visual`:
+在 `robot_visual20260625/robot_visual` 目录运行：
 
 ```bash
 cmake --build build --target test_station_pickup_config
 ./build/tests/test_station_pickup_config
 ```
 
-Expected: build fails because `StationTaskConfig` has no member named `stowAfterUnloadFunc`, or the test binary fails with “工位3倒料后收姿态必须使用带过渡点的新函数”.
+预期：编译失败并提示 `StationTaskConfig` 没有 `stowAfterUnloadFunc` 成员，或测试程序失败并输出“工位3倒料后收姿态必须使用带过渡点的新函数”。
 
-- [ ] **Step 3: Extend the station config**
+- [ ] **步骤 3：扩展工位配置**
 
-Modify `src/lineconfig.h`.
+修改 `src/lineconfig.h`。
 
-Replace the `StationTaskConfig` struct with the same fields plus `stowAfterUnloadFunc` after `unloadFunc`:
+在 `StationTaskConfig` 结构体中，于 `unloadFunc` 后增加 `stowAfterUnloadFunc` 字段，结构体应保持如下字段顺序：
 
 ```cpp
 struct StationTaskConfig {
@@ -114,82 +138,85 @@ struct StationTaskConfig {
 };
 ```
 
-Update all 12 rows in `kStationTaskConfigs` so the new field appears between `unloadFunc` and `grabZClearance`. Use:
+更新 `kStationTaskConfigs` 的 12 行配置，使新字段位于 `unloadFunc` 和 `grabZClearance` 之间。工位 3 使用：
 
 ```cpp
 QStringLiteral("Func_yun_xing_zhong_s3")
 ```
 
-only for station 3. Use:
+其他工位使用：
 
 ```cpp
 QStringLiteral("Func_yun_xing_zhong")
 ```
 
-for stations 1, 2, and 4-12.
+覆盖工位 1、2、4-12。
 
-- [ ] **Step 4: Add the HuayanScheduler interface**
+- [ ] **步骤 4：增加 HuayanScheduler 接口**
 
-Modify `src/huayanScheduler.h`.
+修改 `src/huayanScheduler.h`。
 
-In `StationArmFunctions`, add:
+在 `StationArmFunctions` 中增加：
 
 ```cpp
-        QString stowAfterUnloadFunc; ///< 当前工位倒料后回运行安全位函数；默认 Func_yun_xing_zhong。
+        QString stowAfterUnloadFunc; ///< 当前工位倒料后从倒料点回运行安全位的函数；不是夹紧后回安全高度函数。
 ```
 
-In public methods near `startStow()`, add:
+在 public 方法区靠近 `startStow()` 的位置增加：
 
 ```cpp
+    /// 只覆盖下一次 startStow() 调用使用的函数；执行后自动恢复默认收姿态函数。
     void setNextStowFunction(const QString &funcName);
 ```
 
-In private members near `m_stowFuncName`, add:
+在 private 成员区靠近 `m_stowFuncName` 的位置增加：
 
 ```cpp
     QString m_nextStowFuncName;
 ```
 
-Keep existing `m_stowFuncName = QStringLiteral("Func_yun_xing_zhong")` unchanged as the fallback for all existing UI/manual paths.
+保持现有 `m_stowFuncName = QStringLiteral("Func_yun_xing_zhong")` 不变，作为所有现有 UI/手动路径的默认函数。
 
-- [ ] **Step 5: Implement stow function selection**
+- [ ] **步骤 5：实现收姿态函数选择**
 
-Modify `src/huayanScheduler.cpp`.
+修改 `src/huayanScheduler.cpp`。
 
-Add:
+增加函数实现：
 
 ```cpp
 void HuayanScheduler::setNextStowFunction(const QString &funcName)
 {
+    // 只影响下一次收姿态；倒料后的工位定制路径不能污染其他收姿态场景。
     m_nextStowFuncName = funcName;
 }
 ```
 
-In `executeCurrentStep()` under `Stage::Stow` and `StageStep::StowArm`, replace the fixed function usage with:
+在 `executeCurrentStep()` 的 `Stage::Stow`、`StageStep::StowArm` 分支中，将固定函数调用替换为：
 
 ```cpp
             const QString stowFunc = m_nextStowFuncName.isEmpty()
                 ? m_stowFuncName
                 : m_nextStowFuncName;
+            // 一次性覆盖使用后立即清空，避免取料后、码垛后或 Cleanup 误用倒料后路径。
             m_nextStowFuncName.clear();
             emit logMessage(QStringLiteral("[收姿态] 调用 %1").arg(stowFunc));
             executeRunFunc(stowFunc);
             break;
 ```
 
-This keeps all existing callers on `m_stowFuncName` unless `TaskExecutor` explicitly sets a one-shot function.
+这保证所有现有调用仍使用 `m_stowFuncName`，只有 `TaskExecutor` 显式设置一次性函数时才改用工位配置。
 
-- [ ] **Step 6: Inject and use the station function from TaskExecutor**
+- [ ] **步骤 6：在 TaskExecutor 注入并使用工位函数**
 
-Modify `src/taskexecutor.cpp`.
+修改 `src/taskexecutor.cpp`。
 
-In `TaskExecutor::start()`, after setting `stationFuncs.unloadFunc`, add:
+在 `TaskExecutor::start()` 中，设置 `stationFuncs.unloadFunc` 后增加：
 
 ```cpp
     stationFuncs.stowAfterUnloadFunc = m_stationCfg->stowAfterUnloadFunc;
 ```
 
-In `TaskExecutor::enterState()`, split `StowAfterUnload` from the generic stow group:
+在 `TaskExecutor::enterState()` 中，将 `StowAfterUnload` 从通用收姿态分支拆出：
 
 ```cpp
     case ExecState::StowAfterPickup:
@@ -198,17 +225,18 @@ In `TaskExecutor::enterState()`, split `StowAfterUnload` from the generic stow g
         m_arm->startStow();
         break;
     case ExecState::StowAfterUnload:
+        // 倒料点回安全位可能需要工位专属过渡点，只在倒料后收姿态使用配置函数。
         emit logMessage(prefix(QStringLiteral("ARM")) + QStringLiteral(" 启动倒料后收姿态"));
         m_arm->setNextStowFunction(m_stationCfg->stowAfterUnloadFunc);
         m_arm->startStow();
         break;
 ```
 
-Do not call `setNextStowFunction()` for `CleanupStow`, `StowAfterPickup`, or `StowAfterPallet`.
+不要在 `CleanupStow`、`StowAfterPickup`、`StowAfterPallet` 调用 `setNextStowFunction()`。
 
-- [ ] **Step 7: Run C++ verification**
+- [ ] **步骤 7：运行 C++ 验证**
 
-Run:
+运行：
 
 ```bash
 cmake --build build --target test_station_pickup_config
@@ -216,33 +244,43 @@ cmake --build build --target test_station_pickup_config
 ctest --test-dir build --output-on-failure
 ```
 
-Expected: `test_station_pickup_config` passes, and CTest reports all configured tests passing.
+预期：`test_station_pickup_config` 通过，CTest 报告所有已配置测试通过。
 
-- [ ] **Step 8: Commit Bug 1**
+- [ ] **步骤 8：提交 Bug 1**
 
-Run:
+运行：
 
 ```bash
 git add src/lineconfig.h src/huayanScheduler.h src/huayanScheduler.cpp src/taskexecutor.cpp tests/test_station_pickup_config.cpp
 git commit -m "fix: configure post-unload stow per station"
 ```
 
-Expected: one local commit is created; do not push.
+预期：创建一个本地 commit；不要 push。
 
-### Task 2: Bug 2 - 扫码搜索成功后继续推进任务
+### 任务 2：Bug 2 - 扫码搜索成功后继续推进任务
 
-**Files:**
-- Modify: `robot_visual20260625/robot_visual/src/taskexecutor.h`
-- Modify: `robot_visual20260625/robot_visual/src/taskexecutor.cpp`
-- Modify: `robot_visual20260625/robot_visual/tests/test_station_pickup_config.cpp`
+**文件：**
+- 修改：`robot_visual20260625/robot_visual/src/taskexecutor.h`
+- 修改：`robot_visual20260625/robot_visual/src/taskexecutor.cpp`
+- 修改：`robot_visual20260625/robot_visual/tests/test_station_pickup_config.cpp`
 
-**Interfaces:**
-- Consumes: `TaskExecutor::ExecState`, existing `onArmStageCompleted()`.
-- Produces: `bool TaskExecutor::isPickupCompletionState(ExecState state) const`.
+**接口：**
+- 使用现有接口：`TaskExecutor::ExecState`、`TaskExecutor::onArmStageCompleted()`。
+- 新增接口：`bool TaskExecutor::isPickupCompletionState(ExecState state) const`。
 
-- [ ] **Step 1: Write the failing C++ static regression check**
+**新增/修改的函数、接口、变量：**
+- `TaskExecutor::isPickupCompletionState(ExecState state) const`：新增 private helper，集中判断阶段一完成信号是否应按“取料完成”推进。
+- `TaskExecutor::onArmStageCompleted(const QString &stageName)`：把取料完成分支改为调用 `isPickupCompletionState(m_state)`；保留原同 LM 跳过 AGV、不同 LM 进入 `StowAfterPickup` 的逻辑。
+- `ExecState::PreGripScanSearchReturn`：不新增枚举，但必须纳入取料完成 helper。
 
-Edit `tests/test_station_pickup_config.cpp` and add:
+**必须增加的中文注释：**
+- 在 `isPickupCompletionState()` 定义前注释：扫码搜索成功后状态会停在 `PreGripScanSearchReturn`，但机械臂阶段一完成仍代表取料已完成。
+- 在 `onArmStageCompleted()` 的 helper 分支注释：统一处理阶段一完成，避免不同扫码路径漏推进。
+- 不要在注释中写“临时兼容”或“特殊处理工位”，因为该修复与工位无关。
+
+- [ ] **步骤 1：编写失败的 C++ 静态回归检查**
+
+编辑 `tests/test_station_pickup_config.cpp` 并加入：
 
 ```cpp
     requireTrue(taskExecutorSource.contains(QStringLiteral("isPickupCompletionState")),
@@ -253,32 +291,33 @@ Edit `tests/test_station_pickup_config.cpp` and add:
                 "onArmStageCompleted 必须使用取料完成状态 helper");
 ```
 
-- [ ] **Step 2: Run the C++ test and verify it fails**
+- [ ] **步骤 2：运行 C++ 测试并确认失败**
 
-Run:
+运行：
 
 ```bash
 cmake --build build --target test_station_pickup_config
 ./build/tests/test_station_pickup_config
 ```
 
-Expected: test fails with “TaskExecutor 必须集中判断阶段一完成状态”.
+预期：测试失败并输出“TaskExecutor 必须集中判断阶段一完成状态”。
 
-- [ ] **Step 3: Declare the helper**
+- [ ] **步骤 3：声明 helper**
 
-Modify `src/taskexecutor.h`.
+修改 `src/taskexecutor.h`。
 
-In private methods near `isAgvNavigationState()`, add:
+在 private 方法区靠近 `isAgvNavigationState()` 的位置增加：
 
 ```cpp
     bool isPickupCompletionState(ExecState state) const;
 ```
 
-- [ ] **Step 4: Implement the helper**
+- [ ] **步骤 4：实现 helper**
 
-Modify `src/taskexecutor.cpp` near `isAgvNavigationState()`:
+修改 `src/taskexecutor.cpp`，在 `isAgvNavigationState()` 附近增加：
 
 ```cpp
+// 阶段一可能从首轮扫码或 Y 轴搜码返回路径完成；这些状态完成后都应按取料完成推进。
 bool TaskExecutor::isPickupCompletionState(ExecState state) const
 {
     switch (state) {
@@ -293,13 +332,14 @@ bool TaskExecutor::isPickupCompletionState(ExecState state) const
 }
 ```
 
-- [ ] **Step 5: Use the helper in stage completion**
+- [ ] **步骤 5：在阶段完成回调中使用 helper**
 
-Modify `TaskExecutor::onArmStageCompleted()`.
+修改 `TaskExecutor::onArmStageCompleted()`。
 
-At the top of the function after the log emit, insert:
+在函数开头、完成日志输出之后插入：
 
 ```cpp
+    // 统一处理阶段一完成，避免扫码搜索成功路径停在 PreGripScanSearchReturn 后漏推进。
     if (isPickupCompletionState(m_state)) {
         if (m_stationCfg->pickupLm == m_stationCfg->unloadLm) {
             const bool returnedToCaptureSafety = m_stationCfg->afterGripMode != AfterGripMode::None;
@@ -320,11 +360,11 @@ At the top of the function after the log emit, insert:
     }
 ```
 
-Then remove the old `case ExecState::ArmPickup: case ExecState::PreGripScan: case ExecState::RotateForScan:` block from the `switch (m_state)` to avoid duplicate logic.
+然后从 `switch (m_state)` 删除旧的 `case ExecState::ArmPickup: case ExecState::PreGripScan: case ExecState::RotateForScan:` 取料完成分支，避免重复推进。
 
-- [ ] **Step 6: Run C++ verification**
+- [ ] **步骤 6：运行 C++ 验证**
 
-Run:
+运行：
 
 ```bash
 cmake --build build --target test_station_pickup_config
@@ -332,34 +372,52 @@ cmake --build build --target test_station_pickup_config
 ctest --test-dir build --output-on-failure
 ```
 
-Expected: all tests pass.
+预期：所有测试通过。
 
-- [ ] **Step 7: Commit Bug 2**
+- [ ] **步骤 7：提交 Bug 2**
 
-Run:
+运行：
 
 ```bash
 git add src/taskexecutor.h src/taskexecutor.cpp tests/test_station_pickup_config.cpp
 git commit -m "fix: continue after scan-search pickup completion"
 ```
 
-Expected: one local commit is created; do not push.
+预期：创建一个本地 commit；不要 push。
 
-### Task 3: Bug 3 - RunFunc 后按 SDK FSM 等待并补充 Cleanup 诊断
+### 任务 3：Bug 3 - RunFunc 后按 SDK FSM 等待并补充 Cleanup 诊断
 
-**Files:**
-- Modify: `robot_visual20260625/robot_visual/src/huayanScheduler.h`
-- Modify: `robot_visual20260625/robot_visual/src/huayanScheduler.cpp`
-- Modify: `robot_visual20260625/robot_visual/tests/test_station_pickup_config.cpp`
-- Modify: `robot_visual20260625/robot_visual/changelog/CHANGELOG.md`
+**文件：**
+- 修改：`robot_visual20260625/robot_visual/src/huayanScheduler.h`
+- 修改：`robot_visual20260625/robot_visual/src/huayanScheduler.cpp`
+- 修改：`robot_visual20260625/robot_visual/tests/test_station_pickup_config.cpp`
+- 修改：`robot_visual20260625/robot_visual/changelog/CHANGELOG.md`
 
-**Interfaces:**
-- Consumes: existing `PendingCommand`, `pollCommandReady()`, `dispatchReadyCommand()`, `onPollTick()`.
-- Produces: `RobotStateSnapshot`, `readRobotStateSnapshot()`, RunFunc-specific FSM wait that treats `nCurFSM == 34` as still running.
+**接口：**
+- 使用现有接口：`PendingCommand`、`pollCommandReady()`、`dispatchReadyCommand()`、`onPollTick()`。
+- 新增接口：`RobotStateSnapshot`、`readRobotStateSnapshot()`、`formatRobotStateSnapshot(const RobotStateSnapshot &snapshot)`、RunFunc 专用 FSM 等待逻辑。
 
-- [ ] **Step 1: Write the failing C++ static regression check**
+**新增/修改的函数、接口、变量：**
+- `HuayanScheduler::RobotStateSnapshot`：新增 private 结构体，保存机器人 flags 和 FSM 快照。
+- `HuayanScheduler::readRobotStateSnapshot() const`：新增 private 方法，一次读取 `HRIF_ReadRobotFlags()` 和 `HRIF_ReadCurFSM()`。
+- `HuayanScheduler::formatRobotStateSnapshot(const RobotStateSnapshot &snapshot) const`：新增 private 方法，把快照格式化成日志字符串。
+- `HuayanScheduler::m_activeCommandKind`：新增 private 成员，记录当前已下发且正在等待完成的命令类型。
+- `HuayanScheduler::m_activeCommandLabel`：新增 private 成员，记录当前命令日志标签。
+- `HuayanScheduler::m_loggedRunFuncScriptRunning`：新增 private 成员，避免 FSM=34 等待日志刷屏。
+- `HuayanScheduler::dispatchReadyCommand(const PendingCommand &cmd)`：SDK 调用成功后记录 active command 信息。
+- `HuayanScheduler::onPollTick()`：当 active command 是 `PendingCommandKind::RunFunc` 时，运动停止后继续读取 FSM；`nCurFSM == 34` 时继续等待。
+- `HuayanScheduler::startStow()`：启动收姿态前输出机器人状态快照。
+- `HuayanScheduler::stopPollingAndTimers()`：清空 active command 信息，避免停止后旧命令影响新阶段。
 
-Edit `tests/test_station_pickup_config.cpp` and add:
+**必须增加的中文注释：**
+- 在 `RobotStateSnapshot` 定义旁注释：这是现场诊断用快照，不参与运动决策本身。
+- 在 `readRobotStateSnapshot()` 前注释：同时读取 flags 和 FSM，是为了定位 Cleanup 20561 前控制器是否仍在脚本运行态。
+- 在 `onPollTick()` 的 `nCurFSM == 34` 分支注释：华沿 SDK demo 中 34 表示 `ScriptRunning`，RunFunc 未结束前不能把阶段视为完成。
+- 在 `startStow()` 诊断日志旁注释：所有收姿态都会记录状态，但不改变原有动作流程。
+
+- [ ] **步骤 1：编写失败的 C++ 静态回归检查**
+
+编辑 `tests/test_station_pickup_config.cpp` 并加入：
 
 ```cpp
     requireTrue(schedulerHeaderSource.contains(QStringLiteral("struct RobotStateSnapshot")),
@@ -374,25 +432,26 @@ Edit `tests/test_station_pickup_config.cpp` and add:
                 "Cleanup 收姿态前必须记录机器人状态诊断");
 ```
 
-- [ ] **Step 2: Run the C++ test and verify it fails**
+- [ ] **步骤 2：运行 C++ 测试并确认失败**
 
-Run:
+运行：
 
 ```bash
 cmake --build build --target test_station_pickup_config
 ./build/tests/test_station_pickup_config
 ```
 
-Expected: test fails with “HuayanScheduler 必须定义机器人状态快照用于 Cleanup 诊断”.
+预期：测试失败并输出“HuayanScheduler 必须定义机器人状态快照用于 Cleanup 诊断”。
 
-- [ ] **Step 3: Add command kind tracking for active RunFunc**
+- [ ] **步骤 3：增加 active RunFunc 命令跟踪**
 
-Modify `src/huayanScheduler.h`.
+修改 `src/huayanScheduler.h`。
 
-Add a private struct near `PendingCommand`:
+在 `PendingCommand` 附近增加 private 结构体：
 
 ```cpp
     struct RobotStateSnapshot {
+        // 现场诊断快照：记录 Cleanup 前控制器状态，不直接改变运动决策。
         int movingState = 0;
         int pauseState = 0;
         int errorState = 0;
@@ -403,7 +462,7 @@ Add a private struct near `PendingCommand`:
     };
 ```
 
-Add private members:
+增加 private 成员：
 
 ```cpp
     PendingCommandKind m_activeCommandKind = PendingCommandKind::None;
@@ -411,20 +470,21 @@ Add private members:
     bool m_loggedRunFuncScriptRunning = false;
 ```
 
-Add private methods:
+增加 private 方法：
 
 ```cpp
     RobotStateSnapshot readRobotStateSnapshot() const;
     QString formatRobotStateSnapshot(const RobotStateSnapshot &snapshot) const;
 ```
 
-- [ ] **Step 4: Implement robot state snapshot helpers**
+- [ ] **步骤 4：实现机器人状态快照 helper**
 
-Modify `src/huayanScheduler.cpp`.
+修改 `src/huayanScheduler.cpp`。
 
-Add near `hasActiveRobotCommand()`:
+在 `hasActiveRobotCommand()` 附近增加：
 
 ```cpp
+// 同时读取 flags 和 FSM，用于定位 Cleanup 20561 前控制器是否仍处于脚本运行态。
 HuayanScheduler::RobotStateSnapshot HuayanScheduler::readRobotStateSnapshot() const
 {
     RobotStateSnapshot snapshot;
@@ -461,25 +521,26 @@ QString HuayanScheduler::formatRobotStateSnapshot(const RobotStateSnapshot &snap
 }
 ```
 
-- [ ] **Step 5: Log Cleanup state before stow**
+- [ ] **步骤 5：收姿态前记录机器人状态**
 
-Modify `HuayanScheduler::startStow()`.
+修改 `HuayanScheduler::startStow()`。
 
-After `ensureConnected()` succeeds and before `stopPollingAndTimers()`, add:
+在 `ensureConnected()` 成功之后、`stopPollingAndTimers()` 之前增加：
 
 ```cpp
     const RobotStateSnapshot snapshot = readRobotStateSnapshot();
+    // 诊断日志不改变动作流程，用于现场复现 20561 时判断控制器状态。
     emit logMessage(QStringLiteral("[收姿态] Cleanup 收姿态前机器人状态：%1")
                         .arg(formatRobotStateSnapshot(snapshot)));
 ```
 
-This logs for every stow start. It is acceptable because the message is diagnostic and does not change motion behavior.
+这会在每次 `startStow()` 启动时记录状态。日志文案保留 `Cleanup` 关键字是为了现场按错误恢复路径搜索；该日志不改变运动行为。
 
-- [ ] **Step 6: Track active command kind**
+- [ ] **步骤 6：跟踪当前已下发命令类型**
 
-Modify `dispatchReadyCommand()`.
+修改 `dispatchReadyCommand()`。
 
-Before each successful `startWaitForIdle(cmd.timeoutMs);`, set:
+在每个成功调用 `startWaitForIdle(cmd.timeoutMs);` 之前设置：
 
 ```cpp
         m_activeCommandKind = cmd.kind;
@@ -487,9 +548,9 @@ Before each successful `startWaitForIdle(cmd.timeoutMs);`, set:
         m_loggedRunFuncScriptRunning = false;
 ```
 
-Do this for `RunFunc`, `MoveRelTool/MoveRelBase`, and `MoveJ` branches after the SDK call succeeds and before `startWaitForIdle()`.
+`RunFunc`、`MoveRelTool/MoveRelBase`、`MoveJ` 三类分支都要这样处理：SDK 调用成功后、`startWaitForIdle()` 前记录 active command 信息。
 
-Modify `stopPollingAndTimers()` to clear active command tracking:
+修改 `stopPollingAndTimers()`，清空 active command 跟踪状态：
 
 ```cpp
     m_activeCommandKind = PendingCommandKind::None;
@@ -497,9 +558,9 @@ Modify `stopPollingAndTimers()` to clear active command tracking:
     m_loggedRunFuncScriptRunning = false;
 ```
 
-- [ ] **Step 7: Wait for RunFunc FSM to leave ScriptRunning**
+- [ ] **步骤 7：等待 RunFunc 的 FSM 离开 ScriptRunning**
 
-Modify `onPollTick()` in the block where motion is considered complete:
+修改 `onPollTick()` 中“运动已完成”的判定块：
 
 ```cpp
     if ((m_hasSeenMoving || m_pollCount >= 30) && nMovingState == 0) {
@@ -514,6 +575,7 @@ Modify `onPollTick()` in the block where motion is considered complete:
                 return;
             }
             if (nCurFSM == 34) {
+                // 华沿 SDK demo 中 34 表示 ScriptRunning；RunFunc 未结束前不能推进下一阶段。
                 if (!m_loggedRunFuncScriptRunning) {
                     emit logMessage(QStringLiteral("[华沿] RunFunc 仍处于 ScriptRunning，等待函数结束：label=%1 fsm=%2/%3")
                                         .arg(m_activeCommandLabel)
@@ -529,11 +591,11 @@ Modify `onPollTick()` in the block where motion is considered complete:
         m_loggedRunFuncScriptRunning = false;
 ```
 
-Keep the existing remainder of the completion block unchanged after these lines. This preserves all existing Stage/Action advancement rules.
+保留该完成块后续已有代码不变，以保持现有 Stage/Action 推进规则。
 
-- [ ] **Step 8: Document the SDK reason in changelog**
+- [ ] **步骤 8：在 changelog 记录 SDK 依据**
 
-Append to `changelog/CHANGELOG.md`:
+追加到 `changelog/CHANGELOG.md`：
 
 ```markdown
 ## 2026-07-08
@@ -543,9 +605,9 @@ Append to `changelog/CHANGELOG.md`:
 - 增强 Cleanup 收姿态诊断和 RunFunc 完成判定：参考华沿 SDK demo，RunFunc 后等待 FSM 离开 `34 ScriptRunning`，并记录收姿态前机器人状态，辅助定位 `20561`。
 ```
 
-- [ ] **Step 9: Run C++ verification**
+- [ ] **步骤 9：运行 C++ 验证**
 
-Run:
+运行：
 
 ```bash
 cmake --build build --target test_station_pickup_config
@@ -553,54 +615,54 @@ cmake --build build --target test_station_pickup_config
 ctest --test-dir build --output-on-failure
 ```
 
-Expected: all tests pass. No Python command is used.
+预期：所有测试通过。不使用 Python 命令。
 
-- [ ] **Step 10: Commit Bug 3**
+- [ ] **步骤 10：提交 Bug 3**
 
-Run:
+运行：
 
 ```bash
 git add src/huayanScheduler.h src/huayanScheduler.cpp tests/test_station_pickup_config.cpp changelog/CHANGELOG.md
 git commit -m "fix: wait for runfunc fsm before cleanup stow"
 ```
 
-Expected: one local commit is created; do not push.
+预期：创建一个本地 commit；不要 push。
 
-## Final Verification
+## 最终验证
 
-- [ ] **Step 1: Build the project**
+- [ ] **步骤 1：构建项目**
 
-Run:
+运行：
 
 ```bash
 cmake --build build
 ```
 
-Expected: build succeeds with no compile errors.
+预期：构建成功，没有编译错误。
 
-- [ ] **Step 2: Run all configured CTest tests**
+- [ ] **步骤 2：运行所有已配置 CTest 测试**
 
-Run:
+运行：
 
 ```bash
 ctest --test-dir build --output-on-failure
 ```
 
-Expected: all configured tests pass.
+预期：所有已配置测试通过。
 
-- [ ] **Step 3: Inspect commit shape**
+- [ ] **步骤 3：检查 commit 形状**
 
-Run:
+运行：
 
 ```bash
 git log --oneline -4
 git status --short
 ```
 
-Expected: latest commits include one docs commit and one commit per Bug fix. `git status --short` shows no unintended source changes. Do not run `git push`.
+预期：最新提交包含一个文档 commit，以及每个 Bug 一个修复 commit。`git status --short` 不显示非预期源码改动。不要执行 `git push`。
 
-## Self-Review
+## 自检
 
-- Spec coverage: Task 1 covers per-station post-unload stow config; Task 2 covers scan-search completion; Task 3 covers RunFunc/FSM diagnosis and Cleanup wait.
-- Placeholder scan: this plan contains no unfinished placeholder markers.
-- Type consistency: `stowAfterUnloadFunc`, `setNextStowFunction`, `isPickupCompletionState`, `RobotStateSnapshot`, and `readRobotStateSnapshot` are introduced before use.
+- 规格覆盖：任务 1 覆盖按工位配置倒料后收姿态；任务 2 覆盖扫码搜索成功后的阶段完成推进；任务 3 覆盖 RunFunc/FSM 诊断和 Cleanup 等待。
+- 占位扫描：计划不包含未完成占位标记。
+- 类型一致性：`stowAfterUnloadFunc`、`setNextStowFunction`、`isPickupCompletionState`、`RobotStateSnapshot`、`readRobotStateSnapshot` 都在使用前定义。
