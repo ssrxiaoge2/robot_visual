@@ -34,7 +34,11 @@ int main()
     requireTrue(s12 != nullptr, "工位12配置必须存在");
     requireTrue(s12->captureFunc == QStringLiteral("Func_capture12"), "工位12拍照函数必须保持 Func_capture12");
     requireTrue(s12->unloadPointFunc == QStringLiteral("Func_daoliao12"), "工位12倒料点位函数必须保持 Func_daoliao12");
-    requireTrue(s12->afterGripMode == AfterGripMode::None, "工位12夹紧后不应再回拍照位");
+    requireTrue(s12->afterGripMode == AfterGripMode::CaptureFunc, "工位12夹紧后必须保持复用拍照函数回安全位");
+    const StationTaskConfig *s3 = stationConfig(3);
+    requireTrue(s3 != nullptr, "工位3配置必须存在");
+    requireTrue(s3->stowAfterUnloadFunc == QStringLiteral("Func_yun_xing_zhong_s3"),
+                "工位3倒料后收姿态必须使用带过渡点的新函数");
 
     const StationTaskConfig *s1 = stationConfig(1);
     const StationTaskConfig *s2 = stationConfig(2);
@@ -53,7 +57,17 @@ int main()
     for (int station = 1; station <= 11; ++station) {
         const StationTaskConfig *cfg = stationConfig(station);
         requireTrue(cfg != nullptr, "工位1-11配置必须存在");
-        requireTrue(cfg->grabZClearance > 425.0, "工位1-11篮筐余量都应大于旧值以减少下探");
+        requireNear(cfg->grabZClearance, 417.0, 0.001, "工位1-11篮筐余量必须保持原生产值 417.0");
+    }
+    for (int station = 1; station <= 12; ++station) {
+        const StationTaskConfig *cfg = stationConfig(station);
+        requireTrue(cfg != nullptr, "12工位配置必须完整");
+        requireTrue(!cfg->stowAfterUnloadFunc.isEmpty(),
+                    "每个工位都必须显式配置倒料后收姿态函数");
+        if (station != 3) {
+            requireTrue(cfg->stowAfterUnloadFunc == QStringLiteral("Func_yun_xing_zhong"),
+                        "非工位3默认使用原全局收姿态函数");
+        }
     }
     requireTrue(s12->grabZClearance < 425.0, "工位12紫框余量应小于旧值以增加下探");
 
@@ -155,6 +169,16 @@ int main()
                 "LiftLoad 必须支持配置为不回安全位");
     requireTrue(!schedulerSource.contains(QStringLiteral("抬升（调用拍照位函数")),
                 "LiftLoad 不应再保留固定复用拍照函数的旧日志");
+    requireTrue(schedulerSource.contains(QStringLiteral("setNextStowFunction")),
+                "HuayanScheduler 必须提供下一次收姿态函数选择接口");
+    requireTrue(taskExecutorSource.contains(QStringLiteral("setNextStowFunction(m_stationCfg->stowAfterUnloadFunc)")),
+                "TaskExecutor 必须在倒料后收姿态前注入当前工位函数");
+    requireTrue(schedulerSource.contains(QStringLiteral("if (rejectStageStartWhileActionRunning(stageName(Stage::Stow))) {\n        m_nextStowFuncName.clear();\n        return;\n    }")),
+                "startStow() 在已有动作运行而拒绝启动时必须清空一次性收姿态覆盖");
+    requireTrue(schedulerSource.contains(QStringLiteral("if (!ensureConnected()) {\n        m_nextStowFuncName.clear();\n        return;\n    }")),
+                "startStow() 在未连接而拒绝启动时必须清空一次性收姿态覆盖");
+    requireTrue(!schedulerHeaderSource.contains(QStringLiteral("QString stowAfterUnloadFunc;")),
+                "HuayanScheduler::StationArmFunctions 不应保留未使用的 stowAfterUnloadFunc 注入状态");
 
     requireTrue(HuayanScheduler::evaluateCommandReadiness(0, 0, 0, QStringLiteral("ProgramStopped"))
                     == HuayanScheduler::CommandReadiness::Wait,

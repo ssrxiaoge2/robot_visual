@@ -508,10 +508,14 @@ void HuayanScheduler::startStageThree()
 
 void HuayanScheduler::startStow()
 {
-    if (rejectStageStartWhileActionRunning(stageName(Stage::Stow)))
+    if (rejectStageStartWhileActionRunning(stageName(Stage::Stow))) {
+        m_nextStowFuncName.clear();
         return;
-    if (!ensureConnected())
+    }
+    if (!ensureConnected()) {
+        m_nextStowFuncName.clear();
         return;
+    }
 
     // 新阶段启动前先切断旧命令的轮询尾巴，避免跨阶段误推进。
     stopPollingAndTimers();
@@ -522,6 +526,12 @@ void HuayanScheduler::startStow()
 
     emit stageStarted(stageName(m_stage));
     resetAndProceed();
+}
+
+void HuayanScheduler::setNextStowFunction(const QString &funcName)
+{
+    // 只影响下一次收姿态；倒料后的工位定制路径不能污染其他收姿态场景。
+    m_nextStowFuncName = funcName;
 }
 
 void HuayanScheduler::startUnload()
@@ -892,9 +902,16 @@ void HuayanScheduler::executeCurrentStep()
     case Stage::Stow:
         switch (m_stageStep) {
         case StageStep::StowArm:
-            emit logMessage(QStringLiteral("[收姿态] 调用 %1").arg(m_stowFuncName));
-            executeRunFunc(m_stowFuncName);
+        {
+            const QString stowFunc = m_nextStowFuncName.isEmpty()
+                ? m_stowFuncName
+                : m_nextStowFuncName;
+            // 一次性覆盖使用后立即清空，避免取料后、码垛后或 Cleanup 误用倒料后路径。
+            m_nextStowFuncName.clear();
+            emit logMessage(QStringLiteral("[收姿态] 调用 %1").arg(stowFunc));
+            executeRunFunc(stowFunc);
             break;
+        }
         case StageStep::None:
             completeStage();
             break;

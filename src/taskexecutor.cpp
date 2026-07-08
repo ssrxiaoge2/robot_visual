@@ -605,9 +605,14 @@ void TaskExecutor::enterState(ExecState state, const QString &statusText)
         m_arm->startStageOne();
         break;
     case ExecState::StowAfterPickup:
-    case ExecState::StowAfterUnload:
     case ExecState::StowAfterPallet:
         emit logMessage(prefix(QStringLiteral("ARM")) + QStringLiteral(" 启动收姿态"));
+        m_arm->startStow();
+        break;
+    case ExecState::StowAfterUnload:
+        // 只有倒料后收姿态走工位配置；取料后、码垛后、Cleanup 保持原默认函数。
+        emit logMessage(prefix(QStringLiteral("ARM")) + QStringLiteral(" 启动倒料后收姿态"));
+        m_arm->setNextStowFunction(m_stationCfg->stowAfterUnloadFunc);
         m_arm->startStow();
         break;
     case ExecState::ArmUnload:

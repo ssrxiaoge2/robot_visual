@@ -98,6 +98,8 @@ public:
     void startStageTwo();
     void startStageThree();
     void startStow();    // 收运行姿态（Func_yun_xing_zhong）
+    /// 只覆盖下一次 startStow() 调用使用的函数；执行后自动恢复默认收姿态函数。
+    void setNextStowFunction(const QString &funcName);
     void startUnload();  // 倒料（Func_daoliao_1_point → Func_daoliao）
     void stop(bool emitStoppedLog = true);
 
@@ -401,6 +403,7 @@ private:
     QString m_palletBaseFuncName;
 
     QString m_stowFuncName        = QStringLiteral("Func_yun_xing_zhong");
+    QString m_nextStowFuncName;
     QString m_unloadPointFuncName = QStringLiteral("Func_daoliao_1_point");
     QString m_unloadFuncName      = QStringLiteral("Func_daoliao");
     AfterGripMode m_afterGripMode = AfterGripMode::CaptureFunc; ///< 当前任务夹紧后离开策略，由 lineconfig 注入。
