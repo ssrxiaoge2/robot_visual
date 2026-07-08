@@ -319,6 +319,17 @@ private:
         QStringList params;   ///< 兼容旧码垛脚本等带参数的 RunFunc。
     };
 
+    struct RobotStateSnapshot {
+        // 现场诊断用快照，不参与运动决策本身。
+        int movingState = 0;
+        int pauseState = 0;
+        int errorState = 0;
+        int errorCode = 0;
+        int nCurFSM = 0;
+        QString strCurFSM;
+        bool valid = false;
+    };
+
     /// 在真正下发 SDK 命令前先做一次控制器状态门控。
     ///
     /// 该入口只负责登记待执行命令并启动/立即执行状态检查，不会直接调用 SDK 运动原语；
@@ -336,6 +347,8 @@ private:
     bool dispatchReadyCommand(const PendingCommand &cmd);
     bool hasActiveRobotCommand() const; ///< 当前是否仍有已下发但尚未完成的 SDK 命令。
     void stopVisionWaitTimeout();       ///< 收到视觉结果后关闭 WaitForVision 的超时保护，避免误判为执行中命令。
+    RobotStateSnapshot readRobotStateSnapshot() const;
+    QString formatRobotStateSnapshot(const RobotStateSnapshot &snapshot) const;
 
     bool executeRunFunc(const QString &funcName, int timeoutMs = 30000);
     bool executeGripFunc();
@@ -356,6 +369,9 @@ private:
     int     m_pollCount    = 0;       ///< 当前动作已轮询次数，用于极短动作兜底。
     bool    m_hasSeenMoving = false;  // 是否已观察到运动真正开始（避免启动延迟误判完成）
     PendingCommand m_pendingCommand;       ///< 当前等待状态可执行后再下发的命令。
+    PendingCommandKind m_activeCommandKind = PendingCommandKind::None;
+    QString m_activeCommandLabel;
+    bool m_loggedRunFuncScriptRunning = false;
     int m_commandReadyElapsedMs = 0;       ///< 已等待可执行状态的时间(ms)。
     bool m_commandResetIssued = false;     ///< 本轮门控是否已对 ProgramStopped 执行过 GrpReset。
     quint64 m_commandSeq = 0;              ///< 命令序号，防止旧 singleShot 回调推进新阶段。

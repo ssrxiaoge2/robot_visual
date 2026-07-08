@@ -517,6 +517,11 @@ void HuayanScheduler::startStow()
         return;
     }
 
+    const RobotStateSnapshot snapshot = readRobotStateSnapshot();
+    // 所有收姿态都会记录状态，但不改变原有动作流程。
+    emit logMessage(QStringLiteral("[收姿态] 启动前机器人状态：%1")
+                        .arg(formatRobotStateSnapshot(snapshot)));
+
     // 新阶段启动前先切断旧命令的轮询尾巴，避免跨阶段误推进。
     stopPollingAndTimers();
     clearActionState();
@@ -628,6 +633,31 @@ void HuayanScheduler::onPollTick()
     // 必须先观察到运动真正开始(nMovingState!=0)再判结束，避免指令启动延迟被误判完成；
     // 兜底：极短运动可能采样不到运动态，超过约 3 秒(pollCount>=30 @100ms)也判完成
     if ((m_hasSeenMoving || m_pollCount >= 30) && nMovingState == 0) {
+        if (m_activeCommandKind == PendingCommandKind::RunFunc) {
+            int nCurFSM = 0;
+            string strCurFSM;
+            const int fsmRet = HRIF_ReadCurFSM(m_boxID, m_rbtID, nCurFSM, strCurFSM);
+            if (fsmRet != 0) {
+                emitOperationError(QStringLiteral("RunFunc 完成前读取 FSM 失败：ret=%1 label=%2")
+                                       .arg(fsmRet)
+                                       .arg(m_activeCommandLabel));
+                return;
+            }
+            if (nCurFSM == 34) {
+                // 华沿 SDK demo 中 34 表示 ScriptRunning；RunFunc 未结束前不能把阶段视为完成。
+                if (!m_loggedRunFuncScriptRunning) {
+                    emit logMessage(QStringLiteral("[华沿] RunFunc 仍处于 ScriptRunning，等待函数结束：label=%1 fsm=%2/%3")
+                                        .arg(m_activeCommandLabel)
+                                        .arg(nCurFSM)
+                                        .arg(QString::fromStdString(strCurFSM)));
+                    m_loggedRunFuncScriptRunning = true;
+                }
+                return;
+            }
+        }
+        m_activeCommandKind = PendingCommandKind::None;
+        m_activeCommandLabel.clear();
+        m_loggedRunFuncScriptRunning = false;
         m_pollTimer->stop();
         m_timeoutTimer->stop();
         if (m_action == Action::PalletPlace && m_actionStep == ActionStep::MovePalletOffset) {
@@ -1128,6 +1158,9 @@ void HuayanScheduler::stopPollingAndTimers()
     m_pollCount = 0;
     m_hasSeenMoving = false;
     m_pendingCommand = PendingCommand();
+    m_activeCommandKind = PendingCommandKind::None;
+    m_activeCommandLabel.clear();
+    m_loggedRunFuncScriptRunning = false;
     m_commandReadyElapsedMs = 0;
     m_commandResetIssued = false;
     ++m_commandSeq;
@@ -1457,6 +1490,42 @@ bool HuayanScheduler::hasActiveRobotCommand() const
         || (m_timeoutTimer->isActive() && m_stageStep != StageStep::WaitForVision);
 }
 
+// 同时读取 flags 和 FSM，是为了定位 Cleanup 20561 前控制器是否仍在脚本运行态。
+HuayanScheduler::RobotStateSnapshot HuayanScheduler::readRobotStateSnapshot() const
+{
+    RobotStateSnapshot snapshot;
+    int nEnableState = 0;
+    int nErrorAxis = 0;
+    int nBreaking = 0;
+    int nBlendingDone = 0;
+    const int flagsRet = HRIF_ReadRobotFlags(m_boxID, m_rbtID,
+                                             snapshot.movingState,
+                                             nEnableState,
+                                             snapshot.errorState,
+                                             snapshot.errorCode,
+                                             nErrorAxis,
+                                             nBreaking,
+                                             snapshot.pauseState,
+                                             nBlendingDone);
+    string fsmText;
+    const int fsmRet = HRIF_ReadCurFSM(m_boxID, m_rbtID, snapshot.nCurFSM, fsmText);
+    snapshot.strCurFSM = fsmRet == 0 ? QString::fromStdString(fsmText) : QStringLiteral("unknown");
+    snapshot.valid = flagsRet == 0 && fsmRet == 0;
+    return snapshot;
+}
+
+QString HuayanScheduler::formatRobotStateSnapshot(const RobotStateSnapshot &snapshot) const
+{
+    return QStringLiteral("moving=%1 pause=%2 error=%3 errorCode=%4 fsm=%5/%6 valid=%7")
+        .arg(snapshot.movingState)
+        .arg(snapshot.pauseState)
+        .arg(snapshot.errorState)
+        .arg(snapshot.errorCode)
+        .arg(snapshot.nCurFSM)
+        .arg(snapshot.strCurFSM)
+        .arg(snapshot.valid ? QStringLiteral("true") : QStringLiteral("false"));
+}
+
 void HuayanScheduler::stopVisionWaitTimeout()
 {
     if (m_stage == Stage::StageOne
@@ -1594,6 +1663,9 @@ bool HuayanScheduler::dispatchReadyCommand(const PendingCommand &cmd)
                 : QStringLiteral("调用函数 %1 失败：%2（%3）").arg(cmd.funcName).arg(nRet).arg(detail));
             return false;
         }
+        m_activeCommandKind = cmd.kind;
+        m_activeCommandLabel = cmd.label;
+        m_loggedRunFuncScriptRunning = false;
         startWaitForIdle(cmd.timeoutMs);
         return true;
     }
@@ -1608,6 +1680,9 @@ bool HuayanScheduler::dispatchReadyCommand(const PendingCommand &cmd)
                 : QStringLiteral("%1失败：%2（%3）").arg(cmd.label).arg(nRet).arg(detail));
             return false;
         }
+        m_activeCommandKind = cmd.kind;
+        m_activeCommandLabel = cmd.label;
+        m_loggedRunFuncScriptRunning = false;
         startWaitForIdle(cmd.timeoutMs);
         return true;
     }
@@ -1628,6 +1703,9 @@ bool HuayanScheduler::dispatchReadyCommand(const PendingCommand &cmd)
                 : QStringLiteral("%1失败：%2（%3）").arg(cmd.label).arg(nRet).arg(detail));
             return false;
         }
+        m_activeCommandKind = cmd.kind;
+        m_activeCommandLabel = cmd.label;
+        m_loggedRunFuncScriptRunning = false;
         startWaitForIdle(cmd.timeoutMs);
         return true;
     }

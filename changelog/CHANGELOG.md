@@ -12,10 +12,14 @@
 - 将 1-11 工位篮筐抓取 Z 余量 kLargeBasketGrabZClearance 调整为 450.0，减少夹爪下探量。
 - 保持工位12紫框抓取 Z 余量 kPurpleBasketGrabZClearance = 380.0，与当前现场验证结果一致。
 - 将 TaskExecutor 中每个 AGV 导航步骤上限时间调整为 120000 ms，与文档和现场调试预期一致。
+- 增强收姿态启动前诊断和 RunFunc 完成判定：参考华沿 SDK demo，RunFunc 后等待 FSM 离开 `34 ScriptRunning`，并记录收姿态启动前机器人状态，辅助定位 `20561`。
 
 ### 文件
 - src/lineconfig.h
 - src/taskexecutor.h
+- src/huayanScheduler.h
+- src/huayanScheduler.cpp
+- tests/test_station_pickup_config.cpp
 - changelog/CHANGELOG.md
 
 ---

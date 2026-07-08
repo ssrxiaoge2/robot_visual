@@ -185,6 +185,16 @@ int main()
                 "startStow() 在未连接而拒绝启动时必须清空一次性收姿态覆盖");
     requireTrue(!schedulerHeaderSource.contains(QStringLiteral("QString stowAfterUnloadFunc;")),
                 "HuayanScheduler::StationArmFunctions 不应保留未使用的 stowAfterUnloadFunc 注入状态");
+    requireTrue(schedulerHeaderSource.contains(QStringLiteral("struct RobotStateSnapshot")),
+                "HuayanScheduler 必须定义机器人状态快照用于收姿态前诊断");
+    requireTrue(schedulerSource.contains(QStringLiteral("readRobotStateSnapshot")),
+                "HuayanScheduler 必须读取 flags 和 FSM 形成诊断快照");
+    requireTrue(schedulerSource.contains(QStringLiteral("nCurFSM == 34")),
+                "RunFunc 完成判定必须等待 SDK demo 中的 34 ScriptRunning 结束");
+    requireTrue(schedulerSource.contains(QStringLiteral("RunFunc 仍处于 ScriptRunning")),
+                "RunFunc 等待 FSM=34 时必须输出可追踪日志");
+    requireTrue(schedulerSource.contains(QStringLiteral("启动前机器人状态")),
+                "收姿态启动前必须记录通用机器人状态诊断");
 
     requireTrue(HuayanScheduler::evaluateCommandReadiness(0, 0, 0, QStringLiteral("ProgramStopped"))
                     == HuayanScheduler::CommandReadiness::Wait,
