@@ -46,7 +46,7 @@
 
 问题 3 直接故障位置明确，最终根因需靠诊断确认：工位 5 正常取料、倒料和倒料后收姿态均成功，异常发生在码垛函数缺失后的 Cleanup 收姿态。华沿 SDK demo 显示 `RunFunc()` 后应等待 FSM 离开 `34 ScriptRunning`，因此本次按 RunFunc/FSM 时序补强，不做工位 5 专属修复。
 
-### 任务 1：Bug 1 - 倒料后收姿态函数按工位配置
+### Task 1 / 任务 1：Bug 1 - 倒料后收姿态函数按工位配置
 
 **文件：**
 - 修改：`robot_visual20260625/robot_visual/src/lineconfig.h`
@@ -257,7 +257,7 @@ git commit -m "fix: configure post-unload stow per station"
 
 预期：创建一个本地 commit；不要 push。
 
-### 任务 2：Bug 2 - 扫码搜索成功后继续推进任务
+### Task 2 / 任务 2：Bug 2 - 扫码搜索成功后继续推进任务
 
 **文件：**
 - 修改：`robot_visual20260625/robot_visual/src/taskexecutor.h`
@@ -385,7 +385,7 @@ git commit -m "fix: continue after scan-search pickup completion"
 
 预期：创建一个本地 commit；不要 push。
 
-### 任务 3：Bug 3 - RunFunc 后按 SDK FSM 等待并补充 Cleanup 诊断
+### Task 3 / 任务 3：Bug 3 - RunFunc 后按 SDK FSM 等待并补充 Cleanup 诊断
 
 **文件：**
 - 修改：`robot_visual20260625/robot_visual/src/huayanScheduler.h`
