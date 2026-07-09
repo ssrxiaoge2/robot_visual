@@ -7,7 +7,6 @@ namespace {
 static const char *kSettingsOrg = "wh-robot";
 static const char *kSettingsApp = "robot-visual";
 static constexpr int kMaxLayers = 8;
-static constexpr int kEmptyResetThreshold = 3;
 
 int floorCapacity(double usable, double box, double gap)
 {
@@ -115,14 +114,14 @@ bool PalletScheduler::validateConfig(PalletArea area,
     if (cfg.maxLayers < 1 || cfg.maxLayers > kMaxLayers)
         localErrors << QStringLiteral("最大层数必须在 1-8 之间");
     if (cfg.releaseZOffset < 0.0)
-        localErrors << QStringLiteral("释放高度记录值不能小于 0");
+        localErrors << QStringLiteral("目标层上方释放高度不能小于 0");
 
     if (cfg.boxSize.z > 0.0) {
         const double minSuggested = cfg.boxSize.z;
         const double maxSuggested = cfg.boxSize.z * 1.5;
         if (cfg.releaseZOffset < minSuggested || cfg.releaseZOffset > maxSuggested) {
             localSuggestions << QStringLiteral(
-                "释放高度记录值建议在 %1-%2 mm；主输出为相对偏移，绝对预览使用初始点位")
+                "目标层上方释放高度建议在 %1-%2 mm；真实松爪 Z = 目标层 Z + 该高度")
                 .arg(minSuggested, 0, 'f', 1)
                 .arg(maxSuggested, 0, 'f', 1);
         }
@@ -143,10 +142,11 @@ bool PalletScheduler::validateConfig(PalletArea area,
 
     const int layers = boundedMaxLayers(area);
     if (cfg.maxRobotZ > 0.0 && cfg.boxSize.z > 0.0) {
-        const double topZ = cfg.originPose.z + cfg.palletSize.z + (layers - 1) * cfg.boxSize.z;
-        if (topZ > cfg.maxRobotZ) {
+        const double releaseZ = cfg.originPose.z + cfg.palletSize.z
+            + (layers - 1) * cfg.boxSize.z + cfg.releaseZOffset;
+        if (releaseZ > cfg.maxRobotZ) {
             localErrors << QStringLiteral("最高层释放点 Z=%1 超过安全上限 %2")
-                .arg(topZ, 0, 'f', 1).arg(cfg.maxRobotZ, 0, 'f', 1);
+                .arg(releaseZ, 0, 'f', 1).arg(cfg.maxRobotZ, 0, 'f', 1);
         }
     }
 
@@ -205,14 +205,13 @@ bool PalletScheduler::commitPlaced(PalletArea area, QString *error)
         return false;
     }
     if (placedCount(area) >= cap) {
-        setError(error, QStringLiteral("码垛区已满，请搬运"));
+        setError(error, QStringLiteral("码垛区已满，请人工搬运并清零"));
         emit areaFull(area);
         return false;
     }
 
     AreaState &s = state(area);
     ++s.placedCount;
-    s.emptyObserveCount = 0;
     saveArea(area);
     emit stateChanged(area);
     return true;
@@ -222,7 +221,6 @@ void PalletScheduler::reset(PalletArea area)
 {
     AreaState &s = state(area);
     s.placedCount = 0;
-    s.emptyObserveCount = 0;
     saveArea(area);
     emit stateChanged(area);
 }
@@ -237,7 +235,6 @@ bool PalletScheduler::setPlacedCount(PalletArea area, int count, QString *error)
 
     AreaState &s = state(area);
     s.placedCount = count;
-    s.emptyObserveCount = 0;
     saveArea(area);
     emit stateChanged(area);
     return true;
@@ -273,64 +270,6 @@ QList<PalletSimulationItem> PalletScheduler::simulate(PalletArea area,
     return items;
 }
 
-void PalletScheduler::setStackingActive(PalletArea area, bool active)
-{
-    AreaState &s = state(area);
-    if (s.stackingActive == active)
-        return;
-    s.stackingActive = active;
-    emit stateChanged(area);
-}
-
-void PalletScheduler::markAreaObservedEmpty(PalletArea area)
-{
-    AreaState &s = state(area);
-    if (s.placedCount == 0) {
-        s.emptyObserveCount = 0;
-        saveArea(area);
-        emit stateChanged(area);
-        return;
-    }
-
-    // 机械臂码垛动作执行中，视觉可能被夹爪/箱体遮挡；此时不允许自动清零。
-    if (s.stackingActive)
-        return;
-
-    ++s.emptyObserveCount;
-    if (s.emptyObserveCount >= kEmptyResetThreshold) {
-        const QString reason = QStringLiteral("视觉连续 %1 次识别为空，自动清零码垛缓存")
-            .arg(kEmptyResetThreshold);
-        s.placedCount = 0;
-        s.emptyObserveCount = 0;
-        s.lastAutoResetTime = QDateTime::currentDateTime();
-        saveArea(area);
-        emit areaAutoReset(area, reason);
-    } else {
-        saveArea(area);
-    }
-    emit stateChanged(area);
-}
-
-void PalletScheduler::markAreaObservedOccupied(PalletArea area)
-{
-    AreaState &s = state(area);
-    if (s.emptyObserveCount == 0)
-        return;
-    s.emptyObserveCount = 0;
-    saveArea(area);
-    emit stateChanged(area);
-}
-
-int PalletScheduler::emptyObserveCount(PalletArea area) const
-{
-    return state(area).emptyObserveCount;
-}
-
-QDateTime PalletScheduler::lastAutoResetTime(PalletArea area) const
-{
-    return state(area).lastAutoResetTime;
-}
-
 PalletScheduler::AreaState &PalletScheduler::state(PalletArea area)
 {
     return area == PalletArea::LargeBox ? m_large : m_small;
@@ -364,7 +303,7 @@ bool PalletScheduler::computeItem(PalletArea area,
         return false;
     }
     if (placedIndex < 0 || placedIndex >= cap) {
-        setError(error, QStringLiteral("码垛区已满，请搬运"));
+        setError(error, QStringLiteral("码垛区已满，请人工搬运并清零"));
         const_cast<PalletScheduler *>(this)->areaFull(area);
         return false;
     }
@@ -439,8 +378,6 @@ void PalletScheduler::load()
         cfg.originPose = loadPose(s, prefix + "/config/origin", def.originPose);
         st.config = cfg;
         st.placedCount = s.value(prefix + "/placedCount", 0).toInt();
-        st.emptyObserveCount = s.value(prefix + "/emptyObserveCount", 0).toInt();
-        st.lastAutoResetTime = s.value(prefix + "/lastAutoResetTime").toDateTime();
     }
 }
 
@@ -467,8 +404,6 @@ void PalletScheduler::saveArea(PalletArea area) const
     s.setValue(prefix + "/config/invertY", cfg.invertY);
     savePose(s, prefix + "/config/origin", cfg.originPose);
     s.setValue(prefix + "/placedCount", st.placedCount);
-    s.setValue(prefix + "/emptyObserveCount", st.emptyObserveCount);
-    s.setValue(prefix + "/lastAutoResetTime", st.lastAutoResetTime);
 }
 
 QString PalletScheduler::settingsPrefix(PalletArea area)

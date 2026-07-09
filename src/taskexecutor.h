@@ -45,7 +45,7 @@ public slots:
 signals:
     /// 任一任务步骤/文案变化时发出完整任务快照。
     void taskUpdated(const Task &task);
-    /// 全流程成功完成（含码垛 commit 和最终收姿态）。
+    /// 全流程成功完成（含码垛 commit；标准码垛的回运行安全位已在动作内完成）。
     void taskSucceeded(const Task &task);
     /// 任务级失败且安全收姿态成功；LineManager 可继续下一任务。
     void taskFailed(const Task &task, const QString &reason);
@@ -89,9 +89,9 @@ private:
         StowAfterUnload,         ///< 倒料后等待机械臂收姿态。
         AgvToPallet,             ///< 等待 AGV 到对应码垛区 LM。
         PreparePalletPoint,      ///< 校验并获取下一码垛偏移。
-        ArmPalletPlace,          ///< 等待机械臂放置空箱并松爪。
-        CommitPallet,            ///< 将已成功放置的点位提交到缓存。
-        StowAfterPallet,         ///< 码垛后等待机械臂最终收姿态。
+        ArmPalletPlace,          ///< 等待机械臂完成标准码垛动作，动作内已包含松爪后回运行安全位。
+        CommitPallet,            ///< 标准码垛动作完整成功后，将已放点位提交到缓存。
+        StowAfterPallet,         ///< 仅用于显式码垛后收姿态流程；标准码垛主流程不再进入。
         CleanupStow              ///< 任务级失败后的安全恢复；失败则升级系统 ERROR。
     };
 
@@ -139,7 +139,6 @@ private:
     void finalizeTaskFailureAfterCleanup();
     void finishTaskSuccess();
     void raiseSystemError(const QString &reason);
-    void clearPalletStackingFlag();
 
     AgvController *m_agv = nullptr;       ///< 非拥有指针；AGV 导航与监控来源。
     HuayanScheduler *m_arm = nullptr;     ///< 非拥有指针；机械臂高层动作来源。

@@ -1726,10 +1726,10 @@ void MainWindow::onPalletConfig()
     }
 
     // 码垛参数 UI 直接复用主流程里的调度器实例，保证配置与调度读取的是同一份状态。
-    // 仅打开配置/仿真窗口；本期不接入整线流程，也不会自动提交机械臂放置完成。
+    // 真实单步调试也复用同一个 HuayanScheduler，停止统一走华研面板 Stop。
     auto *dialog = new PalletParamDialog(
         m_palletScheduler,
-        m_devMgr ? m_devMgr->visionClient() : nullptr,
+        m_devMgr ? m_devMgr->huayanScheduler() : nullptr,
         this);
     m_palletDialog = dialog;
     dialog->setAttribute(Qt::WA_DeleteOnClose);

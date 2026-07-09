@@ -7,9 +7,9 @@
 #include <QtGlobal>
 
 #include "lineconfig.h"
+#include "palletscheduler.h"
 
 class QTimer;
-struct PalletPose;
 
 /**
  * @brief 华研机械臂高层动作调度器。
@@ -91,8 +91,15 @@ public:
     void movePreGripScanSearchTo(double targetYOffsetMm);
     /// 扫码搜索全部失败时，回到拍照位，后续失败收尾由上层决定。
     void returnToCaptureForScanFailure();
-    /// 执行“码垛基准位→相对偏移→松爪”；不更新 PalletScheduler 缓存。
-    void startPalletPlace(const PalletPose &offset);
+    /**
+     * @brief 执行一次标准空箱码垛动作。
+     *
+     * 标准动作链：安全位夹紧 -> 码垛基准点 -> XY 到目标上方 -> Z 到释放高度
+     * -> 松爪 -> Z 抬升 -> Func_yun_xing_zhong 回运行安全位。
+     * 本函数只执行机械臂动作，不更新 PalletScheduler 缓存；调用方必须在
+     * palletPlaceCompleted() 后再 commitPlaced()。
+     */
+    void startPalletPlace(const PalletPose &targetOffset, double releaseZOffsetMm);
 
     void startStageOne();
     void startStageTwo();
@@ -187,6 +194,7 @@ signals:
     void stageCompleted(const QString &stageName);
     void stageError(const QString &msg);
     void logMessage(const QString &msg);
+    void schedulerStopped();
     void surveyReady();             ///< 已稳定到拍照位，请 VisionHttpClient 发起推理。
     void preGripScanRequested();    ///< 已到夹紧前安全暂停点，请上层异步扫码。
     void toolRotationCompleted();
@@ -247,9 +255,13 @@ private:
     enum class ActionStep {
         None,
         RotateTool,
+        ClampPalletAtSafety,
         RunPalletBase,
-        MovePalletOffset,
+        MovePalletXY,
+        DescendPalletZ,
         ReleasePallet,
+        LiftAfterPalletRelease,
+        StowAfterPalletRelease,
         MovePreGripScanSearchY,
         RunCaptureForScanFailure
     };
@@ -398,6 +410,8 @@ private:
     Pose m_emptyBoxPose;
     QList<RelMove> m_palletMoves;          ///< X/Y/Z/Rz 顺序的码垛相对动作。
     int m_palletMoveIdx = 0;               ///< 下一条待执行码垛偏移索引。
+    PalletPose m_pendingPalletTargetOffset; ///< 本次码垛目标层中心偏移。
+    double m_pendingPalletReleaseZ = 0.0;   ///< 本次真实松爪相对 Z。
     Action m_action = Action::None;         ///< 当前独立动作。
     ActionStep m_actionStep = ActionStep::None; ///< 独立动作内步骤。
 

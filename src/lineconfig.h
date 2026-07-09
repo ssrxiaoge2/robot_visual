@@ -49,9 +49,9 @@ enum class TaskStep {
     StowAfterUnload,     ///< 倒料后携带空箱收回安全姿态。
     AgvToPallet,         ///< AGV 前往共享/独立码垛区 LM。
     PreparePalletPoint,  ///< 校验码垛配置并计算下一相对偏移。
-    ArmPalletPlace,      ///< 机械臂移动到码垛点并松爪。
-    CommitPallet,        ///< 放置成功后更新 PalletScheduler 缓存。
-    StowAfterPallet,     ///< 空箱放置后机械臂收回安全姿态。
+    ArmPalletPlace,      ///< 等待机械臂完成标准码垛动作，动作内已包含松爪后回运行安全位。
+    CommitPallet,        ///< 标准码垛动作完整成功后更新 PalletScheduler 缓存。
+    StowAfterPallet,     ///< 兼容保留的显式收姿态步骤；标准码垛主流程不再进入。
     ReturningHome,       ///< 无后续任务时 AGV 返回 LM1。
     Done                 ///< 任务已进入终态，不再继续推进。
 };
@@ -105,7 +105,7 @@ inline const StationTaskConfig kStationTaskConfigs[] = {
     {1, 3, 3, PalletArea::LargeBox, QStringLiteral("Func_capture1"), AfterGripMode::None, QString(), QStringLiteral("Func_daoliao1"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
     {2, 4, 4, PalletArea::LargeBox, QStringLiteral("Func_capture2"), AfterGripMode::None, QString(), QStringLiteral("Func_daoliao2"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
     // 工位 3 的示教器函数内部包含“倒料点 -> 过渡点 -> 安全点”的路径。
-    {3, 24, 9, PalletArea::LargeBox, QStringLiteral("Func_capture3"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao3"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_daoliao3_huianquanwei"), kLargeBasketGrabZClearance},
+    {3, 24, 9, PalletArea::LargeBox, QStringLiteral("Func_capture3"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao3"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong_s3"), kLargeBasketGrabZClearance},
     {4, 24, 9, PalletArea::LargeBox, QStringLiteral("Func_capture4"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao4"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
     {5, 23, 10, PalletArea::LargeBox, QStringLiteral("Func_capture5"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao5"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
     {6, 22, 10, PalletArea::LargeBox, QStringLiteral("Func_capture6"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao6"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},

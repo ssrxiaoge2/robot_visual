@@ -54,7 +54,7 @@ private slots:
     void onNScanIdle();
     void onCustomSystemConnect();
     void onCustomSystemFetch();
-    // 打开空箱码垛配置窗口；窗口只做配置/仿真，不启动真实机械臂流程。
+    // 打开空箱码垛配置窗口；窗口可执行真实单步码垛调试，停止统一使用华研面板停止按钮。
     void onPalletConfig();
     void onCustomSystemRequestStarted(const QString &operation);
     void onCustomSystemDayDataReady(const CustomSysScheduler::DayRecord &record,

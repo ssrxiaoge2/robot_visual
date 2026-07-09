@@ -67,6 +67,8 @@ set(PROJECT_SOURCES
         src/customSysScheduler.h
         src/palletscheduler.cpp
         src/palletscheduler.h
+        src/palletplacesequence.cpp
+        src/palletplacesequence.h
         src/palletparamdialog.cpp
         src/palletparamdialog.h
 )

@@ -5,6 +5,7 @@
 
 #include "huayanScheduler.h"
 #include "HR_Pro.h"
+#include "palletplacesequence.h"
 #include "palletscheduler.h"
 
 #include <QTimer>
@@ -374,7 +375,8 @@ void HuayanScheduler::returnToCaptureForScanFailure()
     proceedAction();
 }
 
-void HuayanScheduler::startPalletPlace(const PalletPose &offset)
+void HuayanScheduler::startPalletPlace(const PalletPose &targetOffset,
+                                       double releaseZOffsetMm)
 {
     if (m_action != Action::None) {
         emit palletPlaceError(QStringLiteral("当前已有独立动作执行中"));
@@ -393,29 +395,26 @@ void HuayanScheduler::startPalletPlace(const PalletPose &offset)
         return;
     }
 
+    const QList<PalletPlaceStep> steps = buildPalletPlaceSequence(targetOffset, releaseZOffsetMm);
+    if (steps.isEmpty()) {
+        emit palletPlaceError(QStringLiteral("码垛释放高度无效，不能执行"));
+        return;
+    }
+
     m_palletMoves.clear();
     m_palletMoveIdx = 0;
-    auto addMove = [this](int poseId, double value, double ignoreThreshold) {
-        if (qAbs(value) < ignoreThreshold)
-            return;
-        m_palletMoves.append({ poseId, value >= 0 ? 1 : 0, qAbs(value) });
-    };
-    addMove(0, offset.x, kOffsetIgnoreDistance);
-    addMove(1, offset.y, kOffsetIgnoreDistance);
-    addMove(2, offset.z, kOffsetIgnoreDistance);
-    addMove(5, offset.rz, kOffsetIgnoreAngle);
-
-    // 码垛 offset 来自 PalletScheduler::nextRelativeOffset()，此处只执行机械臂动作，
-    // 不推进码垛缓存。
     m_action = Action::PalletPlace;
-    m_actionStep = ActionStep::RunPalletBase;
+    m_actionStep = ActionStep::ClampPalletAtSafety;
+    m_pendingPalletTargetOffset = targetOffset;
+    m_pendingPalletReleaseZ = steps.at(3).offset.z;
     if (!ensureConnected())
         return;
-    emit logMessage(QStringLiteral("[码垛] 开始放置 offset X=%1 Y=%2 Z=%3 Rz=%4")
-                        .arg(offset.x, 0, 'f', 1)
-                        .arg(offset.y, 0, 'f', 1)
-                        .arg(offset.z, 0, 'f', 1)
-                        .arg(offset.rz, 0, 'f', 1));
+    emit logMessage(QStringLiteral("[码垛] 开始标准单次动作 offset X=%1 Y=%2 Z=%3 Rz=%4 releaseZ=%5")
+                        .arg(targetOffset.x, 0, 'f', 1)
+                        .arg(targetOffset.y, 0, 'f', 1)
+                        .arg(targetOffset.z, 0, 'f', 1)
+                        .arg(targetOffset.rz, 0, 'f', 1)
+                        .arg(m_pendingPalletReleaseZ, 0, 'f', 1));
     proceedAction();
 }
 
@@ -595,8 +594,10 @@ void HuayanScheduler::stop(bool emitStoppedLog)
     m_preGripScanSearchTargetY = 0.0;
     m_stage = Stage::None;
     m_stageStep = StageStep::None;
-    if (emitStoppedLog)
+    if (emitStoppedLog) {
         emit logMessage(QStringLiteral("调度已停止"));
+        emit schedulerStopped();
+    }
 }
 
 void HuayanScheduler::startWaitForIdle(int timeoutMs)
@@ -660,13 +661,18 @@ void HuayanScheduler::onPollTick()
         m_loggedRunFuncScriptRunning = false;
         m_pollTimer->stop();
         m_timeoutTimer->stop();
-        if (m_action == Action::PalletPlace && m_actionStep == ActionStep::MovePalletOffset) {
+        if (m_action == Action::PalletPlace
+            && (m_actionStep == ActionStep::MovePalletXY
+                || m_actionStep == ActionStep::DescendPalletZ
+                || m_actionStep == ActionStep::LiftAfterPalletRelease)) {
             m_palletMoveIdx++;
             const quint64 seq = nextCallbackSeq();
             QTimer::singleShot(300, this, [this, seq] {
                 if (seq == m_commandSeq
                     && m_action == Action::PalletPlace
-                    && m_actionStep == ActionStep::MovePalletOffset)
+                    && (m_actionStep == ActionStep::MovePalletXY
+                        || m_actionStep == ActionStep::DescendPalletZ
+                        || m_actionStep == ActionStep::LiftAfterPalletRelease))
                     executeNextPalletMove();
             });
             return;
@@ -991,16 +997,49 @@ void HuayanScheduler::proceedAction()
         break;
     case Action::PalletPlace:
         switch (m_actionStep) {
+        case ActionStep::ClampPalletAtSafety:
+            emit logMessage(QStringLiteral("[码垛] 安全位夹紧 %1").arg(m_gripFuncName));
+            executeRunFunc(m_gripFuncName, 30000);
+            break;
         case ActionStep::RunPalletBase:
             emit logMessage(QStringLiteral("[码垛] 调用基准点函数 %1").arg(m_palletBaseFuncName));
             executeRunFunc(m_palletBaseFuncName, 120000);
             break;
-        case ActionStep::MovePalletOffset:
+        case ActionStep::MovePalletXY: {
+            auto addMove = [this](int poseId, double value, double ignoreThreshold) {
+                if (qAbs(value) < ignoreThreshold)
+                    return;
+                m_palletMoves.append({ poseId, value >= 0 ? 1 : 0, qAbs(value) });
+            };
+            m_palletMoves.clear();
+            m_palletMoveIdx = 0;
+            addMove(0, m_pendingPalletTargetOffset.x, kOffsetIgnoreDistance);
+            addMove(1, m_pendingPalletTargetOffset.y, kOffsetIgnoreDistance);
+            addMove(5, m_pendingPalletTargetOffset.rz, kOffsetIgnoreAngle);
+            executeNextPalletMove();
+            break;
+        }
+        case ActionStep::DescendPalletZ:
+            m_palletMoves = {
+                {2, m_pendingPalletReleaseZ >= 0.0 ? 1 : 0, qAbs(m_pendingPalletReleaseZ)},
+            };
+            m_palletMoveIdx = 0;
             executeNextPalletMove();
             break;
         case ActionStep::ReleasePallet:
             emit logMessage(QStringLiteral("[码垛] 调用松爪函数 %1").arg(m_releaseFuncName));
             executeRunFunc(m_releaseFuncName, 30000);
+            break;
+        case ActionStep::LiftAfterPalletRelease:
+            m_palletMoves = {
+                {2, m_pendingPalletReleaseZ >= 0.0 ? 0 : 1, qAbs(m_pendingPalletReleaseZ)},
+            };
+            m_palletMoveIdx = 0;
+            executeNextPalletMove();
+            break;
+        case ActionStep::StowAfterPalletRelease:
+            emit logMessage(QStringLiteral("[码垛] 回运行安全位 %1").arg(m_stowFuncName));
+            executeRunFunc(m_stowFuncName, 120000);
             break;
         case ActionStep::None:
             finishAction();
@@ -1059,9 +1098,19 @@ void HuayanScheduler::advanceActionStep()
         m_actionStep = ActionStep::None;
         break;
     case Action::PalletPlace:
-        if (m_actionStep == ActionStep::RunPalletBase)
-            m_actionStep = ActionStep::MovePalletOffset;
+        if (m_actionStep == ActionStep::ClampPalletAtSafety)
+            m_actionStep = ActionStep::RunPalletBase;
+        else if (m_actionStep == ActionStep::RunPalletBase)
+            m_actionStep = ActionStep::MovePalletXY;
+        else if (m_actionStep == ActionStep::MovePalletXY)
+            m_actionStep = ActionStep::DescendPalletZ;
+        else if (m_actionStep == ActionStep::DescendPalletZ)
+            m_actionStep = ActionStep::ReleasePallet;
         else if (m_actionStep == ActionStep::ReleasePallet)
+            m_actionStep = ActionStep::LiftAfterPalletRelease;
+        else if (m_actionStep == ActionStep::LiftAfterPalletRelease)
+            m_actionStep = ActionStep::StowAfterPalletRelease;
+        else if (m_actionStep == ActionStep::StowAfterPalletRelease)
             m_actionStep = ActionStep::None;
         break;
     case Action::PreGripScanSearchMove:
@@ -1076,8 +1125,21 @@ void HuayanScheduler::advanceActionStep()
 bool HuayanScheduler::executeNextPalletMove()
 {
     if (m_palletMoveIdx >= m_palletMoves.size()) {
-        emit logMessage(QStringLiteral("[码垛] offset 分轴移动完成，准备松爪"));
-        m_actionStep = ActionStep::ReleasePallet;
+        switch (m_actionStep) {
+        case ActionStep::MovePalletXY:
+            emit logMessage(QStringLiteral("[码垛] 目标上方平移完成，准备执行释放高度 Z 动作"));
+            break;
+        case ActionStep::DescendPalletZ:
+            emit logMessage(QStringLiteral("[码垛] 已到释放高度，准备松爪"));
+            break;
+        case ActionStep::LiftAfterPalletRelease:
+            emit logMessage(QStringLiteral("[码垛] 松爪后抬升完成，准备回运行安全位"));
+            break;
+        default:
+            emit logMessage(QStringLiteral("[码垛] 相对移动完成"));
+            break;
+        }
+        advanceActionStep();
         proceedAction();
         return true;
     }
@@ -1109,6 +1171,8 @@ void HuayanScheduler::clearActionState()
     m_actionStep = ActionStep::None;
     m_palletMoves.clear();
     m_palletMoveIdx = 0;
+    m_pendingPalletTargetOffset = PalletPose();
+    m_pendingPalletReleaseZ = 0.0;
 }
 
 void HuayanScheduler::finishAction()

@@ -1,7 +1,6 @@
 #ifndef PALLETSCHEDULER_H
 #define PALLETSCHEDULER_H
 
-#include <QDateTime>
 #include <QList>
 #include <QObject>
 #include <QStringList>
@@ -54,7 +53,7 @@ struct PalletConfig {
     double marginX = 20.0;
     double marginY = 20.0;
     int maxLayers = 8;
-    // 现场记录/推荐字段，不自动叠加到相对 Z 偏移；相对 Z 已包含 palletSize.z。
+    // 目标层上方释放高度，单位 mm；真实松爪 Z = nextRelativeOffset().z + releaseZOffset。
     double releaseZOffset = 0.0;
     double maxRobotZ = 0.0; // 0 表示不校验最高安全 Z
     bool invertX = false;
@@ -130,7 +129,7 @@ public:
 
     /** @brief 放置完成后推进缓存；只能在机械臂松爪完成或 UI 仿真确认后调用。 */
     bool commitPlaced(PalletArea area, QString *error = nullptr);
-    /** @brief 清空指定区域已放数量和视觉连续空计数。 */
+    /** @brief 清空指定区域已放数量。 */
     void reset(PalletArea area);
     /** @brief 人工修正已放数量，用于叉车搬走或现场状态不一致时纠偏。 */
     bool setPlacedCount(PalletArea area, int count, QString *error = nullptr);
@@ -142,32 +141,16 @@ public:
                                           int maxCount = 0,
                                           QString *error = nullptr) const;
 
-    /** @brief 标记机械臂码垛动作进行中；进行中时视觉空区结果不会自动清零缓存。 */
-    void setStackingActive(PalletArea area, bool active);
-    /** @brief 记录一次视觉识别为空；连续达到阈值且未码垛中时自动清零。 */
-    void markAreaObservedEmpty(PalletArea area);
-    /** @brief 记录一次视觉识别为有目标；清空连续空计数。 */
-    void markAreaObservedOccupied(PalletArea area);
-    /** @brief 返回连续视觉识别为空的次数。 */
-    int emptyObserveCount(PalletArea area) const;
-    /** @brief 返回最近一次视觉自动清零时间，无记录时为无效时间。 */
-    QDateTime lastAutoResetTime(PalletArea area) const;
-
 signals:
     /** @brief 指定区域已达到总容量，需要人工搬运。 */
     void areaFull(PalletArea area);
-    /** @brief 视觉连续识别为空后自动清零缓存。 */
-    void areaAutoReset(PalletArea area, const QString &reason);
-    /** @brief 配置、状态或视觉计数变化，UI 需要刷新。 */
+    /** @brief 配置或状态变化，UI 需要刷新。 */
     void stateChanged(PalletArea area);
 
 private:
     struct AreaState {
         PalletConfig config;
         int placedCount = 0;
-        int emptyObserveCount = 0;
-        bool stackingActive = false;
-        QDateTime lastAutoResetTime;
     };
 
     AreaState &state(PalletArea area);

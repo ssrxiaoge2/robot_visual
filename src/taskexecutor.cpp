@@ -56,6 +56,11 @@ TaskExecutor::TaskExecutor(AgvController *agv,
                 this, &TaskExecutor::onPalletPlaceCompleted);
         connect(m_arm, &HuayanScheduler::palletPlaceError,
                 this, &TaskExecutor::onPalletPlaceError);
+        connect(m_arm, &HuayanScheduler::schedulerStopped, this, [this] {
+            // 华研面板停止会清掉独立码垛动作状态；主流程需要显式收尾，避免停在 ArmPalletPlace。
+            if (isBusy() && m_state == ExecState::ArmPalletPlace)
+                onPalletPlaceError(QStringLiteral("码垛动作已被华研面板停止"));
+        });
     }
 }
 
@@ -114,8 +119,6 @@ void TaskExecutor::start(const Task &task)
     palletFuncs.releaseFunc = m_palletCfg->releaseFunc;
     m_arm->setPalletFunctions(palletFuncs);
     m_arm->setPreGripScanEnabled(true);
-
-    clearPalletStackingFlag();
 
     emit logMessage(prefix(QStringLiteral("TASK"))
                     + QStringLiteral(" 已注入工位 %1 和 %2 的机械臂/码垛配置")
@@ -424,9 +427,9 @@ void TaskExecutor::onPalletPlaceCompleted()
     }
 
     emit logMessage(prefix(QStringLiteral("PALLET"))
-                    + QStringLiteral(" 已提交 %1 的放置缓存")
+                    + QStringLiteral(" 已提交 %1 码垛数量，机械臂已在码垛动作内回运行安全位")
                           .arg(palletAreaDisplayName(m_stationCfg->palletArea)));
-    enterState(ExecState::StowAfterPallet, QStringLiteral("码垛提交完成，机械臂收姿态"));
+    finishTaskSuccess();
 }
 
 void TaskExecutor::onPalletPlaceError(const QString &reason)
@@ -637,17 +640,17 @@ void TaskExecutor::enterState(ExecState state, const QString &statusText)
     case ExecState::PreparePalletPoint:
         beginPalletPreparation();
         break;
-    case ExecState::ArmPalletPlace:
-        clearPalletStackingFlag();
-        m_pallet->setStackingActive(m_stationCfg->palletArea, true);
+    case ExecState::ArmPalletPlace: {
+        const PalletConfig palletConfig = m_pallet->config(m_stationCfg->palletArea);
         emit logMessage(prefix(QStringLiteral("PALLET"))
                         + QStringLiteral(" 启动放置动作 offset X=%1 Y=%2 Z=%3 Rz=%4")
                               .arg(m_pendingPalletOffset.x, 0, 'f', 1)
                               .arg(m_pendingPalletOffset.y, 0, 'f', 1)
                               .arg(m_pendingPalletOffset.z, 0, 'f', 1)
                               .arg(m_pendingPalletOffset.rz, 0, 'f', 1));
-        m_arm->startPalletPlace(m_pendingPalletOffset);
+        m_arm->startPalletPlace(m_pendingPalletOffset, palletConfig.releaseZOffset);
         break;
+    }
     case ExecState::CleanupStow:
         emit logMessage(prefix(QStringLiteral("CLEANUP"))
                         + QStringLiteral(" 开始执行安全收姿态：%1")
@@ -821,7 +824,6 @@ void TaskExecutor::finalizeTaskFailureAfterCleanup()
 
     emit logMessage(prefix(QStringLiteral("CLEANUP"))
                     + QStringLiteral(" 安全收姿态成功，任务失败收尾完成：%1").arg(reason));
-    clearPalletStackingFlag();
     resetRuntimeState();
     setTaskTerminal(TaskState::Failed, QStringLiteral("任务失败并已完成安全收姿态"), reason);
     emit taskFailed(m_task, reason);
@@ -829,7 +831,6 @@ void TaskExecutor::finalizeTaskFailureAfterCleanup()
 
 void TaskExecutor::finishTaskSuccess()
 {
-    clearPalletStackingFlag();
     resetRuntimeState();
     setTaskTerminal(TaskState::Succeeded, QStringLiteral("任务执行完成"), QString());
     emit taskSucceeded(m_task);
@@ -839,7 +840,6 @@ void TaskExecutor::raiseSystemError(const QString &reason)
 {
     emit logMessage(prefix(QStringLiteral("ERROR"))
                     + QStringLiteral(" 系统级 ERROR：%1").arg(reason));
-    clearPalletStackingFlag();
     m_agvTimeout->stop();
 
     if (m_agv) {
@@ -852,11 +852,4 @@ void TaskExecutor::raiseSystemError(const QString &reason)
     resetRuntimeState();
     setTaskTerminal(TaskState::Failed, QStringLiteral("系统级 ERROR：%1").arg(reason), reason);
     emit systemError(m_task, reason);
-}
-
-void TaskExecutor::clearPalletStackingFlag()
-{
-    if (m_pallet && m_stationCfg) {
-        m_pallet->setStackingActive(m_stationCfg->palletArea, false);
-    }
 }

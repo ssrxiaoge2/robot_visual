@@ -1,9 +1,10 @@
 #include "palletparamdialog.h"
 
-#include "visionclient.h"
+#include "huayanScheduler.h"
+#include "lineconfig.h"
 
+#include <QCloseEvent>
 #include <QCheckBox>
-#include <QDateTime>
 #include <QDoubleSpinBox>
 #include <QFormLayout>
 #include <QGridLayout>
@@ -68,11 +69,11 @@ void addTripleRow(QFormLayout *form,
 }
 
 PalletParamDialog::PalletParamDialog(PalletScheduler *scheduler,
-                                     VisionHttpClient *visionClient,
+                                     HuayanScheduler *arm,
                                      QWidget *parent)
     : QDialog(parent)
     , m_scheduler(scheduler)
-    , m_visionClient(visionClient)
+    , m_arm(arm)
 {
     setWindowTitle(QStringLiteral("空箱码垛配置"));
     resize(980, 720);
@@ -97,56 +98,72 @@ PalletParamDialog::PalletParamDialog(PalletScheduler *scheduler,
                 this, &PalletParamDialog::refreshPage);
         connect(m_scheduler, &PalletScheduler::areaFull, this, [this](PalletArea area) {
             if (auto *w = widgets(area))
-                setStatus(w, QStringLiteral("码垛区已满，请搬运"), QStringLiteral("error"));
-        });
-        connect(m_scheduler, &PalletScheduler::areaAutoReset,
-                this, [this](PalletArea area, const QString &reason) {
-            if (auto *w = widgets(area))
-                setStatus(w, reason, QStringLiteral("warning"));
-            refreshPage(area);
+                setStatus(w, QStringLiteral("码垛区已满，请人工搬运并清零"), QStringLiteral("error"));
         });
     }
 
-    if (m_visionClient) {
-        connect(m_visionClient, &VisionHttpClient::palletOccupancyReady,
-                this, [this](const QString &requestId, bool occupied,
-                             int objectCount, double confidence, const QString &summary) {
-            if (!m_pendingRequests.contains(requestId))
+    if (m_arm) {
+        connect(m_arm, &HuayanScheduler::palletPlaceCompleted, this, [this] {
+            if (!m_debugRunning)
                 return;
-            const PalletArea area = m_pendingRequests.take(requestId);
+            const PalletArea area = m_runningDebugArea;
             PageWidgets *w = widgets(area);
-            if (!w || !m_scheduler)
-                return;
-            if (occupied) {
-                m_scheduler->markAreaObservedOccupied(area);
-                w->detectLabel->setText(QStringLiteral("检测到目标：%1").arg(summary));
-                setStatus(w, QStringLiteral("视觉检测到目标，沿用当前缓存"), QStringLiteral("ok"));
-            } else {
-                m_scheduler->markAreaObservedEmpty(area);
-                w->detectLabel->setText(QStringLiteral(
-                    "未检测到目标：object_count=%1, confidence=%2")
-                    .arg(objectCount).arg(confidence, 0, 'f', 3));
-                setStatus(w, QStringLiteral("视觉检测为空，已累计空区计数"), QStringLiteral("warning"));
+            QString error;
+            if (!m_scheduler->commitPlaced(area, &error)) {
+                if (w)
+                    setStatus(w, QStringLiteral("机械臂完成但提交数量失败：%1").arg(error),
+                              QStringLiteral("error"));
+            } else if (w) {
+                setStatus(w, QStringLiteral("单次码垛完成，已放数量加 1"), QStringLiteral("ok"));
             }
-            w->detectBtn->setEnabled(true);
+            m_debugRunning = false;
+            if (w && w->singlePlaceBtn)
+                w->singlePlaceBtn->setEnabled(true);
             refreshPage(area);
         });
-        connect(m_visionClient, &VisionHttpClient::palletOccupancyError,
-                this, [this](const QString &requestId, const QString &msg) {
-            if (!m_pendingRequests.contains(requestId))
+        connect(m_arm, &HuayanScheduler::palletPlaceError, this, [this](const QString &reason) {
+            if (!m_debugRunning)
                 return;
-            const PalletArea area = m_pendingRequests.take(requestId);
+            const PalletArea area = m_runningDebugArea;
             PageWidgets *w = widgets(area);
-            if (!w)
+            m_debugRunning = false;
+            if (w && w->singlePlaceBtn)
+                w->singlePlaceBtn->setEnabled(true);
+            if (w) {
+                setStatus(w,
+                          QStringLiteral("单次码垛失败，已放数量未提交：%1").arg(reason),
+                          QStringLiteral("error"));
+            }
+            refreshPage(area);
+        });
+        connect(m_arm, &HuayanScheduler::schedulerStopped, this, [this] {
+            if (!m_debugRunning)
                 return;
-            w->detectBtn->setEnabled(true);
-            w->detectLabel->setText(msg);
-            setStatus(w, QStringLiteral("视觉检测失败，缓存未修改"), QStringLiteral("error"));
+            const PalletArea area = m_runningDebugArea;
+            PageWidgets *w = widgets(area);
+            m_debugRunning = false;
+            if (w && w->singlePlaceBtn)
+                w->singlePlaceBtn->setEnabled(true);
+            if (w)
+                setStatus(w, QStringLiteral("单次码垛已停止，已放数量未提交"), QStringLiteral("warning"));
+            refreshPage(area);
         });
     }
 
     refreshPage(PalletArea::LargeBox);
     refreshPage(PalletArea::SmallBox);
+}
+
+void PalletParamDialog::closeEvent(QCloseEvent *event)
+{
+    if (m_debugRunning) {
+        QMessageBox::warning(this,
+                             QStringLiteral("调试执行中"),
+                             QStringLiteral("真实单步码垛正在执行，请先在华研面板点击停止，并等待动作完成或停止提示后再关闭窗口。"));
+        event->ignore();
+        return;
+    }
+    QDialog::closeEvent(event);
 }
 
 QWidget *PalletParamDialog::createAreaPage(PalletArea area)
@@ -199,7 +216,7 @@ QWidget *PalletParamDialog::createAreaPage(PalletArea area)
     w->releaseZOffset = createDistanceSpin();
     w->maxRobotZ = createDistanceSpin();
     heightForm->addRow(QStringLiteral("最大层数:"), w->maxLayers);
-    heightForm->addRow(QStringLiteral("释放高度参考:"), w->releaseZOffset);
+    heightForm->addRow(QStringLiteral("目标层上方释放高度:"), w->releaseZOffset);
     heightForm->addRow(QStringLiteral("最高安全 Z:"), w->maxRobotZ);
 
     auto *originForm = addGroup(QStringLiteral("机械臂初始点位（绝对预览可选）"));
@@ -226,14 +243,6 @@ QWidget *PalletParamDialog::createAreaPage(PalletArea area)
     stateRow->addWidget(w->placedCount); stateRow->addWidget(w->applyPlaced);
     stateForm->addRow(QStringLiteral("已放数量:"), stateRow);
 
-    auto *visionForm = addGroup(QStringLiteral("视觉检测"));
-    w->detectBtn = new QPushButton(QStringLiteral("检测当前区域"));
-    w->detectLabel = wrapLabel(QStringLiteral("未检测"));
-    w->emptyCountLabel = wrapLabel(QStringLiteral("连续空计数：0/3"));
-    visionForm->addRow(w->detectBtn);
-    visionForm->addRow(QStringLiteral("结果:"), w->detectLabel);
-    visionForm->addRow(QStringLiteral("计数:"), w->emptyCountLabel);
-
     auto *buttonGroup = new QGroupBox(QStringLiteral("操作"));
     auto *buttonGrid = new QGridLayout(buttonGroup);
     auto *saveBtn = new QPushButton(QStringLiteral("保存配置"));
@@ -241,14 +250,16 @@ QWidget *PalletParamDialog::createAreaPage(PalletArea area)
     auto *fieldBtn = new QPushButton(QStringLiteral("填入默认现场值"));
     auto *releaseBtn = new QPushButton(QStringLiteral("推荐释放高度"));
     auto *nextBtn = new QPushButton(QStringLiteral("计算下一点"));
-    auto *commitBtn = new QPushButton(QStringLiteral("模拟放置完成"));
+    w->singlePlaceBtn = new QPushButton(QStringLiteral("执行一次码垛"));
     auto *simBtn = new QPushButton(QStringLiteral("仿真 8 层"));
     auto *clearBtn = new QPushButton(QStringLiteral("清除显示结果"));
     auto *resetBtn = new QPushButton(QStringLiteral("清零当前区域"));
 
     fieldBtn->setToolTip(QStringLiteral("把托盘/箱体/间距/层数恢复为默认现场值；只写入输入框，不保存配置。"));
+    releaseBtn->setToolTip(QStringLiteral("按箱高填入目标层上方释放高度建议值；可再按现场工艺微调。"));
     nextBtn->setToolTip(QStringLiteral("只按当前已放数量预览下一点，不推进缓存。"));
-    commitBtn->setToolTip(QStringLiteral("仿真用：代替机械臂松爪完成信号，把已放数量推进 1。"));
+    w->singlePlaceBtn->setToolTip(QStringLiteral(
+        "真实机械臂调试：每次只放置一个空箱，完整成功后已放数量加 1。"));
     simBtn->setToolTip(QStringLiteral("从空托盘开始生成完整 8 层点位表，不修改真实缓存。"));
     clearBtn->setToolTip(QStringLiteral("清空右侧下一点、校验结果和仿真表格；不修改配置或已放数量。"));
 
@@ -257,10 +268,10 @@ QWidget *PalletParamDialog::createAreaPage(PalletArea area)
     buttonGrid->addWidget(fieldBtn, 0, 2);
     buttonGrid->addWidget(releaseBtn, 1, 0);
     buttonGrid->addWidget(nextBtn, 1, 1);
-    buttonGrid->addWidget(commitBtn, 1, 2);
-    buttonGrid->addWidget(simBtn, 2, 0);
-    buttonGrid->addWidget(clearBtn, 2, 1);
-    buttonGrid->addWidget(resetBtn, 2, 2);
+    buttonGrid->addWidget(simBtn, 1, 2);
+    buttonGrid->addWidget(clearBtn, 2, 0);
+    buttonGrid->addWidget(resetBtn, 2, 1, 1, 2);
+    buttonGrid->addWidget(w->singlePlaceBtn, 3, 0, 1, 3);
     left->addWidget(buttonGroup);
     left->addStretch();
 
@@ -310,12 +321,12 @@ QWidget *PalletParamDialog::createAreaPage(PalletArea area)
     connect(fieldBtn, &QPushButton::clicked, this, [this, area] { fillFieldDefaults(area); });
     connect(releaseBtn, &QPushButton::clicked, this, [this, area] { recommendReleaseHeight(area); });
     connect(nextBtn, &QPushButton::clicked, this, [this, area] { showNextPose(area); });
-    connect(commitBtn, &QPushButton::clicked, this, [this, area] { simulatePlaced(area); });
     connect(simBtn, &QPushButton::clicked, this, [this, area] { simulateArea(area); });
     connect(clearBtn, &QPushButton::clicked, this, [this, area] { clearDisplayResults(area); });
     connect(resetBtn, &QPushButton::clicked, this, [this, area] { resetArea(area); });
     connect(w->applyPlaced, &QPushButton::clicked, this, [this, area] { applyPlacedCount(area); });
-    connect(w->detectBtn, &QPushButton::clicked, this, [this, area] { detectArea(area); });
+    connect(w->singlePlaceBtn, &QPushButton::clicked,
+            this, [this, area] { runSinglePalletPlace(area); });
 
     if (m_scheduler)
         writeConfig(area, m_scheduler->config(area));
@@ -422,13 +433,7 @@ void PalletParamDialog::refreshPage(PalletArea area)
     w->capacityLabel->setText(QStringLiteral(
         "列=%1 行=%2 单层=%3 总容量=%4 当前已放=%5")
         .arg(cols).arg(rows).arg(perLayer).arg(total).arg(placed));
-    w->emptyCountLabel->setText(QStringLiteral("连续空计数：%1/3")
-        .arg(m_scheduler->emptyObserveCount(area)));
-    const QDateTime resetAt = m_scheduler->lastAutoResetTime(area);
-    if (resetAt.isValid()) {
-        w->statusLabel->setToolTip(QStringLiteral("最近自动清零：%1")
-            .arg(resetAt.toString(QStringLiteral("yyyy-MM-dd hh:mm:ss"))));
-    }
+    w->statusLabel->setToolTip(QString());
 }
 
 void PalletParamDialog::savePage(PalletArea area)
@@ -478,7 +483,7 @@ void PalletParamDialog::recommendReleaseHeight(PalletArea area)
     if (!w)
         return;
     w->releaseZOffset->setValue(w->boxZ->value() * 1.2);
-    setStatus(w, QStringLiteral("已按 1.2 倍箱高推荐释放高度记录值"), QStringLiteral("warning"));
+    setStatus(w, QStringLiteral("已按 1.2 倍箱高填入目标层上方释放高度建议值"), QStringLiteral("warning"));
 }
 
 void PalletParamDialog::showNextPose(PalletArea area)
@@ -516,27 +521,62 @@ void PalletParamDialog::showNextPose(PalletArea area)
     setStatus(w, QStringLiteral("下一点已计算；主输出是相对初始点位的偏移"), QStringLiteral("ok"));
 }
 
-void PalletParamDialog::simulatePlaced(PalletArea area)
+void PalletParamDialog::runSinglePalletPlace(PalletArea area)
 {
-    if (!m_scheduler)
-        return;
-
-    // 仿真模式下用按钮代替“机械臂已运动到点位并松爪”的完成信号。
-    // 真实接入时不要在计算点位后立即提交，应由机械臂完成回调触发 commitPlaced()。
-    savePage(area);
     PageWidgets *w = widgets(area);
-    if (!w)
+    if (!w || !m_scheduler || !m_arm) {
+        if (w) {
+            setStatus(w, QStringLiteral("机械臂或码垛调度器未就绪"),
+                      QStringLiteral("error"));
+        }
         return;
-
-    QString error;
-    if (!m_scheduler->commitPlaced(area, &error)) {
-        setStatus(w, error, QStringLiteral("error"));
+    }
+    if (m_debugRunning) {
+        setStatus(w, QStringLiteral("已有一次码垛调试正在执行"), QStringLiteral("warning"));
         return;
     }
 
-    refreshPage(area);
-    showNextPose(area);
-    setStatus(w, QStringLiteral("已模拟完成一次放置，缓存数量已推进"), QStringLiteral("ok"));
+    savePage(area);
+
+    QStringList errors;
+    if (!m_scheduler->validateConfig(area, &errors, nullptr)) {
+        setStatus(w,
+                  QStringLiteral("配置无效：%1").arg(errors.join(QStringLiteral("；"))),
+                  QStringLiteral("error"));
+        return;
+    }
+    if (m_scheduler->placedCount(area) >= m_scheduler->totalCapacity(area)) {
+        QMessageBox::warning(this,
+                             QStringLiteral("码垛区已满"),
+                             QStringLiteral("码垛区已满，请人工搬运并清零后再执行。"));
+        setStatus(w, QStringLiteral("码垛区已满，请人工搬运并清零"), QStringLiteral("error"));
+        return;
+    }
+
+    const PalletAreaTaskConfig *areaConfig = palletAreaConfig(area);
+    if (!areaConfig) {
+        setStatus(w, QStringLiteral("缺少当前码垛区的机械臂函数配置"), QStringLiteral("error"));
+        return;
+    }
+
+    HuayanScheduler::PalletArmFunctions funcs;
+    funcs.palletBaseFunc = areaConfig->palletBaseFunc;
+    funcs.releaseFunc = areaConfig->releaseFunc;
+    m_arm->setPalletFunctions(funcs);
+
+    PalletPose offset;
+    QString error;
+    if (!m_scheduler->nextRelativeOffset(area, &offset, &error)) {
+        setStatus(w, QStringLiteral("无法计算下一码垛点：%1").arg(error), QStringLiteral("error"));
+        return;
+    }
+
+    const PalletConfig cfg = m_scheduler->config(area);
+    m_runningDebugArea = area;
+    m_debugRunning = true;
+    w->singlePlaceBtn->setEnabled(false);
+    setStatus(w, QStringLiteral("正在执行一次真实码垛调试"), QStringLiteral("warning"));
+    m_arm->startPalletPlace(offset, cfg.releaseZOffset);
 }
 
 void PalletParamDialog::simulateArea(PalletArea area)
@@ -619,19 +659,6 @@ void PalletParamDialog::applyPlacedCount(PalletArea area)
         return;
     }
     refreshPage(area);
-}
-
-void PalletParamDialog::detectArea(PalletArea area)
-{
-    PageWidgets *w = widgets(area);
-    if (!w || !m_visionClient)
-        return;
-    const QString requestId = QStringLiteral("%1-%2")
-        .arg(areaKey(area)).arg(QDateTime::currentMSecsSinceEpoch());
-    m_pendingRequests.insert(requestId, area);
-    w->detectBtn->setEnabled(false);
-    w->detectLabel->setText(QStringLiteral("检测中..."));
-    m_visionClient->fetchPalletOccupancy(requestId);
 }
 
 void PalletParamDialog::setStatus(PageWidgets *w, const QString &text, const QString &state)

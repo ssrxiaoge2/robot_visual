@@ -78,6 +78,17 @@ int main()
     requireNear(HuayanScheduler::calculateGrabDescend(2000.0, 400.0, 1078.0), 1078.0, 0.001,
                 "Z 下探计算必须受最大下探量限制");
 
+    QFile lineConfigFile(QStringLiteral(PROJECT_SOURCE_DIR "/src/lineconfig.h"));
+    requireTrue(lineConfigFile.open(QIODevice::ReadOnly | QIODevice::Text),
+                "必须能读取 lineconfig.h");
+    const QString lineConfigSource = QString::fromUtf8(lineConfigFile.readAll());
+    requireTrue(lineConfigSource.contains(
+                    QStringLiteral("ArmPalletPlace,      ///< 等待机械臂完成标准码垛动作，动作内已包含松爪后回运行安全位。")),
+                "lineconfig.h 的 ArmPalletPlace 注释必须说明标准码垛动作内已回运行安全位");
+    requireTrue(lineConfigSource.contains(
+                    QStringLiteral("StowAfterPallet,     ///< 兼容保留的显式收姿态步骤；标准码垛主流程不再进入。")),
+                "lineconfig.h 的 StowAfterPallet 注释必须说明标准码垛主流程不再进入");
+
     bool shouldRun = true;
     QString func = HuayanScheduler::resolveAfterGripFunction(AfterGripMode::None,
                                                              QStringLiteral("Func_capture12"),
@@ -179,6 +190,12 @@ int main()
                 "HuayanScheduler 必须提供下一次收姿态函数选择接口");
     requireTrue(taskExecutorSource.contains(QStringLiteral("setNextStowFunction(m_stationCfg->stowAfterUnloadFunc)")),
                 "TaskExecutor 必须在倒料后收姿态前注入当前工位函数");
+    requireTrue(taskExecutorSource.contains(QStringLiteral("机械臂已在码垛动作内回运行安全位")),
+                "TaskExecutor 必须记录标准码垛动作已内含回运行安全位");
+    requireTrue(taskExecutorSource.contains(QStringLiteral("finishTaskSuccess();")),
+                "标准码垛 commit 成功后必须直接完成任务");
+    requireTrue(!taskExecutorSource.contains(QStringLiteral("enterState(ExecState::StowAfterPallet, QStringLiteral(\"码垛提交完成，机械臂收姿态\"));")),
+                "标准码垛 commit 成功后不能再次进入 StowAfterPallet");
     requireTrue(schedulerSource.contains(QStringLiteral("if (rejectStageStartWhileActionRunning(stageName(Stage::Stow))) {\n        m_nextStowFuncName.clear();\n        return;\n    }")),
                 "startStow() 在已有动作运行而拒绝启动时必须清空一次性收姿态覆盖");
     requireTrue(schedulerSource.contains(QStringLiteral("if (!ensureConnected()) {\n        m_nextStowFuncName.clear();\n        return;\n    }")),
