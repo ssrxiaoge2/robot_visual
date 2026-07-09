@@ -214,9 +214,11 @@ QWidget *PalletParamDialog::createAreaPage(PalletArea area)
     w->maxLayers->setAlignment(Qt::AlignRight);
     w->maxLayers->setValidator(new QIntValidator(1, 8, w->maxLayers));
     w->releaseZOffset = createDistanceSpin();
+    w->robotBaseHeightFromGround = createDistanceSpin();
     w->maxRobotZ = createDistanceSpin();
     heightForm->addRow(QStringLiteral("最大层数:"), w->maxLayers);
     heightForm->addRow(QStringLiteral("目标层上方释放高度:"), w->releaseZOffset);
+    heightForm->addRow(QStringLiteral("机器人基座离地高度:"), w->robotBaseHeightFromGround);
     heightForm->addRow(QStringLiteral("最高安全 Z:"), w->maxRobotZ);
 
     auto *originForm = addGroup(QStringLiteral("机械臂初始点位（绝对预览可选）"));
@@ -382,6 +384,7 @@ PalletConfig PalletParamDialog::readConfig(PalletArea area) const
     cfg.marginY = w->marginY->value();
     cfg.maxLayers = w->maxLayers->text().trimmed().toInt();
     cfg.releaseZOffset = w->releaseZOffset->value();
+    cfg.robotBaseHeightFromGround = w->robotBaseHeightFromGround->value();
     cfg.maxRobotZ = w->maxRobotZ->value();
     cfg.invertX = w->invertX->isChecked();
     cfg.invertY = w->invertY->isChecked();
@@ -407,6 +410,7 @@ void PalletParamDialog::writeConfig(PalletArea area, const PalletConfig &cfg)
     w->marginY->setValue(cfg.marginY);
     w->maxLayers->setText(QString::number(cfg.maxLayers));
     w->releaseZOffset->setValue(cfg.releaseZOffset);
+    w->robotBaseHeightFromGround->setValue(cfg.robotBaseHeightFromGround);
     w->maxRobotZ->setValue(cfg.maxRobotZ);
     w->invertX->setChecked(cfg.invertX);
     w->invertY->setChecked(cfg.invertY);
@@ -512,8 +516,8 @@ void PalletParamDialog::showNextPose(PalletArea area)
     const int col = m_scheduler->columns(area) > 0 ? (idx % m_scheduler->columns(area)) + 1 : 0;
     w->nextPoseLabel->setText(QStringLiteral(
         "下一箱：第%1层 第%2行 第%3列\n"
-        "给机械臂的相对偏移: X=%4 Y=%5 Z=%6\n"
-        "绝对预览: X=%7 Y=%8 Z=%9 Rx=%10 Ry=%11 Rz=%12")
+        "给机械臂的基准偏移: X=%4 Y=%5；目标层地面高度=%6\n"
+        "基座坐标预览: X=%7 Y=%8 Z=%9 Rx=%10 Ry=%11 Rz=%12")
         .arg(layer).arg(row).arg(col)
         .arg(fmt(offset.x)).arg(fmt(offset.y)).arg(fmt(offset.z))
         .arg(fmt(pose.x)).arg(fmt(pose.y)).arg(fmt(pose.z))
@@ -576,7 +580,7 @@ void PalletParamDialog::runSinglePalletPlace(PalletArea area)
     m_debugRunning = true;
     w->singlePlaceBtn->setEnabled(false);
     setStatus(w, QStringLiteral("正在执行一次真实码垛调试"), QStringLiteral("warning"));
-    m_arm->startPalletPlace(offset, cfg.releaseZOffset);
+    m_arm->startPalletPlace(offset, cfg.releaseZOffset, cfg.robotBaseHeightFromGround);
 }
 
 void PalletParamDialog::simulateArea(PalletArea area)

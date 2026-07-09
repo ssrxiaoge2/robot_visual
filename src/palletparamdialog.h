@@ -58,6 +58,7 @@ private:
         QDoubleSpinBox *marginY = nullptr;
         QLineEdit *maxLayers = nullptr;
         QDoubleSpinBox *releaseZOffset = nullptr;
+        QDoubleSpinBox *robotBaseHeightFromGround = nullptr;
         QDoubleSpinBox *maxRobotZ = nullptr;
         QDoubleSpinBox *originX = nullptr;
         QDoubleSpinBox *originY = nullptr;

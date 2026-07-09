@@ -95,8 +95,8 @@ int main()
                 "释放高度建议提示语必须说明新的业务含义");
     requireTrue(dialogSource.contains(QStringLiteral("const PalletAreaTaskConfig *areaConfig = palletAreaConfig(area);")),
                 "单步码垛必须读取 lineconfig 中的 PalletAreaTaskConfig");
-    requireTrue(dialogSource.contains(QStringLiteral("m_arm->startPalletPlace(offset, cfg.releaseZOffset);")),
-                "单步码垛必须通过 HuayanScheduler::startPalletPlace 执行真实动作");
+    requireTrue(dialogSource.contains(QStringLiteral("m_arm->startPalletPlace(offset, cfg.releaseZOffset, cfg.robotBaseHeightFromGround);")),
+                "单步码垛必须把目标层地面高度、释放高度和机器人基座离地高度传给 HuayanScheduler");
     requireTrue(dialogSource.contains(QStringLiteral("m_scheduler->commitPlaced(area, &error)")),
                 "单步码垛完成后必须提交 placedCount");
     requireTrue(dialogSource.contains(QStringLiteral("HuayanScheduler::schedulerStopped")),

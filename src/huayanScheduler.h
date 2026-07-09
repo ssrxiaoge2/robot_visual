@@ -94,12 +94,15 @@ public:
     /**
      * @brief 执行一次标准空箱码垛动作。
      *
-     * 标准动作链：安全位夹紧 -> 码垛基准点 -> XY 到目标上方 -> Z 到释放高度
-     * -> 松爪 -> Z 抬升 -> Func_yun_xing_zhong 回运行安全位。
-     * 本函数只执行机械臂动作，不更新 PalletScheduler 缓存；调用方必须在
+     * 标准动作链：安全位夹紧 -> 码垛基准点 -> 读取当前 TCP Z -> XY 到目标上方
+     * -> 按地面高度换算 Z 下降量 -> 松爪 -> Z 抬升 -> Func_yun_xing_zhong 回运行安全位。
+     * targetOffset.z 是目标层表面离地高度，robotBaseHeightFromGroundMm 是机器人基座
+     * 原点离地高度。本函数只执行机械臂动作，不更新 PalletScheduler 缓存；调用方必须在
      * palletPlaceCompleted() 后再 commitPlaced()。
      */
-    void startPalletPlace(const PalletPose &targetOffset, double releaseZOffsetMm);
+    void startPalletPlace(const PalletPose &targetOffset,
+                          double releaseZOffsetMm,
+                          double robotBaseHeightFromGroundMm);
 
     void startStageOne();
     void startStageTwo();
@@ -360,6 +363,7 @@ private:
     bool hasActiveRobotCommand() const; ///< 当前是否仍有已下发但尚未完成的 SDK 命令。
     void stopVisionWaitTimeout();       ///< 收到视觉结果后关闭 WaitForVision 的超时保护，避免误判为执行中命令。
     RobotStateSnapshot readRobotStateSnapshot() const;
+    bool readActualTcpPose(PalletPose *pose, QString *error = nullptr) const;
     QString formatRobotStateSnapshot(const RobotStateSnapshot &snapshot) const;
 
     bool executeRunFunc(const QString &funcName, int timeoutMs = 30000);
@@ -410,8 +414,10 @@ private:
     Pose m_emptyBoxPose;
     QList<RelMove> m_palletMoves;          ///< X/Y/Z/Rz 顺序的码垛相对动作。
     int m_palletMoveIdx = 0;               ///< 下一条待执行码垛偏移索引。
-    PalletPose m_pendingPalletTargetOffset; ///< 本次码垛目标层中心偏移。
-    double m_pendingPalletReleaseZ = 0.0;   ///< 本次真实松爪相对 Z。
+    PalletPose m_pendingPalletTargetOffset; ///< 本次码垛目标格 XY/Rz 偏移；z 为目标层表面离地高度。
+    double m_pendingPalletReleaseZ = 0.0;   ///< palletBaseFunc 到位后计算出的本次 Z 相对移动量。
+    double m_pendingPalletReleaseHeightAboveLayer = 0.0; ///< 目标层上方释放高度，单位 mm。
+    double m_pendingRobotBaseHeightFromGround = 850.0;   ///< 机器人基座原点离地高度，单位 mm。
     Action m_action = Action::None;         ///< 当前独立动作。
     ActionStep m_actionStep = ActionStep::None; ///< 独立动作内步骤。
 

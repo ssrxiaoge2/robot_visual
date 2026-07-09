@@ -648,7 +648,9 @@ void TaskExecutor::enterState(ExecState state, const QString &statusText)
                               .arg(m_pendingPalletOffset.y, 0, 'f', 1)
                               .arg(m_pendingPalletOffset.z, 0, 'f', 1)
                               .arg(m_pendingPalletOffset.rz, 0, 'f', 1));
-        m_arm->startPalletPlace(m_pendingPalletOffset, palletConfig.releaseZOffset);
+        m_arm->startPalletPlace(m_pendingPalletOffset,
+                                palletConfig.releaseZOffset,
+                                palletConfig.robotBaseHeightFromGround);
         break;
     }
     case ExecState::CleanupStow:

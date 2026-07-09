@@ -64,6 +64,7 @@ PalletConfig PalletScheduler::defaultLargeBoxConfig()
     cfg.marginY = 20.0;
     cfg.maxLayers = 8;
     cfg.releaseZOffset = cfg.boxSize.z * 1.2;
+    cfg.robotBaseHeightFromGround = 850.0;
     return cfg;
 }
 
@@ -78,6 +79,7 @@ PalletConfig PalletScheduler::defaultSmallBoxConfig()
     cfg.marginY = 20.0;
     cfg.maxLayers = 8;
     cfg.releaseZOffset = cfg.boxSize.z * 1.2;
+    cfg.robotBaseHeightFromGround = 850.0;
     return cfg;
 }
 
@@ -104,7 +106,9 @@ bool PalletScheduler::validateConfig(PalletArea area,
     if (cfg.palletSize.x <= 0.0 || cfg.palletSize.y <= 0.0)
         localErrors << QStringLiteral("码垛区域长宽必须大于 0");
     if (cfg.palletSize.z < 0.0)
-        localErrors << QStringLiteral("码垛区域高度不能小于 0");
+        localErrors << QStringLiteral("托盘面离地高度不能小于 0");
+    if (cfg.robotBaseHeightFromGround <= 0.0)
+        localErrors << QStringLiteral("机器人基座离地高度必须大于 0");
     if (cfg.boxSize.x <= 0.0 || cfg.boxSize.y <= 0.0 || cfg.boxSize.z <= 0.0)
         localErrors << QStringLiteral("空箱长宽高必须大于 0");
     if (cfg.gapX < 0.0 || cfg.gapY < 0.0)
@@ -121,7 +125,7 @@ bool PalletScheduler::validateConfig(PalletArea area,
         const double maxSuggested = cfg.boxSize.z * 1.5;
         if (cfg.releaseZOffset < minSuggested || cfg.releaseZOffset > maxSuggested) {
             localSuggestions << QStringLiteral(
-                "目标层上方释放高度建议在 %1-%2 mm；真实松爪 Z = 目标层 Z + 该高度")
+                "目标层上方释放高度建议在 %1-%2 mm；真实释放地面高度 = 托盘面离地高度 + 层高 + 该高度")
                 .arg(minSuggested, 0, 'f', 1)
                 .arg(maxSuggested, 0, 'f', 1);
         }
@@ -141,12 +145,13 @@ bool PalletScheduler::validateConfig(PalletArea area,
         localErrors << QStringLiteral("当前已放数量超过总容量，请修正缓存状态");
 
     const int layers = boundedMaxLayers(area);
-    if (cfg.maxRobotZ > 0.0 && cfg.boxSize.z > 0.0) {
-        const double releaseZ = cfg.originPose.z + cfg.palletSize.z
+    if (cfg.maxRobotZ > 0.0 && cfg.boxSize.z > 0.0 && cfg.robotBaseHeightFromGround > 0.0) {
+        const double releaseGroundZ = cfg.palletSize.z
             + (layers - 1) * cfg.boxSize.z + cfg.releaseZOffset;
-        if (releaseZ > cfg.maxRobotZ) {
-            localErrors << QStringLiteral("最高层释放点 Z=%1 超过安全上限 %2")
-                .arg(releaseZ, 0, 'f', 1).arg(cfg.maxRobotZ, 0, 'f', 1);
+        const double releaseRobotZ = releaseGroundZ - cfg.robotBaseHeightFromGround;
+        if (releaseRobotZ > cfg.maxRobotZ) {
+            localErrors << QStringLiteral("最高层释放点基座 Z=%1 超过安全上限 %2")
+                .arg(releaseRobotZ, 0, 'f', 1).arg(cfg.maxRobotZ, 0, 'f', 1);
         }
     }
 
@@ -329,14 +334,15 @@ bool PalletScheduler::computeItem(PalletArea area,
     if (cfg.invertX) offset.x = -offset.x;
     if (cfg.invertY) offset.y = -offset.y;
 
-    // offset 是给机械臂主流程使用的相对偏移，Z 已包含托盘高度；pose 只是界面/调试用绝对预览。
+    // offset.x/y/rz 是基准点相对偏移；offset.z 是目标层表面离地高度。
+    // pose 仅用于 UI 预览：x/y 沿用示教基准点，z 显示该层在机器人基座坐标系下的高度。
     PalletPose pose = cfg.originPose;
     pose.x += offset.x;
     pose.y += offset.y;
-    pose.z += offset.z;
+    pose.z = offset.z - cfg.robotBaseHeightFromGround;
 
     if (cfg.maxRobotZ > 0.0 && pose.z > cfg.maxRobotZ) {
-        setError(error, QStringLiteral("目标 Z=%1 超过安全上限 %2")
+        setError(error, QStringLiteral("目标层基座 Z=%1 超过安全上限 %2")
                  .arg(pose.z, 0, 'f', 1).arg(cfg.maxRobotZ, 0, 'f', 1));
         return false;
     }
@@ -372,6 +378,8 @@ void PalletScheduler::load()
         cfg.marginY = s.value(prefix + "/config/marginY", def.marginY).toDouble();
         cfg.maxLayers = s.value(prefix + "/config/maxLayers", def.maxLayers).toInt();
         cfg.releaseZOffset = s.value(prefix + "/config/releaseZOffset", def.releaseZOffset).toDouble();
+        cfg.robotBaseHeightFromGround = s.value(prefix + "/config/robotBaseHeightFromGround",
+                                                def.robotBaseHeightFromGround).toDouble();
         cfg.maxRobotZ = s.value(prefix + "/config/maxRobotZ", def.maxRobotZ).toDouble();
         cfg.invertX = s.value(prefix + "/config/invertX", def.invertX).toBool();
         cfg.invertY = s.value(prefix + "/config/invertY", def.invertY).toBool();
@@ -399,6 +407,7 @@ void PalletScheduler::saveArea(PalletArea area) const
     s.setValue(prefix + "/config/marginY", cfg.marginY);
     s.setValue(prefix + "/config/maxLayers", cfg.maxLayers);
     s.setValue(prefix + "/config/releaseZOffset", cfg.releaseZOffset);
+    s.setValue(prefix + "/config/robotBaseHeightFromGround", cfg.robotBaseHeightFromGround);
     s.setValue(prefix + "/config/maxRobotZ", cfg.maxRobotZ);
     s.setValue(prefix + "/config/invertX", cfg.invertX);
     s.setValue(prefix + "/config/invertY", cfg.invertY);

@@ -27,8 +27,8 @@ QString readUtf8File(const QString &path)
 } // namespace
 
 static_assert(std::is_same_v<decltype(&HuayanScheduler::startPalletPlace),
-                             void (HuayanScheduler::*)(const PalletPose &, double)>,
-              "HuayanScheduler::startPalletPlace must accept targetOffset and releaseZOffsetMm");
+                             void (HuayanScheduler::*)(const PalletPose &, double, double)>,
+              "HuayanScheduler::startPalletPlace must accept targetOffset, releaseZOffsetMm and robotBaseHeightFromGroundMm");
 
 int main()
 {
@@ -36,6 +36,8 @@ int main()
         readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/huayanScheduler.h"));
     const QString source =
         readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/huayanScheduler.cpp"));
+    const QString palletSequenceHeader =
+        readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/palletplacesequence.h"));
 
     requireTrue(header.contains(QStringLiteral("void schedulerStopped();")),
                 "HuayanScheduler 必须声明专用的 schedulerStopped 信号");
@@ -44,6 +46,13 @@ int main()
     requireTrue(source.contains(
                     QStringLiteral("if (emitStoppedLog) {\n        emit logMessage(QStringLiteral(\"调度已停止\"));\n        emit schedulerStopped();\n    }")),
                 "HuayanScheduler::stop 必须在停止日志路径上同步发出 schedulerStopped");
+    requireTrue(source.contains(QStringLiteral("HRIF_ReadActTcpPos")),
+                "码垛基准点函数到位后必须读取当前 TCP Z，用于计算真实下降量");
+    requireTrue(palletSequenceHeader.contains(QStringLiteral("#define PALLET_GRIPPER_RELEASE_Z_OFFSET_MM 420.0")),
+                "夹爪释放点相对 TCP 高度必须用宏定义固定为 420mm");
+    requireTrue(source.contains(QStringLiteral("+ PALLET_GRIPPER_RELEASE_Z_OFFSET_MM"))
+                    && source.contains(QStringLiteral("- basePose.z")),
+                "码垛 Z 下降量必须按地面释放高度、机器人基座离地高度、夹爪释放高度和当前基准点 Z 计算");
 
     return 0;
 }

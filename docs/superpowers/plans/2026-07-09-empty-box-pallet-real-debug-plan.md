@@ -26,8 +26,11 @@
 
 - `PalletParamDialog` 当前构造函数为 `PalletParamDialog(PalletScheduler *scheduler, HuayanScheduler *arm, QWidget *parent = nullptr)`，不再依赖 `VisionHttpClient`。
 - 配置页真实单步调试期间没有独立停止按钮；停止统一依赖华研面板，窗口通过 `HuayanScheduler::schedulerStopped` 做停止收尾，并在 `closeEvent` 中阻止执行中关闭。
-- `HuayanScheduler::startPalletPlace()` 当前签名为 `startPalletPlace(const PalletPose &targetOffset, double releaseZOffsetMm)`；`releaseZOffset` 语义是“目标层上方释放高度”。
+- `HuayanScheduler::startPalletPlace()` 当前签名为 `startPalletPlace(const PalletPose &targetOffset, double releaseZOffsetMm, double robotBaseHeightFromGroundMm)`；`releaseZOffset` 语义是“目标层上方释放高度”，`robotBaseHeightFromGroundMm` 是机器人基座原点离地高度，默认先按实测 850mm 配置并允许现场补偿。
 - 标准主流程成功路径保持 `PreparePalletPoint -> ArmPalletPlace -> CommitPallet -> task success`，未恢复旧的视觉占用检测或自动清零。
+- 车载机械臂 Z 坐标已修正：`nextRelativeOffset().z` 表示目标层表面离地高度；`palletBaseFunc` 到位后通过 `HRIF_ReadActTcpPos()` 读取当前 TCP Z；真实 Z 相对移动量按 `(目标层表面离地高度 + releaseZOffset) - robotBaseHeightFromGround + PALLET_GRIPPER_RELEASE_Z_OFFSET_MM - 当前TCP_Z` 计算，允许为负值。当前夹爪释放补偿宏 `PALLET_GRIPPER_RELEASE_Z_OFFSET_MM=420.0`。
+- 2026-07-09 现场新问题：空垛低层下降高度看起来基本合理，但到第 5 层附近机械臂 Z 值异常偏高，接近奇异点并导致动作挂起。当前不继续修复代码，先记录问题，明日围绕层号、释放高度、TCP/夹爪补偿方向、实际 TCP Z 日志重新头脑风暴。
+- 本计划下方早期任务片段保留为实施记录；接口签名和 Z 坐标语义以“当前实现同步结论”和最新 spec 为准。
 
 ---
 
@@ -79,7 +82,7 @@
 - Produces:
   - `enum class PalletPlaceStepKind`
   - `struct PalletPlaceStep`
-  - `QList<PalletPlaceStep> buildPalletPlaceSequence(const PalletPose &targetOffset, double releaseZOffsetMm)`
+  - `QList<PalletPlaceStep> buildPalletPlaceSequence(const PalletPose &targetOffset, double releaseZOffsetMm, double robotBaseHeightFromGroundMm, double palletBaseTcpZMm)`
 
 - [ ] **Step 1: 写失败测试**
 
@@ -210,7 +213,7 @@ struct PalletPlaceStep {
  * @brief 根据目标层中心偏移和目标层上方释放高度，生成一次空箱码垛标准动作。
  *
  * targetOffset 是 PalletScheduler::nextRelativeOffset() 输出的目标层中心偏移；
- * releaseZOffsetMm 是“目标层上方释放高度”。真实松爪 Z = targetOffset.z + releaseZOffsetMm。
+ * releaseZOffsetMm 是“目标层上方释放高度”。真实 Z 相对移动量 = (targetOffset.z + releaseZOffsetMm) - robotBaseHeightFromGroundMm + PALLET_GRIPPER_RELEASE_Z_OFFSET_MM - palletBaseTcpZMm。
  * releaseZOffsetMm 小于 0 时返回空列表，调用方必须 fail-closed。
  */
 QList<PalletPlaceStep> buildPalletPlaceSequence(const PalletPose &targetOffset,
@@ -401,7 +404,7 @@ ctest --test-dir robot_visual20260625/robot_visual/build --output-on-failure -R 
 在 `src/palletscheduler.h` 中把 `releaseZOffset` 注释改为：
 
 ```cpp
-    // 目标层上方释放高度，单位 mm；真实松爪 Z = nextRelativeOffset().z + releaseZOffset。
+    // 目标层上方释放高度，单位 mm；真实释放地面高度 = nextRelativeOffset().z + releaseZOffset。
     double releaseZOffset = 0.0;
 ```
 
@@ -409,7 +412,7 @@ ctest --test-dir robot_visual20260625/robot_visual/build --output-on-failure -R 
 
 ```cpp
         localSuggestions << QStringLiteral(
-            "目标层上方释放高度建议在 %1-%2 mm；真实松爪 Z = 目标层 Z + 该高度")
+            "目标层上方释放高度建议在 %1-%2 mm；真实释放地面高度 = 托盘面离地高度 + 层高 + 该高度")
             .arg(minSuggested, 0, 'f', 1)
             .arg(maxSuggested, 0, 'f', 1);
 ```
@@ -433,9 +436,9 @@ ctest --test-dir robot_visual20260625/robot_visual/build --output-on-failure
 - Modify: `robot_visual20260625/robot_visual/src/huayanScheduler.cpp`
 
 **Interfaces:**
-- Consumes: `buildPalletPlaceSequence(const PalletPose&, double)`
+- Consumes: `buildPalletPlaceSequence(const PalletPose&, double, double, double)`
 - Produces:
-  - `void startPalletPlace(const PalletPose &targetOffset, double releaseZOffsetMm)`
+  - `void startPalletPlace(const PalletPose &targetOffset, double releaseZOffsetMm, double robotBaseHeightFromGroundMm)`
   - `void palletPlaceCompleted()`
   - `void palletPlaceError(const QString &reason)`
 
@@ -452,7 +455,7 @@ ctest --test-dir robot_visual20260625/robot_visual/build --output-on-failure
      * 本函数只执行机械臂动作，不更新 PalletScheduler 缓存；调用方必须在
      * palletPlaceCompleted() 后再 commitPlaced()。
      */
-    void startPalletPlace(const PalletPose &targetOffset, double releaseZOffsetMm);
+    void startPalletPlace(const PalletPose &targetOffset, double releaseZOffsetMm, double robotBaseHeightFromGroundMm);
 ```
 
 在 `ActionStep` 中保留并扩展码垛步骤：
@@ -702,7 +705,7 @@ cmake --build robot_visual20260625/robot_visual/build -j
   - `PalletScheduler *m_scheduler`
   - `HuayanScheduler *m_arm`
   - `palletAreaConfig(PalletArea area)`
-  - `HuayanScheduler::startPalletPlace(const PalletPose&, double)`
+  - `HuayanScheduler::startPalletPlace(const PalletPose&, double, double)`
 - Produces:
   - `void runSinglePalletPlace(PalletArea area)`
   - 配置页真实单步调试能力
@@ -832,7 +835,7 @@ void PalletParamDialog::runSinglePalletPlace(PalletArea area)
     setStatus(w, QStringLiteral("正在执行一次真实码垛调试"), QStringLiteral("warning"));
 
     const PalletConfig cfg = m_scheduler->config(area);
-    m_arm->startPalletPlace(offset, cfg.releaseZOffset);
+    m_arm->startPalletPlace(offset, cfg.releaseZOffset, cfg.robotBaseHeightFromGround);
 }
 ```
 
@@ -1051,4 +1054,4 @@ git -C robot_visual20260625/robot_visual commit -m "feat: add real single-step e
 
 1. Spec coverage: 本计划覆盖去视觉、人工清零、单次真实码垛、释放高度、动作顺序、失败不提交、满载保护、主流程复用、中文注释、测试和文档同步。
 2. Placeholder scan: 本计划不保留空泛任务；每个任务都有明确文件、接口、代码片段和验证命令。
-3. Type consistency: `releaseZOffset`、`startPalletPlace(const PalletPose&, double)`、`buildPalletPlaceSequence(const PalletPose&, double)` 在任务间命名一致。
+3. Type consistency: `releaseZOffset`、`startPalletPlace(const PalletPose&, double, double)`、`buildPalletPlaceSequence(const PalletPose&, double, double, double)` 在任务间命名一致。

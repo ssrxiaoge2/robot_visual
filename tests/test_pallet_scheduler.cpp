@@ -95,6 +95,7 @@ private slots:
     {
         PalletScheduler scheduler;
         PalletConfig cfg = PalletScheduler::defaultSmallBoxConfig();
+        QCOMPARE(cfg.robotBaseHeightFromGround, 850.0);
         cfg.releaseZOffset = cfg.boxSize.z * 2.0;
         scheduler.setConfig(PalletArea::SmallBox, cfg);
 
@@ -103,26 +104,26 @@ private slots:
         QVERIFY(scheduler.validateConfig(PalletArea::SmallBox, &errors, &suggestions));
         QVERIFY(errors.isEmpty());
         QVERIFY(suggestions.contains(
-            QStringLiteral("目标层上方释放高度建议在 108.0-162.0 mm；真实松爪 Z = 目标层 Z + 该高度")));
+            QStringLiteral("目标层上方释放高度建议在 108.0-162.0 mm；真实释放地面高度 = 托盘面离地高度 + 层高 + 该高度")));
     }
 
     void validateConfigRejectsReleaseZAboveRobotLimit()
     {
         PalletScheduler scheduler;
         PalletConfig cfg = PalletScheduler::defaultSmallBoxConfig();
-        cfg.originPose.z = 100.0;
-        cfg.palletSize.z = 20.0;
+        cfg.robotBaseHeightFromGround = 850.0;
+        cfg.palletSize.z = 900.0;
         cfg.boxSize.z = 50.0;
         cfg.maxLayers = 3;
         cfg.releaseZOffset = 60.0;
-        cfg.maxRobotZ = 275.0;
+        cfg.maxRobotZ = 45.0;
         scheduler.setConfig(PalletArea::SmallBox, cfg);
 
         QStringList errors;
         QStringList suggestions;
         QVERIFY(!scheduler.validateConfig(PalletArea::SmallBox, &errors, &suggestions));
         QVERIFY(suggestions.isEmpty());
-        QVERIFY(errors.contains(QStringLiteral("最高层释放点 Z=280.0 超过安全上限 275.0")));
+        QVERIFY(errors.contains(QStringLiteral("最高层释放点基座 Z=210.0 超过安全上限 45.0")));
     }
 
 private:

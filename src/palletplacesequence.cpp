@@ -1,9 +1,11 @@
 #include "palletplacesequence.h"
 
 QList<PalletPlaceStep> buildPalletPlaceSequence(const PalletPose &targetOffset,
-                                                double releaseZOffsetMm)
+                                                double releaseZOffsetMm,
+                                                double robotBaseHeightFromGroundMm,
+                                                double palletBaseTcpZMm)
 {
-    if (releaseZOffsetMm < 0.0) {
+    if (releaseZOffsetMm < 0.0 || robotBaseHeightFromGroundMm <= 0.0) {
         return {};
     }
 
@@ -12,8 +14,13 @@ QList<PalletPlaceStep> buildPalletPlaceSequence(const PalletPose &targetOffset,
     xyOffset.y = targetOffset.y;
     xyOffset.rz = targetOffset.rz;
 
+    const double releaseGroundZ = targetOffset.z + releaseZOffsetMm;
+
     PalletPose descendOffset;
-    descendOffset.z = targetOffset.z + releaseZOffsetMm;
+    descendOffset.z = releaseGroundZ
+        - robotBaseHeightFromGroundMm
+        + PALLET_GRIPPER_RELEASE_Z_OFFSET_MM
+        - palletBaseTcpZMm;
 
     PalletPose liftOffset;
     liftOffset.z = -descendOffset.z;

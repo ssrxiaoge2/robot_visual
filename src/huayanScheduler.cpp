@@ -376,7 +376,8 @@ void HuayanScheduler::returnToCaptureForScanFailure()
 }
 
 void HuayanScheduler::startPalletPlace(const PalletPose &targetOffset,
-                                       double releaseZOffsetMm)
+                                       double releaseZOffsetMm,
+                                       double robotBaseHeightFromGroundMm)
 {
     if (m_action != Action::None) {
         emit palletPlaceError(QStringLiteral("当前已有独立动作执行中"));
@@ -395,9 +396,8 @@ void HuayanScheduler::startPalletPlace(const PalletPose &targetOffset,
         return;
     }
 
-    const QList<PalletPlaceStep> steps = buildPalletPlaceSequence(targetOffset, releaseZOffsetMm);
-    if (steps.isEmpty()) {
-        emit palletPlaceError(QStringLiteral("码垛释放高度无效，不能执行"));
+    if (releaseZOffsetMm < 0.0 || robotBaseHeightFromGroundMm <= 0.0) {
+        emit palletPlaceError(QStringLiteral("码垛释放高度或机器人基座离地高度无效，不能执行"));
         return;
     }
 
@@ -406,7 +406,9 @@ void HuayanScheduler::startPalletPlace(const PalletPose &targetOffset,
     m_action = Action::PalletPlace;
     m_actionStep = ActionStep::ClampPalletAtSafety;
     m_pendingPalletTargetOffset = targetOffset;
-    m_pendingPalletReleaseZ = steps.at(3).offset.z;
+    m_pendingPalletReleaseZ = 0.0;
+    m_pendingPalletReleaseHeightAboveLayer = releaseZOffsetMm;
+    m_pendingRobotBaseHeightFromGround = robotBaseHeightFromGroundMm;
     if (!ensureConnected())
         return;
     emit logMessage(QStringLiteral("[码垛] 开始标准单次动作 offset X=%1 Y=%2 Z=%3 Rz=%4 releaseZ=%5")
@@ -1006,6 +1008,36 @@ void HuayanScheduler::proceedAction()
             executeRunFunc(m_palletBaseFuncName, 120000);
             break;
         case ActionStep::MovePalletXY: {
+            PalletPose basePose;
+            QString readError;
+            if (!readActualTcpPose(&basePose, &readError)) {
+                actionError(QStringLiteral("读取码垛基准点 TCP 位姿失败：%1").arg(readError));
+                break;
+            }
+            const QList<PalletPlaceStep> steps = buildPalletPlaceSequence(
+                m_pendingPalletTargetOffset,
+                m_pendingPalletReleaseHeightAboveLayer,
+                m_pendingRobotBaseHeightFromGround,
+                basePose.z);
+            if (steps.isEmpty()) {
+                actionError(QStringLiteral("码垛 Z 计算失败，请检查释放高度和机器人基座离地高度"));
+                break;
+            }
+            const double releaseGroundZ = m_pendingPalletTargetOffset.z
+                + m_pendingPalletReleaseHeightAboveLayer;
+            const double calculatedPalletReleaseZ =
+                releaseGroundZ
+                - m_pendingRobotBaseHeightFromGround
+                + PALLET_GRIPPER_RELEASE_Z_OFFSET_MM
+                - basePose.z;
+            m_pendingPalletReleaseZ = steps.at(3).offset.z;
+            emit logMessage(QStringLiteral("[码垛] 基准TCP Z=%1，释放地面Z=%2，机器人基座离地=%3，夹爪释放补偿=%4，本次Z相对移动=%5")
+                                .arg(basePose.z, 0, 'f', 1)
+                                .arg(releaseGroundZ, 0, 'f', 1)
+                                .arg(m_pendingRobotBaseHeightFromGround, 0, 'f', 1)
+                                .arg(PALLET_GRIPPER_RELEASE_Z_OFFSET_MM, 0, 'f', 1)
+                                .arg(m_pendingPalletReleaseZ, 0, 'f', 1));
+            Q_ASSERT(qFuzzyCompare(calculatedPalletReleaseZ + 1.0, m_pendingPalletReleaseZ + 1.0));
             auto addMove = [this](int poseId, double value, double ignoreThreshold) {
                 if (qAbs(value) < ignoreThreshold)
                     return;
@@ -1173,6 +1205,8 @@ void HuayanScheduler::clearActionState()
     m_palletMoveIdx = 0;
     m_pendingPalletTargetOffset = PalletPose();
     m_pendingPalletReleaseZ = 0.0;
+    m_pendingPalletReleaseHeightAboveLayer = 0.0;
+    m_pendingRobotBaseHeightFromGround = 850.0;
 }
 
 void HuayanScheduler::finishAction()
@@ -1576,6 +1610,28 @@ HuayanScheduler::RobotStateSnapshot HuayanScheduler::readRobotStateSnapshot() co
     snapshot.strCurFSM = fsmRet == 0 ? QString::fromStdString(fsmText) : QStringLiteral("unknown");
     snapshot.valid = flagsRet == 0 && fsmRet == 0;
     return snapshot;
+}
+
+bool HuayanScheduler::readActualTcpPose(PalletPose *pose, QString *error) const
+{
+    if (!pose) {
+        if (error)
+            *error = QStringLiteral("输出参数为空");
+        return false;
+    }
+    const int ret = HRIF_ReadActTcpPos(m_boxID, m_rbtID,
+                                       pose->x, pose->y, pose->z,
+                                       pose->rx, pose->ry, pose->rz);
+    if (ret != 0) {
+        const QString detail = describeError(m_boxID, ret);
+        if (error) {
+            *error = detail.isEmpty()
+                ? QStringLiteral("ret=%1").arg(ret)
+                : QStringLiteral("ret=%1（%2）").arg(ret).arg(detail);
+        }
+        return false;
+    }
+    return true;
 }
 
 QString HuayanScheduler::formatRobotStateSnapshot(const RobotStateSnapshot &snapshot) const

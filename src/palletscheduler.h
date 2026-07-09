@@ -40,10 +40,11 @@ struct PalletSize {
 /**
  * @brief 单个码垛区域的可配置参数。
  *
- * palletSize 表示固定码垛区域/托盘尺寸，boxSize 表示当前箱型尺寸；
- * palletSize.z 会计入相对 Z 偏移和总高度校验；gap/margin 控制每个箱之间和边缘预留空间；
- * originPose 只用于绝对预览，
- * 主流程给机械臂的值应优先使用 nextRelativeOffset() 返回的 offset。
+ * palletSize.x/y 表示固定码垛区域尺寸，palletSize.z 表示托盘面离地高度；
+ * boxSize 表示当前箱型尺寸；robotBaseHeightFromGround 表示机器人基座原点离地高度，
+ * 现场先按实测 850mm 填写，后续可人工补偿；gap/margin 控制每个箱之间和边缘预留空间。
+ * 主流程给机械臂的 x/y/rz 来自 nextRelativeOffset()，z 表示目标层地面高度，
+ * HuayanScheduler 会在 palletBaseFunc 到位后读取当前 TCP Z 再换算真实下降量。
  */
 struct PalletConfig {
     PalletSize palletSize;
@@ -53,8 +54,10 @@ struct PalletConfig {
     double marginX = 20.0;
     double marginY = 20.0;
     int maxLayers = 8;
-    // 目标层上方释放高度，单位 mm；真实松爪 Z = nextRelativeOffset().z + releaseZOffset。
+    // 目标层上方释放高度，单位 mm；真实释放地面高度 = nextRelativeOffset().z + releaseZOffset。
     double releaseZOffset = 0.0;
+    // 机器人基座坐标系原点离地高度，单位 mm；车载机械臂先按实测 850mm 配置，现场可补偿。
+    double robotBaseHeightFromGround = 850.0;
     double maxRobotZ = 0.0; // 0 表示不校验最高安全 Z
     bool invertX = false;
     bool invertY = false;
@@ -65,8 +68,8 @@ struct PalletConfig {
 /**
  * @brief 仿真或下一点计算的单箱结果。
  *
- * index/layer/row/column 从 1 开始显示；offset 是主流程输出的相对偏移；
- * pose 是 UI 调试用的绝对预览点位；offset.z 已包含托盘高度。
+ * index/layer/row/column 从 1 开始显示；offset.x/y/rz 是基准点相对偏移；
+ * offset.z 是目标层表面离地高度；pose 是 UI 调试用预览点位。
  */
 struct PalletSimulationItem {
     int index = 0;

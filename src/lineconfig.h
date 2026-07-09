@@ -102,19 +102,19 @@ static constexpr double kPurpleBasketGrabZClearance = 380.0;
 
 // 集中配置表是现场点位/示教函数的唯一来源；修改前必须与 AGV 地图和示教器核对。
 inline const StationTaskConfig kStationTaskConfigs[] = {
-    {1, 3, 3, PalletArea::LargeBox, QStringLiteral("Func_capture1"), AfterGripMode::None, QString(), QStringLiteral("Func_daoliao1"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
-    {2, 4, 4, PalletArea::LargeBox, QStringLiteral("Func_capture2"), AfterGripMode::None, QString(), QStringLiteral("Func_daoliao2"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
+    {1, 3, 3, PalletArea::SmallBox, QStringLiteral("Func_capture1"), AfterGripMode::None, QString(), QStringLiteral("Func_daoliao1"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
+    {2, 4, 4, PalletArea::SmallBox, QStringLiteral("Func_capture2"), AfterGripMode::None, QString(), QStringLiteral("Func_daoliao2"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
     // 工位 3 的示教器函数内部包含“倒料点 -> 过渡点 -> 安全点”的路径。
-    {3, 24, 9, PalletArea::LargeBox, QStringLiteral("Func_capture3"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao3"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong_s3"), kLargeBasketGrabZClearance},
-    {4, 24, 9, PalletArea::LargeBox, QStringLiteral("Func_capture4"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao4"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
-    {5, 23, 10, PalletArea::LargeBox, QStringLiteral("Func_capture5"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao5"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
-    {6, 22, 10, PalletArea::LargeBox, QStringLiteral("Func_capture6"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao6"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
-    {7, 21, 11, PalletArea::LargeBox, QStringLiteral("Func_capture7"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao7"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
-    {8, 19, 11, PalletArea::LargeBox, QStringLiteral("Func_capture8"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao8"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
-    {9, 20, 12, PalletArea::LargeBox, QStringLiteral("Func_capture9"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao9"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
-    {10, 7, 12, PalletArea::LargeBox, QStringLiteral("Func_capture10"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao10"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
-    {11, 7, 7, PalletArea::LargeBox, QStringLiteral("Func_capture11"), AfterGripMode::None, QString(), QStringLiteral("Func_daoliao11"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
-    {12, 15, 15, PalletArea::SmallBox, QStringLiteral("Func_capture12"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao12"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kPurpleBasketGrabZClearance},
+    {3, 24, 9, PalletArea::SmallBox, QStringLiteral("Func_capture3"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao3"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong_s3"), kLargeBasketGrabZClearance},
+    {4, 24, 9, PalletArea::SmallBox, QStringLiteral("Func_capture4"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao4"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
+    {5, 23, 10, PalletArea::SmallBox, QStringLiteral("Func_capture5"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao5"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
+    {6, 22, 10, PalletArea::SmallBox, QStringLiteral("Func_capture6"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao6"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
+    {7, 21, 11, PalletArea::SmallBox, QStringLiteral("Func_capture7"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao7"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
+    {8, 19, 11, PalletArea::SmallBox, QStringLiteral("Func_capture8"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao8"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
+    {9, 20, 12, PalletArea::SmallBox, QStringLiteral("Func_capture9"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao9"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
+    {10, 7, 12, PalletArea::SmallBox, QStringLiteral("Func_capture10"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao10"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
+    {11, 7, 7, PalletArea::SmallBox, QStringLiteral("Func_capture11"), AfterGripMode::None, QString(), QStringLiteral("Func_daoliao11"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kLargeBasketGrabZClearance},
+    {12, 15, 15, PalletArea::LargeBox, QStringLiteral("Func_capture12"), AfterGripMode::CaptureFunc, QString(), QStringLiteral("Func_daoliao12"), QStringLiteral("Func_fanzhuan"), QStringLiteral("Func_yun_xing_zhong"), kPurpleBasketGrabZClearance},
 };
 
 // 码垛 LM16/17 目前是设计阶段占位值，投产前必须替换为现场真实站点。
