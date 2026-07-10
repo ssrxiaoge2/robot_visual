@@ -42,12 +42,15 @@ struct PalletPlaceStep {
  * targetOffset.x/y/rz 是基准点到目标格的基坐标系相对偏移；targetOffset.z 是
  * 目标层表面离地高度。真实释放地面高度 = targetOffset.z + releaseZOffsetMm；
  * 释放点基座 Z = 释放地面高度 - robotBaseHeightFromGroundMm；
- * Z 下降量 = 释放点基座 Z + 夹爪释放点补偿 - palletBaseTcpZMm，通常为负值。
+ * Z 下降量 = 目标 TCP Z - palletBaseTcpZMm，通常为负值。
+ * 若目标 TCP Z 高于码垛初始点位 TCP Z，表示本次不是“下降释放”而是要向上抬升，
+ * 现场可能进入机械臂高位奇异区，必须拒绝执行。
  * releaseZOffsetMm 小于 0 或 robotBaseHeightFromGroundMm 非正时返回空列表。
  */
 QList<PalletPlaceStep> buildPalletPlaceSequence(const PalletPose &targetOffset,
                                                 double releaseZOffsetMm,
                                                 double robotBaseHeightFromGroundMm,
-                                                double palletBaseTcpZMm);
+                                                double palletBaseTcpZMm,
+                                                QString *error = nullptr);
 
 #endif // PALLETPLACESEQUENCE_H

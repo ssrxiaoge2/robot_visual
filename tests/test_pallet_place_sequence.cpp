@@ -40,6 +40,19 @@ private slots:
         const QList<PalletPlaceStep> steps = buildPalletPlaceSequence(target, -1.0, 850.0, 500.0);
         QVERIFY2(steps.isEmpty(), "释放高度不能为负数，规划必须失败关闭");
     }
+
+    void rejectsReleaseTcpHigherThanPalletBaseTcp()
+    {
+        PalletPose target;
+        target.z = 600.0;
+
+        QString error;
+        const QList<PalletPlaceStep> steps =
+            buildPalletPlaceSequence(target, 40.0, 850.0, 180.0, &error);
+
+        QVERIFY2(steps.isEmpty(), "释放目标 TCP Z 高于码垛初始点位时必须拒绝，避免向奇异点抬升");
+        QVERIFY(error.contains(QStringLiteral("高于码垛初始点位")));
+    }
 };
 
 QTEST_MAIN(PalletPlaceSequenceTest)

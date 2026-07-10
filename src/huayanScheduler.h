@@ -103,6 +103,15 @@ public:
     void startPalletPlace(const PalletPose &targetOffset,
                           double releaseZOffsetMm,
                           double robotBaseHeightFromGroundMm);
+    /**
+     * @brief 主流程专用码垛入口。
+     *
+     * 主流程到达码垛区时，倒料后的空箱已经在安全位且夹爪处于夹紧状态；
+     * 因此本入口跳过“安全位夹紧”，其余基准点、XY/Z、松爪、回安全位动作完全复用。
+     */
+    void startPalletPlaceFromClampedSafety(const PalletPose &targetOffset,
+                                           double releaseZOffsetMm,
+                                           double robotBaseHeightFromGroundMm);
 
     void startStageOne();
     void startStageTwo();
@@ -275,6 +284,10 @@ private:
     bool executeNextGrabMove();
     void proceedAction();
     void advanceActionStep();
+    void startPalletPlaceInternal(const PalletPose &targetOffset,
+                                  double releaseZOffsetMm,
+                                  double robotBaseHeightFromGroundMm,
+                                  bool clampAtSafety);
     bool executeNextPalletMove();
     bool rejectStageStartWhileActionRunning(const QString &stageName);
     void clearActionState();
@@ -418,6 +431,7 @@ private:
     double m_pendingPalletReleaseZ = 0.0;   ///< palletBaseFunc 到位后计算出的本次 Z 相对移动量。
     double m_pendingPalletReleaseHeightAboveLayer = 0.0; ///< 目标层上方释放高度，单位 mm。
     double m_pendingRobotBaseHeightFromGround = 850.0;   ///< 机器人基座原点离地高度，单位 mm。
+    bool m_palletClampAtSafety = true;      ///< 调试页需要先夹紧；主流程已夹紧时跳过。
     Action m_action = Action::None;         ///< 当前独立动作。
     ActionStep m_actionStep = ActionStep::None; ///< 独立动作内步骤。
 

@@ -107,23 +107,29 @@ private slots:
             QStringLiteral("目标层上方释放高度建议在 108.0-162.0 mm；真实释放地面高度 = 托盘面离地高度 + 层高 + 该高度")));
     }
 
-    void validateConfigRejectsReleaseZAboveRobotLimit()
+    void targetTcpZIncludesLayerHeightAndGripperOffset()
     {
         PalletScheduler scheduler;
         PalletConfig cfg = PalletScheduler::defaultSmallBoxConfig();
         cfg.robotBaseHeightFromGround = 850.0;
-        cfg.palletSize.z = 900.0;
+        cfg.palletSize.z = 163.0;
         cfg.boxSize.z = 50.0;
-        cfg.maxLayers = 3;
-        cfg.releaseZOffset = 60.0;
-        cfg.maxRobotZ = 45.0;
+        cfg.maxLayers = 6;
+        cfg.releaseZOffset = 30.0;
         scheduler.setConfig(PalletArea::SmallBox, cfg);
+        scheduler.reset(PalletArea::SmallBox);
 
-        QStringList errors;
-        QStringList suggestions;
-        QVERIFY(!scheduler.validateConfig(PalletArea::SmallBox, &errors, &suggestions));
-        QVERIFY(suggestions.isEmpty());
-        QVERIFY(errors.contains(QStringLiteral("最高层释放点基座 Z=210.0 超过安全上限 45.0")));
+        const int perLayer = scheduler.perLayerCapacity(PalletArea::SmallBox);
+        QString error;
+        for (int i = 0; i < perLayer * 4; ++i)
+            QVERIFY2(scheduler.commitPlaced(PalletArea::SmallBox, &error), qPrintable(error));
+
+        PalletPose offset;
+        QVERIFY2(scheduler.nextRelativeOffset(PalletArea::SmallBox, &offset, &error),
+                 qPrintable(error));
+        QCOMPARE(offset.z, 363.0);
+        QCOMPARE(PalletScheduler::releaseGroundZ(offset, cfg.releaseZOffset), 393.0);
+        QCOMPARE(PalletScheduler::releaseTcpZ(offset, cfg.releaseZOffset, cfg.robotBaseHeightFromGround), -37.0);
     }
 
 private:

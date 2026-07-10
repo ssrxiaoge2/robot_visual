@@ -17,6 +17,7 @@ add_test(NAME station_pickup_config_tests
 
 add_executable(pallet_place_sequence_tests
     test_pallet_place_sequence.cpp
+    ../src/palletscheduler.cpp
     ../src/palletplacesequence.cpp
 )
 

@@ -215,19 +215,9 @@ QWidget *PalletParamDialog::createAreaPage(PalletArea area)
     w->maxLayers->setValidator(new QIntValidator(1, 8, w->maxLayers));
     w->releaseZOffset = createDistanceSpin();
     w->robotBaseHeightFromGround = createDistanceSpin();
-    w->maxRobotZ = createDistanceSpin();
     heightForm->addRow(QStringLiteral("最大层数:"), w->maxLayers);
     heightForm->addRow(QStringLiteral("目标层上方释放高度:"), w->releaseZOffset);
     heightForm->addRow(QStringLiteral("机器人基座离地高度:"), w->robotBaseHeightFromGround);
-    heightForm->addRow(QStringLiteral("最高安全 Z:"), w->maxRobotZ);
-
-    auto *originForm = addGroup(QStringLiteral("机械臂初始点位（绝对预览可选）"));
-    w->originX = createPoseSpin(); w->originY = createPoseSpin(); w->originZ = createPoseSpin();
-    w->originRx = createAngleSpin(); w->originRy = createAngleSpin(); w->originRz = createAngleSpin();
-    addTripleRow(originForm, QStringLiteral("XYZ:"), w->originX, w->originY, w->originZ,
-                 {QStringLiteral("X"), QStringLiteral("Y"), QStringLiteral("Z")});
-    addTripleRow(originForm, QStringLiteral("姿态:"), w->originRx, w->originRy, w->originRz,
-                 {QStringLiteral("Rx"), QStringLiteral("Ry"), QStringLiteral("Rz")});
 
     auto *dirForm = addGroup(QStringLiteral("方向修正"));
     w->invertX = new QCheckBox(QStringLiteral("反转 X"));
@@ -253,7 +243,7 @@ QWidget *PalletParamDialog::createAreaPage(PalletArea area)
     auto *releaseBtn = new QPushButton(QStringLiteral("推荐释放高度"));
     auto *nextBtn = new QPushButton(QStringLiteral("计算下一点"));
     w->singlePlaceBtn = new QPushButton(QStringLiteral("执行一次码垛"));
-    auto *simBtn = new QPushButton(QStringLiteral("仿真 8 层"));
+    auto *simBtn = new QPushButton(QStringLiteral("按当前层数仿真"));
     auto *clearBtn = new QPushButton(QStringLiteral("清除显示结果"));
     auto *resetBtn = new QPushButton(QStringLiteral("清零当前区域"));
 
@@ -262,7 +252,7 @@ QWidget *PalletParamDialog::createAreaPage(PalletArea area)
     nextBtn->setToolTip(QStringLiteral("只按当前已放数量预览下一点，不推进缓存。"));
     w->singlePlaceBtn->setToolTip(QStringLiteral(
         "真实机械臂调试：每次只放置一个空箱，完整成功后已放数量加 1。"));
-    simBtn->setToolTip(QStringLiteral("从空托盘开始生成完整 8 层点位表，不修改真实缓存。"));
+    simBtn->setToolTip(QStringLiteral("从空托盘开始，按当前最大层数生成完整点位表，不修改真实缓存。"));
     clearBtn->setToolTip(QStringLiteral("清空右侧下一点、校验结果和仿真表格；不修改配置或已放数量。"));
 
     buttonGrid->addWidget(saveBtn, 0, 0);
@@ -290,12 +280,11 @@ QWidget *PalletParamDialog::createAreaPage(PalletArea area)
     w->validationText = new QPlainTextEdit();
     w->validationText->setReadOnly(true);
     w->validationText->setMaximumHeight(110);
-    w->simulationTable = new QTableWidget(0, 13);
+    w->simulationTable = new QTableWidget(0, 10);
     w->simulationTable->setHorizontalHeaderLabels({
         QStringLiteral("序号"), QStringLiteral("层"), QStringLiteral("行"), QStringLiteral("列"),
         QStringLiteral("offsetX"), QStringLiteral("offsetY"), QStringLiteral("offsetZ"),
-        QStringLiteral("X"), QStringLiteral("Y"), QStringLiteral("Z"),
-        QStringLiteral("Rx"), QStringLiteral("Ry"), QStringLiteral("Rz")});
+        QStringLiteral("释放地面Z"), QStringLiteral("目标TCP Z"), QStringLiteral("Rz")});
     w->simulationTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
     w->simulationTable->horizontalHeader()->setStretchLastSection(true);
     w->simulationTable->verticalHeader()->setVisible(false);
@@ -312,7 +301,7 @@ QWidget *PalletParamDialog::createAreaPage(PalletArea area)
     validationLayout->addWidget(w->validationText);
     right->addWidget(validationGroup);
 
-    auto *tableGroup = new QGroupBox(QStringLiteral("8 层仿真"));
+    auto *tableGroup = new QGroupBox(QStringLiteral("当前层数仿真"));
     auto *tableLayout = new QVBoxLayout(tableGroup);
     tableLayout->addWidget(w->simulationTable);
     right->addWidget(tableGroup, 1);
@@ -350,26 +339,6 @@ QDoubleSpinBox *PalletParamDialog::createDistanceSpin(double max) const
     return spin;
 }
 
-QDoubleSpinBox *PalletParamDialog::createPoseSpin() const
-{
-    auto *spin = new NoWheelDoubleSpinBox();
-    spin->setRange(-100000.0, 100000.0);
-    spin->setDecimals(1);
-    spin->setSingleStep(1.0);
-    spin->setSuffix(QStringLiteral(" mm"));
-    return spin;
-}
-
-QDoubleSpinBox *PalletParamDialog::createAngleSpin() const
-{
-    auto *spin = new NoWheelDoubleSpinBox();
-    spin->setRange(-360.0, 360.0);
-    spin->setDecimals(2);
-    spin->setSingleStep(1.0);
-    spin->setSuffix(QStringLiteral(" °"));
-    return spin;
-}
-
 PalletConfig PalletParamDialog::readConfig(PalletArea area) const
 {
     PageWidgets *w = widgets(area);
@@ -385,11 +354,8 @@ PalletConfig PalletParamDialog::readConfig(PalletArea area) const
     cfg.maxLayers = w->maxLayers->text().trimmed().toInt();
     cfg.releaseZOffset = w->releaseZOffset->value();
     cfg.robotBaseHeightFromGround = w->robotBaseHeightFromGround->value();
-    cfg.maxRobotZ = w->maxRobotZ->value();
     cfg.invertX = w->invertX->isChecked();
     cfg.invertY = w->invertY->isChecked();
-    cfg.originPose = {w->originX->value(), w->originY->value(), w->originZ->value(),
-                      w->originRx->value(), w->originRy->value(), w->originRz->value()};
     return cfg;
 }
 
@@ -411,15 +377,8 @@ void PalletParamDialog::writeConfig(PalletArea area, const PalletConfig &cfg)
     w->maxLayers->setText(QString::number(cfg.maxLayers));
     w->releaseZOffset->setValue(cfg.releaseZOffset);
     w->robotBaseHeightFromGround->setValue(cfg.robotBaseHeightFromGround);
-    w->maxRobotZ->setValue(cfg.maxRobotZ);
     w->invertX->setChecked(cfg.invertX);
     w->invertY->setChecked(cfg.invertY);
-    w->originX->setValue(cfg.originPose.x);
-    w->originY->setValue(cfg.originPose.y);
-    w->originZ->setValue(cfg.originPose.z);
-    w->originRx->setValue(cfg.originPose.rx);
-    w->originRy->setValue(cfg.originPose.ry);
-    w->originRz->setValue(cfg.originPose.rz);
 }
 
 void PalletParamDialog::refreshPage(PalletArea area)
@@ -446,6 +405,11 @@ void PalletParamDialog::savePage(PalletArea area)
         return;
     m_scheduler->setConfig(area, readConfig(area));
     validatePage(area);
+    if (PageWidgets *w = widgets(area)) {
+        setStatus(w,
+                  QStringLiteral("配置已保存：%1").arg(PalletScheduler::settingsFilePath()),
+                  QStringLiteral("ok"));
+    }
     refreshPage(area);
 }
 
@@ -514,14 +478,19 @@ void PalletParamDialog::showNextPose(PalletArea area)
     const int row = (perLayer > 0 && m_scheduler->columns(area) > 0)
         ? (idx % perLayer) / m_scheduler->columns(area) + 1 : 0;
     const int col = m_scheduler->columns(area) > 0 ? (idx % m_scheduler->columns(area)) + 1 : 0;
+    const PalletConfig cfg = m_scheduler->config(area);
+    const double releaseGroundZ = PalletScheduler::releaseGroundZ(offset, cfg.releaseZOffset);
+    const double targetTcpZ = PalletScheduler::releaseTcpZ(
+        offset, cfg.releaseZOffset, cfg.robotBaseHeightFromGround);
     w->nextPoseLabel->setText(QStringLiteral(
         "下一箱：第%1层 第%2行 第%3列\n"
-        "给机械臂的基准偏移: X=%4 Y=%5；目标层地面高度=%6\n"
-        "基座坐标预览: X=%7 Y=%8 Z=%9 Rx=%10 Ry=%11 Rz=%12")
+        "给机械臂的基准偏移: X=%4 Y=%5 Rz=%6；目标层表面离地=%7\n"
+        "释放地面Z=%8；目标TCP Z估算=%9\n"
+        "执行时会读取码垛初始点位 TCP Z，若目标TCP Z高于初始点位则拒绝下放")
         .arg(layer).arg(row).arg(col)
-        .arg(fmt(offset.x)).arg(fmt(offset.y)).arg(fmt(offset.z))
-        .arg(fmt(pose.x)).arg(fmt(pose.y)).arg(fmt(pose.z))
-        .arg(fmt(pose.rx)).arg(fmt(pose.ry)).arg(fmt(pose.rz)));
+        .arg(fmt(offset.x)).arg(fmt(offset.y)).arg(fmt(offset.rz)).arg(fmt(offset.z))
+        .arg(fmt(releaseGroundZ)).arg(fmt(targetTcpZ)));
+    Q_UNUSED(pose)
     setStatus(w, QStringLiteral("下一点已计算；主输出是相对初始点位的偏移"), QStringLiteral("ok"));
 }
 
@@ -605,8 +574,8 @@ void PalletParamDialog::simulateArea(PalletArea area)
             QString::number(item.index), QString::number(item.layer),
             QString::number(item.row), QString::number(item.column),
             fmt(item.offset.x), fmt(item.offset.y), fmt(item.offset.z),
-            fmt(item.pose.x), fmt(item.pose.y), fmt(item.pose.z),
-            fmt(item.pose.rx), fmt(item.pose.ry), fmt(item.pose.rz)};
+            fmt(PalletScheduler::releaseGroundZ(item.offset, m_scheduler->config(area).releaseZOffset)),
+            fmt(item.pose.z), fmt(item.offset.rz)};
         for (int c = 0; c < vals.size(); ++c)
             w->simulationTable->setItem(row, c, new QTableWidgetItem(vals[c]));
     }

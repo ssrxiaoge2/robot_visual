@@ -613,7 +613,7 @@ void HuayanScheduler::startPalletPlace(const PalletPose &targetOffset,
 rg -n "startPalletPlace" robot_visual20260625/robot_visual/src
 ```
 
-把调用从：
+历史计划曾要求把调用从：
 
 ```cpp
 m_arm->startPalletPlace(m_pendingPalletOffset);
@@ -623,10 +623,21 @@ m_arm->startPalletPlace(m_pendingPalletOffset);
 
 ```cpp
 const PalletConfig palletConfig = m_pallet->config(m_stationCfg->palletArea);
-m_arm->startPalletPlace(m_pendingPalletOffset, palletConfig.releaseZOffset);
+m_arm->startPalletPlace(m_pendingPalletOffset,
+                        palletConfig.releaseZOffset,
+                        palletConfig.robotBaseHeightFromGround);
 ```
 
-预期：主流程传入同一区域配置里的释放高度。
+2026-07-10 已进一步修正：主流程到达码垛区时空箱已经夹紧，应调用：
+
+```cpp
+const PalletConfig palletConfig = m_pallet->config(m_stationCfg->palletArea);
+m_arm->startPalletPlaceFromClampedSafety(m_pendingPalletOffset,
+                                         palletConfig.releaseZOffset,
+                                         palletConfig.robotBaseHeightFromGround);
+```
+
+预期：主流程传入同一区域配置里的释放高度和机器人基座离地高度，并跳过重复夹紧。
 
 - [ ] **Step 6: 构建验证**
 
@@ -1047,6 +1058,57 @@ git -C robot_visual20260625/robot_visual commit -m "feat: add real single-step e
 ```
 
 预期：只产生一个包含完整功能、测试和文档同步的提交。
+
+---
+
+## 2026-07-10 补充修正：高层 Z 保护与主流程复用
+
+现场反馈第 5 层附近 Z 值异常偏高后，已按以下口径修正代码和测试：
+
+- 配置页删除“最高安全 Z”和“机械臂初始点位绝对预览”，避免把 UI 输入误当成示教器真实点位或机械臂安全极限。
+- `PalletScheduler` 新增 `releaseGroundZ()`、`releaseTcpZ()`，统一解释“目标层表面离地高度 + 目标层上方释放高度 + 基座离地高度 + 夹爪补偿”的换算。
+- `PalletPlaceSequence` 在生成 Z 下降动作前判断：目标 TCP Z 不能高于 `palletBaseFunc` 到位后读取的基准 TCP Z；否则拒绝执行，并提示降低最大层数、释放高度或修正现场高度参数。
+- `HuayanScheduler` 日志增加 `目标TCP Z`，用于现场排查高层是否接近初始点位上限。
+- 配置页“仿真 8 层”改为“按当前层数仿真”，按 UI 最大层数动态生成点位表。
+- 保存配置后提示 `QSettings` 实际文件路径，当前常见路径为 `/home/dh/.config/wh-robot/robot-visual.conf`。
+- 主流程新增并调用 `HuayanScheduler::startPalletPlaceFromClampedSafety()`；主流程到码垛区时空箱已经夹紧，所以跳过重复夹紧，其余动作链和配置页单步调试复用。
+- 自动化测试新增高层目标 TCP Z、目标 TCP Z 高于基准点拒绝执行、配置页不暴露旧字段、主流程跳过重复夹紧等约束。
+
+验证命令：
+
+```bash
+cmake --build build -j
+ctest --test-dir build --output-on-failure
+```
+
+结果：2026-07-10 本地验证 7/7 通过。
+
+## 2026-07-10 主流程现场联调记录
+
+单独码垛测试目前基本满足现场要求，可以进入包含码垛的主流程测试。当前阶段满垛、空垛还没有和外部系统通信，现场临时采用以下方式：
+
+- 主流程测试前，先在空箱码垛配置页核对 `placedCount` 是否等于现场真实已放数量。
+- 托盘区域为空时，手动清零后再启动主流程。
+- 满垛后如果人工已经搬走空箱、空托盘已经复位，可以在配置页手动清零，临时模拟后续外部系统的“满垛已搬走/空垛已就位”信号。
+- 如果托盘上仍有箱子，不能随意清零；否则主流程会按第一层点位放置，可能撞箱或落点错误。
+
+现场误差接受范围记录：
+
+- 机器人基座离地高度、车体高度、地面平整度都会带来 Z 误差。
+- 夹爪长度和 `PALLET_GRIPPER_RELEASE_Z_OFFSET_MM` 的测量也可能有误差。
+- 框体高度会因测量、变形、磨损产生误差，高层码垛时误差可能累积。
+- 因此 `releaseZOffset` 不一定表现为理论上的“比箱体高度多 10mm 后释放”。现场观察到第一层释放点接近第一层中部、高层误差更明显，只要单独码垛落箱效果仍在可接受范围，主流程可继续联调。
+
+主流程测试重点：
+
+```text
+1. 第一次只跑 1-3 次码垛，确认倒料后空箱仍被夹紧。
+2. 确认主流程到码垛区时调用 startPalletPlaceFromClampedSafety()，不重复夹紧。
+3. 成功后必须进入 CommitPallet 并让 placedCount 加 1。
+4. 失败、华研面板停止、满载拒绝时 placedCount 不能增加。
+5. 观察日志中的 基准TCP Z、目标TCP Z、释放地面Z、本次Z相对移动，确认与单独码垛测试一致。
+6. 外部满垛/空垛通信接入前，清零必须人工确认现场已搬空并复位托盘。
+```
 
 ---
 

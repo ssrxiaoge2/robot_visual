@@ -16,8 +16,8 @@ enum class PalletArea {
 /**
  * @brief 机械臂点位或偏移量。
  *
- * 在主流程里优先把该结构作为“相对机械臂初始点位的偏移”使用；
- * 在 UI 绝对预览里，pose = originPose + offset。
+ * 在主流程里优先把该结构作为“相对机械臂初始点位的偏移”使用。
+ * offset.z 单独表示目标层表面离地高度，不是机械臂相对 Z 移动量。
  */
 struct PalletPose {
     double x = 0.0;
@@ -58,11 +58,8 @@ struct PalletConfig {
     double releaseZOffset = 0.0;
     // 机器人基座坐标系原点离地高度，单位 mm；车载机械臂先按实测 850mm 配置，现场可补偿。
     double robotBaseHeightFromGround = 850.0;
-    double maxRobotZ = 0.0; // 0 表示不校验最高安全 Z
     bool invertX = false;
     bool invertY = false;
-    // 机械臂/现场示教的码垛初始点位，仅用于绝对点位预览。
-    PalletPose originPose;
 };
 
 /**
@@ -97,10 +94,18 @@ public:
 
     /** @brief 返回区域中文名称，用于 UI 提示。 */
     static QString areaName(PalletArea area);
-    /** @brief 大箱现场默认值：托盘 1100x1100，小箱/大箱参数中的大箱 580x380x288。 */
+    /** @brief 大箱现场默认值：托盘 1100x1100，大箱 580x380x288。 */
     static PalletConfig defaultLargeBoxConfig();
     /** @brief 小箱现场默认值：托盘 1100x1100，小箱 450x270x108。 */
     static PalletConfig defaultSmallBoxConfig();
+    /** @brief 返回 QSettings 实际文件路径，便于现场确认配置保存位置。 */
+    static QString settingsFilePath();
+    /** @brief 目标释放点离地高度 = 目标层表面离地高度 + 目标层上方释放高度。 */
+    static double releaseGroundZ(const PalletPose &targetOffset, double releaseZOffsetMm);
+    /** @brief 目标 TCP Z = 释放点地面高度 - 机器人基座离地高度 + 夹爪释放补偿。 */
+    static double releaseTcpZ(const PalletPose &targetOffset,
+                              double releaseZOffsetMm,
+                              double robotBaseHeightFromGroundMm);
 
     /** @brief 保存指定区域配置到内存和 QSettings，并发出 stateChanged。 */
     void setConfig(PalletArea area, const PalletConfig &config);
@@ -125,7 +130,7 @@ public:
     /** @brief 当前配置总容量，等于每层容量 * 最大层数。 */
     int totalCapacity(PalletArea area) const;
 
-    /** @brief 预览当前缓存下的下一箱绝对点位；不会修改 placedCount。 */
+    /** @brief 预览当前缓存下的下一箱计算点；不会修改 placedCount。 */
     bool nextPose(PalletArea area, PalletPose *pose, QString *error = nullptr) const;
     /** @brief 预览当前缓存下的下一箱相对偏移；这是主流程优先传给机械臂的值。 */
     bool nextRelativeOffset(PalletArea area, PalletPose *offset, QString *error = nullptr) const;

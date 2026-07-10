@@ -3,9 +3,12 @@
 QList<PalletPlaceStep> buildPalletPlaceSequence(const PalletPose &targetOffset,
                                                 double releaseZOffsetMm,
                                                 double robotBaseHeightFromGroundMm,
-                                                double palletBaseTcpZMm)
+                                                double palletBaseTcpZMm,
+                                                QString *error)
 {
     if (releaseZOffsetMm < 0.0 || robotBaseHeightFromGroundMm <= 0.0) {
+        if (error)
+            *error = QStringLiteral("释放高度或机器人基座离地高度无效");
         return {};
     }
 
@@ -14,13 +17,19 @@ QList<PalletPlaceStep> buildPalletPlaceSequence(const PalletPose &targetOffset,
     xyOffset.y = targetOffset.y;
     xyOffset.rz = targetOffset.rz;
 
-    const double releaseGroundZ = targetOffset.z + releaseZOffsetMm;
+    const double targetTcpZ = PalletScheduler::releaseTcpZ(
+        targetOffset, releaseZOffsetMm, robotBaseHeightFromGroundMm);
+    if (targetTcpZ > palletBaseTcpZMm) {
+        if (error) {
+            *error = QStringLiteral("目标 TCP Z=%1 高于码垛初始点位 TCP Z=%2，已拒绝执行；请降低最大层数、释放高度或修正现场高度参数")
+                .arg(targetTcpZ, 0, 'f', 1)
+                .arg(palletBaseTcpZMm, 0, 'f', 1);
+        }
+        return {};
+    }
 
     PalletPose descendOffset;
-    descendOffset.z = releaseGroundZ
-        - robotBaseHeightFromGroundMm
-        + PALLET_GRIPPER_RELEASE_Z_OFFSET_MM
-        - palletBaseTcpZMm;
+    descendOffset.z = targetTcpZ - palletBaseTcpZMm;
 
     PalletPose liftOffset;
     liftOffset.z = -descendOffset.z;

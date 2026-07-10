@@ -1,5 +1,7 @@
 #include "palletscheduler.h"
 
+#include "palletplacesequence.h"
+
 #include <QSettings>
 #include <QtMath>
 
@@ -15,27 +17,6 @@ int floorCapacity(double usable, double box, double gap)
     return qMax(0, static_cast<int>(std::floor((usable + gap) / (box + gap))));
 }
 
-void savePose(QSettings &s, const QString &prefix, const PalletPose &p)
-{
-    s.setValue(prefix + "/x", p.x);
-    s.setValue(prefix + "/y", p.y);
-    s.setValue(prefix + "/z", p.z);
-    s.setValue(prefix + "/rx", p.rx);
-    s.setValue(prefix + "/ry", p.ry);
-    s.setValue(prefix + "/rz", p.rz);
-}
-
-PalletPose loadPose(QSettings &s, const QString &prefix, const PalletPose &def)
-{
-    PalletPose p;
-    p.x = s.value(prefix + "/x", def.x).toDouble();
-    p.y = s.value(prefix + "/y", def.y).toDouble();
-    p.z = s.value(prefix + "/z", def.z).toDouble();
-    p.rx = s.value(prefix + "/rx", def.rx).toDouble();
-    p.ry = s.value(prefix + "/ry", def.ry).toDouble();
-    p.rz = s.value(prefix + "/rz", def.rz).toDouble();
-    return p;
-}
 }
 
 PalletScheduler::PalletScheduler(QObject *parent)
@@ -81,6 +62,27 @@ PalletConfig PalletScheduler::defaultSmallBoxConfig()
     cfg.releaseZOffset = cfg.boxSize.z * 1.2;
     cfg.robotBaseHeightFromGround = 850.0;
     return cfg;
+}
+
+QString PalletScheduler::settingsFilePath()
+{
+    QSettings s(kSettingsOrg, kSettingsApp);
+    return s.fileName();
+}
+
+double PalletScheduler::releaseGroundZ(const PalletPose &targetOffset,
+                                       double releaseZOffsetMm)
+{
+    return targetOffset.z + releaseZOffsetMm;
+}
+
+double PalletScheduler::releaseTcpZ(const PalletPose &targetOffset,
+                                    double releaseZOffsetMm,
+                                    double robotBaseHeightFromGroundMm)
+{
+    return releaseGroundZ(targetOffset, releaseZOffsetMm)
+        - robotBaseHeightFromGroundMm
+        + PALLET_GRIPPER_RELEASE_Z_OFFSET_MM;
 }
 
 void PalletScheduler::setConfig(PalletArea area, const PalletConfig &config)
@@ -143,18 +145,6 @@ bool PalletScheduler::validateConfig(PalletArea area,
 
     if (placedCount(area) > totalCapacity(area))
         localErrors << QStringLiteral("当前已放数量超过总容量，请修正缓存状态");
-
-    const int layers = boundedMaxLayers(area);
-    if (cfg.maxRobotZ > 0.0 && cfg.boxSize.z > 0.0 && cfg.robotBaseHeightFromGround > 0.0) {
-        const double releaseGroundZ = cfg.palletSize.z
-            + (layers - 1) * cfg.boxSize.z + cfg.releaseZOffset;
-        const double releaseRobotZ = releaseGroundZ - cfg.robotBaseHeightFromGround;
-        if (releaseRobotZ > cfg.maxRobotZ) {
-            localErrors << QStringLiteral("最高层释放点基座 Z=%1 超过安全上限 %2")
-                .arg(releaseRobotZ, 0, 'f', 1).arg(cfg.maxRobotZ, 0, 'f', 1);
-        }
-    }
-
 
     if (errors) *errors = localErrors;
     if (suggestions) *suggestions = localSuggestions;
@@ -334,18 +324,12 @@ bool PalletScheduler::computeItem(PalletArea area,
     if (cfg.invertX) offset.x = -offset.x;
     if (cfg.invertY) offset.y = -offset.y;
 
-    // offset.x/y/rz 是基准点相对偏移；offset.z 是目标层表面离地高度。
-    // pose 仅用于 UI 预览：x/y 沿用示教基准点，z 显示该层在机器人基座坐标系下的高度。
-    PalletPose pose = cfg.originPose;
-    pose.x += offset.x;
-    pose.y += offset.y;
-    pose.z = offset.z - cfg.robotBaseHeightFromGround;
-
-    if (cfg.maxRobotZ > 0.0 && pose.z > cfg.maxRobotZ) {
-        setError(error, QStringLiteral("目标层基座 Z=%1 超过安全上限 %2")
-                 .arg(pose.z, 0, 'f', 1).arg(cfg.maxRobotZ, 0, 'f', 1));
-        return false;
-    }
+    // pose 仅用于 UI 表格预览：x/y/rz 展示相对偏移，z 展示目标 TCP Z 估算值。
+    PalletPose pose;
+    pose.x = offset.x;
+    pose.y = offset.y;
+    pose.z = releaseTcpZ(offset, cfg.releaseZOffset, cfg.robotBaseHeightFromGround);
+    pose.rz = offset.rz;
 
     if (item) {
         item->index = placedIndex + 1;
@@ -380,10 +364,8 @@ void PalletScheduler::load()
         cfg.releaseZOffset = s.value(prefix + "/config/releaseZOffset", def.releaseZOffset).toDouble();
         cfg.robotBaseHeightFromGround = s.value(prefix + "/config/robotBaseHeightFromGround",
                                                 def.robotBaseHeightFromGround).toDouble();
-        cfg.maxRobotZ = s.value(prefix + "/config/maxRobotZ", def.maxRobotZ).toDouble();
         cfg.invertX = s.value(prefix + "/config/invertX", def.invertX).toBool();
         cfg.invertY = s.value(prefix + "/config/invertY", def.invertY).toBool();
-        cfg.originPose = loadPose(s, prefix + "/config/origin", def.originPose);
         st.config = cfg;
         st.placedCount = s.value(prefix + "/placedCount", 0).toInt();
     }
@@ -408,11 +390,10 @@ void PalletScheduler::saveArea(PalletArea area) const
     s.setValue(prefix + "/config/maxLayers", cfg.maxLayers);
     s.setValue(prefix + "/config/releaseZOffset", cfg.releaseZOffset);
     s.setValue(prefix + "/config/robotBaseHeightFromGround", cfg.robotBaseHeightFromGround);
-    s.setValue(prefix + "/config/maxRobotZ", cfg.maxRobotZ);
     s.setValue(prefix + "/config/invertX", cfg.invertX);
     s.setValue(prefix + "/config/invertY", cfg.invertY);
-    savePose(s, prefix + "/config/origin", cfg.originPose);
     s.setValue(prefix + "/placedCount", st.placedCount);
+    s.sync();
 }
 
 QString PalletScheduler::settingsPrefix(PalletArea area)

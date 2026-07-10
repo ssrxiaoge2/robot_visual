@@ -29,6 +29,9 @@ QString readUtf8File(const QString &path)
 static_assert(std::is_same_v<decltype(&HuayanScheduler::startPalletPlace),
                              void (HuayanScheduler::*)(const PalletPose &, double, double)>,
               "HuayanScheduler::startPalletPlace must accept targetOffset, releaseZOffsetMm and robotBaseHeightFromGroundMm");
+static_assert(std::is_same_v<decltype(&HuayanScheduler::startPalletPlaceFromClampedSafety),
+                             void (HuayanScheduler::*)(const PalletPose &, double, double)>,
+              "HuayanScheduler::startPalletPlaceFromClampedSafety must reuse pallet place arguments");
 
 int main()
 {
@@ -38,6 +41,8 @@ int main()
         readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/huayanScheduler.cpp"));
     const QString palletSequenceHeader =
         readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/palletplacesequence.h"));
+    const QString palletSequenceSource =
+        readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/palletplacesequence.cpp"));
 
     requireTrue(header.contains(QStringLiteral("void schedulerStopped();")),
                 "HuayanScheduler 必须声明专用的 schedulerStopped 信号");
@@ -50,9 +55,14 @@ int main()
                 "码垛基准点函数到位后必须读取当前 TCP Z，用于计算真实下降量");
     requireTrue(palletSequenceHeader.contains(QStringLiteral("#define PALLET_GRIPPER_RELEASE_Z_OFFSET_MM 420.0")),
                 "夹爪释放点相对 TCP 高度必须用宏定义固定为 420mm");
-    requireTrue(source.contains(QStringLiteral("+ PALLET_GRIPPER_RELEASE_Z_OFFSET_MM"))
-                    && source.contains(QStringLiteral("- basePose.z")),
-                "码垛 Z 下降量必须按地面释放高度、机器人基座离地高度、夹爪释放高度和当前基准点 Z 计算");
+    requireTrue(source.contains(QStringLiteral("PalletScheduler::releaseTcpZ"))
+                    && source.contains(QStringLiteral("targetTcpZ - basePose.z"))
+                    && source.contains(QStringLiteral("目标TCP Z")),
+                "码垛 Z 下降量必须按目标 TCP Z 和当前基准点 TCP Z 计算，并记录调试日志");
+    requireTrue(palletSequenceSource.contains(QStringLiteral("targetTcpZ > palletBaseTcpZMm")),
+                "目标 TCP Z 高于码垛初始点位时必须拒绝执行，避免高层接近奇异点");
+    requireTrue(source.contains(QStringLiteral("startPalletPlaceFromClampedSafety")),
+                "HuayanScheduler 必须提供已夹紧安全位入口给主流程复用");
 
     return 0;
 }

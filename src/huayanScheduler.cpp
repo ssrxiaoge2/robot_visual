@@ -23,7 +23,7 @@ static constexpr double kMoveRadius = 0.0;
 // 闭环视觉矫正参数
 static constexpr double kGrabTolerance     = 2.0;    // XY 偏移收敛阈值(mm)
 static constexpr double kRzTolerance       = 1.0;    // Rz 旋转收敛阈值(度)
-static constexpr int    kMaxGrabIterations = 10;      // 最大矫正迭代次数（防死循环）
+static constexpr int    kMaxGrabIterations = 15;      // 最大矫正迭代次数（防死循环）
 static constexpr int    kVisionSettleMs    = 2000;   // 移动后等视觉出新帧(ms)
 static constexpr double kSearchDescendStep = 20.0; // 未识别目标时每轮搜索下移量(mm)
 static constexpr double kMaxSearchDescend  = 80.0; // 搜索累计安全上限(mm)
@@ -379,6 +379,27 @@ void HuayanScheduler::startPalletPlace(const PalletPose &targetOffset,
                                        double releaseZOffsetMm,
                                        double robotBaseHeightFromGroundMm)
 {
+    startPalletPlaceInternal(targetOffset,
+                             releaseZOffsetMm,
+                             robotBaseHeightFromGroundMm,
+                             true);
+}
+
+void HuayanScheduler::startPalletPlaceFromClampedSafety(const PalletPose &targetOffset,
+                                                       double releaseZOffsetMm,
+                                                       double robotBaseHeightFromGroundMm)
+{
+    startPalletPlaceInternal(targetOffset,
+                             releaseZOffsetMm,
+                             robotBaseHeightFromGroundMm,
+                             false);
+}
+
+void HuayanScheduler::startPalletPlaceInternal(const PalletPose &targetOffset,
+                                               double releaseZOffsetMm,
+                                               double robotBaseHeightFromGroundMm,
+                                               bool clampAtSafety)
+{
     if (m_action != Action::None) {
         emit palletPlaceError(QStringLiteral("当前已有独立动作执行中"));
         return;
@@ -404,14 +425,17 @@ void HuayanScheduler::startPalletPlace(const PalletPose &targetOffset,
     m_palletMoves.clear();
     m_palletMoveIdx = 0;
     m_action = Action::PalletPlace;
-    m_actionStep = ActionStep::ClampPalletAtSafety;
+    m_actionStep = clampAtSafety ? ActionStep::ClampPalletAtSafety : ActionStep::RunPalletBase;
+    m_palletClampAtSafety = clampAtSafety;
     m_pendingPalletTargetOffset = targetOffset;
     m_pendingPalletReleaseZ = 0.0;
     m_pendingPalletReleaseHeightAboveLayer = releaseZOffsetMm;
     m_pendingRobotBaseHeightFromGround = robotBaseHeightFromGroundMm;
     if (!ensureConnected())
         return;
-    emit logMessage(QStringLiteral("[码垛] 开始标准单次动作 offset X=%1 Y=%2 Z=%3 Rz=%4 releaseZ=%5")
+    emit logMessage(QStringLiteral("[码垛] 开始标准单次动作%1 offset X=%2 Y=%3 Z=%4 Rz=%5 releaseZ=%6")
+                        .arg(clampAtSafety ? QStringLiteral("（先夹紧）")
+                                           : QStringLiteral("（已夹紧，跳过重复夹紧）"))
                         .arg(targetOffset.x, 0, 'f', 1)
                         .arg(targetOffset.y, 0, 'f', 1)
                         .arg(targetOffset.z, 0, 'f', 1)
@@ -1014,25 +1038,28 @@ void HuayanScheduler::proceedAction()
                 actionError(QStringLiteral("读取码垛基准点 TCP 位姿失败：%1").arg(readError));
                 break;
             }
+            QString sequenceError;
             const QList<PalletPlaceStep> steps = buildPalletPlaceSequence(
                 m_pendingPalletTargetOffset,
                 m_pendingPalletReleaseHeightAboveLayer,
                 m_pendingRobotBaseHeightFromGround,
-                basePose.z);
+                basePose.z,
+                &sequenceError);
             if (steps.isEmpty()) {
-                actionError(QStringLiteral("码垛 Z 计算失败，请检查释放高度和机器人基座离地高度"));
+                actionError(QStringLiteral("码垛 Z 计算失败：%1").arg(sequenceError));
                 break;
             }
-            const double releaseGroundZ = m_pendingPalletTargetOffset.z
-                + m_pendingPalletReleaseHeightAboveLayer;
-            const double calculatedPalletReleaseZ =
-                releaseGroundZ
-                - m_pendingRobotBaseHeightFromGround
-                + PALLET_GRIPPER_RELEASE_Z_OFFSET_MM
-                - basePose.z;
+            const double releaseGroundZ = PalletScheduler::releaseGroundZ(
+                m_pendingPalletTargetOffset, m_pendingPalletReleaseHeightAboveLayer);
+            const double targetTcpZ = PalletScheduler::releaseTcpZ(
+                m_pendingPalletTargetOffset,
+                m_pendingPalletReleaseHeightAboveLayer,
+                m_pendingRobotBaseHeightFromGround);
+            const double calculatedPalletReleaseZ = targetTcpZ - basePose.z;
             m_pendingPalletReleaseZ = steps.at(3).offset.z;
-            emit logMessage(QStringLiteral("[码垛] 基准TCP Z=%1，释放地面Z=%2，机器人基座离地=%3，夹爪释放补偿=%4，本次Z相对移动=%5")
+            emit logMessage(QStringLiteral("[码垛] 基准TCP Z=%1，目标TCP Z=%2，释放地面Z=%3，机器人基座离地=%4，夹爪释放补偿=%5，本次Z相对移动=%6")
                                 .arg(basePose.z, 0, 'f', 1)
+                                .arg(targetTcpZ, 0, 'f', 1)
                                 .arg(releaseGroundZ, 0, 'f', 1)
                                 .arg(m_pendingRobotBaseHeightFromGround, 0, 'f', 1)
                                 .arg(PALLET_GRIPPER_RELEASE_Z_OFFSET_MM, 0, 'f', 1)
@@ -1207,6 +1234,7 @@ void HuayanScheduler::clearActionState()
     m_pendingPalletReleaseZ = 0.0;
     m_pendingPalletReleaseHeightAboveLayer = 0.0;
     m_pendingRobotBaseHeightFromGround = 850.0;
+    m_palletClampAtSafety = true;
 }
 
 void HuayanScheduler::finishAction()

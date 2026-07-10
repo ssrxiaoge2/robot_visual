@@ -67,6 +67,10 @@ int main()
     requireTrue(dialogHeader.contains(
                     QStringLiteral("根据箱高写入目标层上方释放高度建议值；不影响相对 Z 偏移公式。")),
                 "PalletParamDialog 头文件注释必须更新释放高度业务含义");
+    requireTrue(!dialogHeader.contains(QStringLiteral("maxRobotZ"))
+                    && !dialogHeader.contains(QStringLiteral("originPose"))
+                    && !dialogHeader.contains(QStringLiteral("originX")),
+                "配置页不应再暴露最高安全 Z 或机械臂初始点位绝对预览字段");
 
     requireTrue(dialogSource.contains(QStringLiteral("QStringLiteral(\"执行一次码垛\")")),
                 "配置页必须提供执行一次码垛按钮");
@@ -88,6 +92,11 @@ int main()
                 "配置页不应再保留 detectArea");
     requireTrue(dialogSource.contains(QStringLiteral("QStringLiteral(\"目标层上方释放高度:\")")),
                 "配置页必须展示新的释放高度标签");
+    requireTrue(!dialogSource.contains(QStringLiteral("QStringLiteral(\"最高安全 Z:\")")),
+                "配置页不应继续展示最高安全 Z，运行时应使用码垛初始点位 TCP Z");
+    requireTrue(!dialogSource.contains(QStringLiteral("机械臂初始点位"))
+                    && !dialogSource.contains(QStringLiteral("绝对预览")),
+                "配置页不应继续展示机械臂初始点位绝对预览");
     requireTrue(!dialogSource.contains(QStringLiteral("QStringLiteral(\"释放高度参考:\")")),
                 "配置页不应继续展示旧的释放高度参考标签");
     requireTrue(dialogSource.contains(
@@ -97,6 +106,11 @@ int main()
                 "单步码垛必须读取 lineconfig 中的 PalletAreaTaskConfig");
     requireTrue(dialogSource.contains(QStringLiteral("m_arm->startPalletPlace(offset, cfg.releaseZOffset, cfg.robotBaseHeightFromGround);")),
                 "单步码垛必须把目标层地面高度、释放高度和机器人基座离地高度传给 HuayanScheduler");
+    requireTrue(dialogSource.contains(QStringLiteral("PalletScheduler::settingsFilePath()")),
+                "保存配置后必须显示 QSettings 实际文件路径，便于现场确认");
+    requireTrue(dialogSource.contains(QStringLiteral("QStringLiteral(\"按当前层数仿真\")"))
+                    && !dialogSource.contains(QStringLiteral("QStringLiteral(\"仿真 8 层\")")),
+                "仿真按钮必须按当前最大层数动态表达，不能写死 8 层");
     requireTrue(dialogSource.contains(QStringLiteral("m_scheduler->commitPlaced(area, &error)")),
                 "单步码垛完成后必须提交 placedCount");
     requireTrue(dialogSource.contains(QStringLiteral("HuayanScheduler::schedulerStopped")),
@@ -125,6 +139,10 @@ int main()
     requireTrue(!mainWindowSource.contains(
                     QStringLiteral("m_devMgr ? m_devMgr->visionClient() : nullptr")),
                 "MainWindow 不应再把 VisionHttpClient 传给 PalletParamDialog");
+    const QString taskExecutorSource =
+        readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/taskexecutor.cpp"));
+    requireTrue(taskExecutorSource.contains(QStringLiteral("startPalletPlaceFromClampedSafety")),
+                "主流程到码垛区时空箱已夹紧，应调用跳过重复夹紧的码垛入口");
 
     return 0;
 }

@@ -22,7 +22,7 @@ class HuayanScheduler;
  * @brief 空箱码垛参数配置、仿真与真实单步调试窗口。
  *
  * 窗口负责编辑大箱/小箱两套 PalletConfig、显示配置校验、预览下一点、
- * 从空托盘仿真 8 层、人工修正已放数量，并可执行一次真实空箱码垛调试。
+ * 从空托盘按当前最大层数仿真、人工修正已放数量，并可执行一次真实空箱码垛调试。
  * 真实调试只有在完整收到机械臂完成信号后才会推进 placedCount。
  */
 class PalletParamDialog : public QDialog
@@ -59,13 +59,6 @@ private:
         QLineEdit *maxLayers = nullptr;
         QDoubleSpinBox *releaseZOffset = nullptr;
         QDoubleSpinBox *robotBaseHeightFromGround = nullptr;
-        QDoubleSpinBox *maxRobotZ = nullptr;
-        QDoubleSpinBox *originX = nullptr;
-        QDoubleSpinBox *originY = nullptr;
-        QDoubleSpinBox *originZ = nullptr;
-        QDoubleSpinBox *originRx = nullptr;
-        QDoubleSpinBox *originRy = nullptr;
-        QDoubleSpinBox *originRz = nullptr;
         QCheckBox *invertX = nullptr;
         QCheckBox *invertY = nullptr;
         QLineEdit *placedCount = nullptr;
@@ -85,10 +78,6 @@ private:
 
     /** @brief 创建尺寸/距离输入框；滚轮不会修改数值。 */
     QDoubleSpinBox *createDistanceSpin(double max = 100000.0) const;
-    /** @brief 创建坐标输入框；允许正负值，滚轮不会修改数值。 */
-    QDoubleSpinBox *createPoseSpin() const;
-    /** @brief 创建姿态角输入框；滚轮不会修改数值。 */
-    QDoubleSpinBox *createAngleSpin() const;
 
     /** @brief 从当前页控件读取配置，不代表用户已经确认保存。 */
     PalletConfig readConfig(PalletArea area) const;
