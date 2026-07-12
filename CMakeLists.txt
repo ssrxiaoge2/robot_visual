@@ -22,9 +22,17 @@ add_compile_definitions(
     APP_BUILD_DATE="${APP_BUILD_DATE}"
 )
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network SerialBus Test)
+option(BUILD_ROBOT_VISUAL_TESTS "Build robot_visual test executables" ON)
+
+set(QT_REQUIRED_COMPONENTS Widgets Network SerialBus)
+if(BUILD_ROBOT_VISUAL_TESTS)
+    list(APPEND QT_REQUIRED_COMPONENTS Test)
+endif()
+find_package(Qt6 REQUIRED COMPONENTS ${QT_REQUIRED_COMPONENTS})
 include(GNUInstallDirs)
-enable_testing()
+if(BUILD_ROBOT_VISUAL_TESTS)
+    enable_testing()
+endif()
 
 # 调度文件职责：lineconfig/taskqueue 定义模型，taskexecutor 执行单任务，
 # linemanager 管理整线状态和 FIFO；它们与设备控制器编译进同一 Qt 程序。
@@ -87,6 +95,8 @@ set_target_properties(wh-robot-visual PROPERTIES FOLDER "robot_visual")
 
 target_link_libraries(wh-robot-visual PRIVATE Qt6::Widgets Qt6::Network Qt6::SerialBus)
 target_include_directories(wh-robot-visual PRIVATE src/)
+
+if(BUILD_ROBOT_VISUAL_TESTS)
 
 function(assign_test_folder target_name)
     # 所有测试 target 在 IDE 中统一归入 tests 分组，
@@ -375,27 +385,31 @@ elseif(WIN32)
     endif()
 endif()
 
+endif()
+
 # ── 奥比中光 SDK（仅 Linux 部署时链接，Windows 开发环境跳过）──
 if(UNIX)
     set(ORBBEC_SDK_ROOT "${CMAKE_SOURCE_DIR}/3rd/OrbbecSdk")
     target_include_directories(wh-robot-visual PRIVATE "${ORBBEC_SDK_ROOT}/include")
-    target_include_directories(live-shortage-ui-test PRIVATE "${ORBBEC_SDK_ROOT}/include")
     target_link_directories(wh-robot-visual PRIVATE "${ORBBEC_SDK_ROOT}/lib")
-    target_link_directories(live-shortage-ui-test PRIVATE "${ORBBEC_SDK_ROOT}/lib")
     target_link_libraries(wh-robot-visual PRIVATE
-        "${ORBBEC_SDK_ROOT}/lib/libOrbbecSDK.so.1.10.35"
-    )
-    target_link_libraries(live-shortage-ui-test PRIVATE
         "${ORBBEC_SDK_ROOT}/lib/libOrbbecSDK.so.1.10.35"
     )
     set_target_properties(wh-robot-visual PROPERTIES
         BUILD_RPATH "${ORBBEC_SDK_ROOT}/lib"
         INSTALL_RPATH "${ORBBEC_SDK_ROOT}/lib"
     )
-    set_target_properties(live-shortage-ui-test PROPERTIES
-        BUILD_RPATH "${ORBBEC_SDK_ROOT}/lib"
-        INSTALL_RPATH "${ORBBEC_SDK_ROOT}/lib"
-    )
+    if(BUILD_ROBOT_VISUAL_TESTS)
+        target_include_directories(live-shortage-ui-test PRIVATE "${ORBBEC_SDK_ROOT}/include")
+        target_link_directories(live-shortage-ui-test PRIVATE "${ORBBEC_SDK_ROOT}/lib")
+        target_link_libraries(live-shortage-ui-test PRIVATE
+            "${ORBBEC_SDK_ROOT}/lib/libOrbbecSDK.so.1.10.35"
+        )
+        set_target_properties(live-shortage-ui-test PROPERTIES
+            BUILD_RPATH "${ORBBEC_SDK_ROOT}/lib"
+            INSTALL_RPATH "${ORBBEC_SDK_ROOT}/lib"
+        )
+    endif()
 endif()
 
 # ── N-ScanHub 扫码枪 SDK（网络扫码，Linux / Windows MSVC）──
@@ -426,35 +440,39 @@ if(UNIX AND NOT APPLE)
                    "${NSCAN_RUNTIME_DIR}/libusb-1.0.so.0" COPYONLY)
 
     target_include_directories(wh-robot-visual PRIVATE "${NSCAN_PLATFORM_ROOT}/include")
-    target_include_directories(live-shortage-ui-test PRIVATE "${NSCAN_PLATFORM_ROOT}/include")
     target_link_libraries(wh-robot-visual PRIVATE
         "-Wl,--no-as-needed"
         "${NSCAN_RUNTIME_DIR}/libN-ScanHub.so"
         "${NSCAN_RUNTIME_DIR}/libusb-1.0.so.0"
         "-Wl,--as-needed"
     )
-    target_link_libraries(live-shortage-ui-test PRIVATE
-        "-Wl,--no-as-needed"
-        "${NSCAN_RUNTIME_DIR}/libN-ScanHub.so"
-        "${NSCAN_RUNTIME_DIR}/libusb-1.0.so.0"
-        "-Wl,--as-needed"
-    )
     target_compile_definitions(wh-robot-visual PRIVATE NSCAN_SDK_AVAILABLE=1)
-    target_compile_definitions(live-shortage-ui-test PRIVATE NSCAN_SDK_AVAILABLE=1)
+    if(BUILD_ROBOT_VISUAL_TESTS)
+        target_include_directories(live-shortage-ui-test PRIVATE "${NSCAN_PLATFORM_ROOT}/include")
+        target_link_libraries(live-shortage-ui-test PRIVATE
+            "-Wl,--no-as-needed"
+            "${NSCAN_RUNTIME_DIR}/libN-ScanHub.so"
+            "${NSCAN_RUNTIME_DIR}/libusb-1.0.so.0"
+            "-Wl,--as-needed"
+        )
+        target_compile_definitions(live-shortage-ui-test PRIVATE NSCAN_SDK_AVAILABLE=1)
+    endif()
 
     # 使用 APPEND，保留前面已经配置的 Orbbec SDK RPATH。
     set_property(TARGET wh-robot-visual APPEND PROPERTY BUILD_RPATH
         "${NSCAN_RUNTIME_DIR}"
     )
-    set_property(TARGET live-shortage-ui-test APPEND PROPERTY BUILD_RPATH
-        "${NSCAN_RUNTIME_DIR}"
-    )
     set_property(TARGET wh-robot-visual APPEND PROPERTY INSTALL_RPATH
         "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
     )
-    set_property(TARGET live-shortage-ui-test APPEND PROPERTY INSTALL_RPATH
-        "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
-    )
+    if(BUILD_ROBOT_VISUAL_TESTS)
+        set_property(TARGET live-shortage-ui-test APPEND PROPERTY BUILD_RPATH
+            "${NSCAN_RUNTIME_DIR}"
+        )
+        set_property(TARGET live-shortage-ui-test APPEND PROPERTY INSTALL_RPATH
+            "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
+        )
+    endif()
 
     install(FILES
         "${NSCAN_RUNTIME_DIR}/libN-ScanHub.so"
@@ -477,11 +495,13 @@ elseif(WIN32 AND MSVC)
     endif()
 
     target_include_directories(wh-robot-visual PRIVATE "${NSCAN_PLATFORM_ROOT}/include")
-    target_include_directories(live-shortage-ui-test PRIVATE "${NSCAN_PLATFORM_ROOT}/include")
     target_link_libraries(wh-robot-visual PRIVATE "${NSCAN_LIBRARY}")
-    target_link_libraries(live-shortage-ui-test PRIVATE "${NSCAN_LIBRARY}")
     target_compile_definitions(wh-robot-visual PRIVATE NSCAN_SDK_AVAILABLE=1)
-    target_compile_definitions(live-shortage-ui-test PRIVATE NSCAN_SDK_AVAILABLE=1)
+    if(BUILD_ROBOT_VISUAL_TESTS)
+        target_include_directories(live-shortage-ui-test PRIVATE "${NSCAN_PLATFORM_ROOT}/include")
+        target_link_libraries(live-shortage-ui-test PRIVATE "${NSCAN_LIBRARY}")
+        target_compile_definitions(live-shortage-ui-test PRIVATE NSCAN_SDK_AVAILABLE=1)
+    endif()
 
     add_custom_command(TARGET wh-robot-visual POST_BUILD
         COMMAND ${CMAKE_COMMAND} -E copy_if_different

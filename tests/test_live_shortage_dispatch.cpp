@@ -129,7 +129,10 @@ void LiveShortageDispatchTest::taskExecutor_emitsMaterialUnloaded_onlyAtArmUnloa
     executor.m_palletCfg = palletAreaConfig(PalletArea::LargeBox);
     executor.m_state = TaskExecutor::ExecState::ArmUnload;
 
-    executor.onArmStageCompleted(QStringLiteral("倒料"));
+    QVERIFY(QMetaObject::invokeMethod(&executor,
+                                      "onArmStageCompleted",
+                                      Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("倒料"))));
     QCOMPARE(unloadedSpy.count(), 1);
 
     const Task unloadedTask = qvariant_cast<Task>(unloadedSpy.takeFirst().at(0));
@@ -137,7 +140,10 @@ void LiveShortageDispatchTest::taskExecutor_emitsMaterialUnloaded_onlyAtArmUnloa
     QCOMPARE(unloadedTask.stationId, 8);
 
     executor.m_state = TaskExecutor::ExecState::StowAfterUnload;
-    executor.onArmStageCompleted(QStringLiteral("收姿态"));
+    QVERIFY(QMetaObject::invokeMethod(&executor,
+                                      "onArmStageCompleted",
+                                      Qt::DirectConnection,
+                                      Q_ARG(QString, QStringLiteral("收姿态"))));
     QCOMPARE(unloadedSpy.count(), 0);
 }
 
