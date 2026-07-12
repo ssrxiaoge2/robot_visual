@@ -123,14 +123,14 @@ inline const PalletAreaTaskConfig kPalletAreaTaskConfigs[] = {
         // 当前复用现有码垛枚举，业务含义分别是共享码垛区和工位12独立码垛区。
         PalletArea::LargeBox,
         16, // 这是现场待替换的模拟值。
-        QStringLiteral("Func_pallet_shared_base"),
+        QStringLiteral("Func_pallet_s12_base"),
         QStringLiteral("Func_songzhua"),
     },
     {
         // 当前复用现有码垛枚举，业务含义分别是共享码垛区和工位12独立码垛区。
         PalletArea::SmallBox,
         17, // 这是现场待替换的模拟值。
-        QStringLiteral("Func_pallet_s12_base"),
+        QStringLiteral("Func_pallet_shared_base"),
         QStringLiteral("Func_songzhua"),
     },
 };
