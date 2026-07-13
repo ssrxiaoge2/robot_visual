@@ -10,6 +10,7 @@
 #include <QSet>
 #include <QUrl>
 
+#include <algorithm>
 #include <limits>
 
 namespace {
@@ -110,16 +111,28 @@ QJsonObject stationToJson(const ShortageStationConfig &station)
 }
 
 /// 从 JSON 字符串优先恢复 64 位整数；兼容旧的小整数 number 格式。
-qint64 qint64FromJsonValue(const QJsonObject &object, const QString &field)
+bool qint64FromJsonValue(const QJsonObject &object,
+                         const QString &field,
+                         int row,
+                         qint64 *parsedValue,
+                         QString *errorZh)
 {
     const QJsonValue value = object.value(field);
     if (value.isString()) {
         bool ok = false;
-        const qint64 parsed = value.toString().toLongLong(&ok);
-        if (ok)
-            return parsed;
+        const QString text = value.toString();
+        const qint64 parsed = text.toLongLong(&ok);
+        if (!ok) {
+            *errorZh = QStringLiteral("行%1 字段%2 值%3：数字字符串格式非法，拒绝退回 double")
+                           .arg(row)
+                           .arg(field, text);
+            return false;
+        }
+        *parsedValue = parsed;
+        return true;
     }
-    return qint64(value.toDouble());
+    *parsedValue = qint64(value.toDouble());
+    return true;
 }
 
 /// JSON 单行恢复为领域对象；未知产品会直接报错，避免静默落到 88。
@@ -142,12 +155,30 @@ bool stationFromJson(const QJsonObject &object,
     station->sitePosition = object.value(QStringLiteral("sitePosition")).toString();
     station->partNumber = object.value(QStringLiteral("partNumber")).toString();
     station->enabled = object.value(QStringLiteral("enabled")).toBool(true);
-    station->boxQuantity = qint64FromJsonValue(object, QStringLiteral("boxQuantity"));
-    station->minimumStock = qint64FromJsonValue(object, QStringLiteral("minimumStock"));
-    station->maximumStock = qint64FromJsonValue(object, QStringLiteral("maximumStock"));
-    station->usageLeftRight = qint64FromJsonValue(object, QStringLiteral("usageLeftRight"));
-    station->usageLeftOnly = qint64FromJsonValue(object, QStringLiteral("usageLeftOnly"));
-    station->usageRightOnly = qint64FromJsonValue(object, QStringLiteral("usageRightOnly"));
+    if (!qint64FromJsonValue(object, QStringLiteral("boxQuantity"),
+                             row, &station->boxQuantity, errorZh)) {
+        return false;
+    }
+    if (!qint64FromJsonValue(object, QStringLiteral("minimumStock"),
+                             row, &station->minimumStock, errorZh)) {
+        return false;
+    }
+    if (!qint64FromJsonValue(object, QStringLiteral("maximumStock"),
+                             row, &station->maximumStock, errorZh)) {
+        return false;
+    }
+    if (!qint64FromJsonValue(object, QStringLiteral("usageLeftRight"),
+                             row, &station->usageLeftRight, errorZh)) {
+        return false;
+    }
+    if (!qint64FromJsonValue(object, QStringLiteral("usageLeftOnly"),
+                             row, &station->usageLeftOnly, errorZh)) {
+        return false;
+    }
+    if (!qint64FromJsonValue(object, QStringLiteral("usageRightOnly"),
+                             row, &station->usageRightOnly, errorZh)) {
+        return false;
+    }
     return true;
 }
 
@@ -491,16 +522,24 @@ ShortageOperationResult ShortageConfigStore::save(const QString &filePath,
     const ShortageOperationResult validation = validate(configuration);
     if (!validation.ok)
         return validation;
-    if (configuration.revision == std::numeric_limits<quint64>::max())
-        return {false, QStringLiteral("revision 已达到最大值，无法继续单调递增")};
-
     const QString backupPath = backupPathFor(filePath);
+    ShortageConfiguration currentMain;
+    bool hasCurrentMain = false;
     if (QFile::exists(filePath)) {
-        ShortageConfiguration currentMain;
         QString readError;
         if (!readConfigurationFile(filePath, &currentMain, &readError)) {
             return {false, QStringLiteral("保存前主配置无效，拒绝覆盖；%1").arg(readError)};
         }
+        hasCurrentMain = true;
+    }
+
+    const quint64 baseRevision = hasCurrentMain
+        ? std::max(configuration.revision, currentMain.revision)
+        : configuration.revision;
+    if (baseRevision == std::numeric_limits<quint64>::max())
+        return {false, QStringLiteral("revision 已达到最大值，无法继续单调递增，未替换配置文件")};
+
+    if (hasCurrentMain) {
         const ShortageOperationResult backupResult =
             writeJsonAtomically(backupPath, currentMain, QStringLiteral("已原子写入备份配置"));
         if (!backupResult.ok)
@@ -508,7 +547,7 @@ ShortageOperationResult ShortageConfigStore::save(const QString &filePath,
     }
 
     ShortageConfiguration persisted = configuration;
-    ++persisted.revision;
+    persisted.revision = baseRevision + 1;
     return writeJsonAtomically(filePath, persisted, QStringLiteral("已原子保存缺料配置"));
 }
 
