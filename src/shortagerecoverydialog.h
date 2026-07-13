@@ -35,6 +35,4 @@ private:
     QPushButton *m_submitButton = nullptr;
 };
 
-Q_DECLARE_METATYPE(ShortageMaintenanceCorrection)
-
 #endif // SHORTAGERECOVERYDIALOG_H

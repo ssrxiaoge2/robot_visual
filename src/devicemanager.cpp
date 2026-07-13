@@ -4,8 +4,14 @@
 #include "huayanScheduler.h"
 #include "linemanager.h"
 #include "lineorchestrator.h"
+#include "liveshortagecoordinator.h"
 #include "nscanscheduler.h"
 #include "palletscheduler.h"
+#include "shortageconfigstore.h"
+#include "shortageengine.h"
+#include "shortagesamplecoordinator.h"
+#include "shortagestatestore.h"
+#include "shortagetestcontroller.h"
 #include "visionclient.h"
 
 #include <QDebug>
@@ -50,6 +56,31 @@ signals:
 private:
     std::shared_ptr<NScanScheduler> m_scheduler;
     QMutex *m_scanMutex = nullptr;
+};
+
+class LineManagerShortageGateway final : public IShortageTaskGateway
+{
+public:
+    /// lineManager 由 DeviceManager 持有；适配器不负责释放。
+    explicit LineManagerShortageGateway(LineManager *lineManager)
+        : m_lineManager(lineManager)
+    {
+    }
+
+    TaskEnqueueResult append(int stationId,
+                             TaskSource source,
+                             quint64 replenishmentOrderNo) override
+    {
+        return m_lineManager->enqueueShortageTask(stationId, source, replenishmentOrderNo);
+    }
+
+    LineSystemState lineState() const override
+    {
+        return m_lineManager->state();
+    }
+
+private:
+    LineManager *m_lineManager = nullptr; ///< 非拥有指针，只提供队尾追加和状态读取。
 };
 
 unsigned long boundedScanWaitMs(const NScanScheduler::ScanOptions &options)
@@ -219,6 +250,79 @@ DeviceManager::DeviceManager(QObject *parent)
     connect(lineScanWorker, &NScanWorker::finished,
             m_lineManager, &LineManager::onScanFinished, Qt::QueuedConnection);
 
+    const ShortageConfiguration shortageConfiguration = ShortageConfigStore::sheet3Defaults();
+    QString endpointError;
+    if (!m_liveShortageScheduler->setLiveMesDayEndpoint(
+            QUrl(shortageConfiguration.parameters.liveMesDayEndpoint), &endpointError)) {
+        emit logMessage(QStringLiteral("[缺料] 正式 MES 地址配置失败：%1").arg(endpointError));
+    }
+
+    // 正式/测试缺料对象只在构造函数一次性创建和 connect；弹窗打开、来源切换不重复接线。
+    m_productionShortageStore = std::make_unique<ShortageStateStore>(
+        QStringLiteral(PROJECT_SOURCE_DIR), ShortageStateNamespace::Production);
+    m_productionShortageEngine = std::make_unique<ShortageEngine>(
+        shortageConfiguration, m_productionShortageStore.get());
+    const ShortageStateLoadResult productionLoad = m_productionShortageStore->load();
+    const ShortageEngineResult productionRestore =
+        m_productionShortageEngine->installRestoredState(
+            productionLoad, QDateTime::currentDateTimeUtc());
+    if (!productionRestore.ok) {
+        emit logMessage(QStringLiteral("[缺料] 恢复失败，正式自动派单锁定：%1")
+                            .arg(productionRestore.messageZh));
+    }
+
+    m_shortageTaskGateway = std::make_unique<LineManagerShortageGateway>(m_lineManager);
+    m_shortageSampleCoordinator = new ShortageSampleCoordinator(m_liveShortageScheduler, this);
+    m_shortageTestController = new ShortageTestController(
+        shortageConfiguration,
+        QStringLiteral(PROJECT_SOURCE_DIR),
+        m_shortageSampleCoordinator,
+        [this]() -> ShortageOperationResult {
+            if (m_liveShortageCoordinator && m_liveShortageCoordinator->liveInputActive()) {
+                return {false, QStringLiteral("正式 Live 来源正在运行，处理动作=先切回 Mock")};
+            }
+            return {true, QStringLiteral("允许测试采样")};
+        },
+        this);
+    m_liveShortageCoordinator = new LiveShortageCoordinator(
+        m_productionShortageEngine.get(),
+        m_shortageSampleCoordinator,
+        m_shortageTaskGateway.get(),
+        this);
+
+    connect(m_shortageSampleCoordinator, &ShortageSampleCoordinator::stableSampleReady,
+            m_liveShortageCoordinator, &LiveShortageCoordinator::onStableSample);
+    connect(m_shortageSampleCoordinator, &ShortageSampleCoordinator::communicationStateChanged,
+            this, [this](ShortageCommunicationState, const QString &reason) {
+        emit logMessage(QStringLiteral("[缺料采样] %1").arg(reason));
+    });
+    connect(m_lineManager, &LineManager::systemStateChanged,
+            m_liveShortageCoordinator, &LiveShortageCoordinator::onLineStateChanged);
+    connect(m_lineManager, &LineManager::shortageTaskAccepted,
+            m_liveShortageCoordinator, &LiveShortageCoordinator::onTaskAccepted);
+    connect(m_lineManager, &LineManager::shortageTaskStarted,
+            m_liveShortageCoordinator, &LiveShortageCoordinator::onTaskStarted);
+    connect(m_lineManager, &LineManager::shortageMaterialUnloaded,
+            m_liveShortageCoordinator, &LiveShortageCoordinator::onMaterialUnloaded);
+    connect(m_lineManager, &LineManager::shortageTaskTerminal,
+            m_liveShortageCoordinator, &LiveShortageCoordinator::onTaskTerminal);
+    connect(m_liveShortageCoordinator, &LiveShortageCoordinator::operationRejected,
+            this, [this](const QString &reason) {
+        emit logMessage(QStringLiteral("[缺料协调器] %1").arg(reason));
+    });
+    connect(m_liveShortageCoordinator, &LiveShortageCoordinator::criticalAlarmRaised,
+            this, [this](const QString &reason) {
+        emit logMessage(QStringLiteral("[缺料严重报警] %1").arg(reason));
+    });
+    connect(m_shortageTestController, &ShortageTestController::eventLogged,
+            this, [this](const QString &message) {
+        emit logMessage(QStringLiteral("[缺料测试] %1").arg(message));
+    });
+    connect(m_shortageTestController, &ShortageTestController::operationRejected,
+            this, [this](const QString &reason) {
+        emit logMessage(QStringLiteral("[缺料测试] %1").arg(reason));
+    });
+
     m_lineOrch = new LineOrchestrator(m_agvCtrl, m_huayanScheduler, this);
     // 编排器请求派单 → 经映射表解析后下发（复用 dispatchAgv）
     connect(m_lineOrch, &LineOrchestrator::agvDispatchRequested,
@@ -236,6 +340,22 @@ DeviceManager::DeviceManager(QObject *parent)
 
 DeviceManager::~DeviceManager()
 {
+    // 缺料 QObject 显式按“测试源 -> 正式采样 -> 生产协调器 -> 测试控制器 -> 采样层 -> 通信层”
+    // 顺序停止和删除，最后才释放非 QObject Engine/Store，避免依赖 QObject 子对象析构顺序。
+    if (m_shortageTestController != nullptr)
+        m_shortageTestController->stop();
+    if (m_shortageSampleCoordinator != nullptr)
+        m_shortageSampleCoordinator->stop();
+    delete m_liveShortageCoordinator;
+    m_liveShortageCoordinator = nullptr;
+    delete m_shortageTestController;
+    m_shortageTestController = nullptr;
+    delete m_shortageSampleCoordinator;
+    m_shortageSampleCoordinator = nullptr;
+    delete m_liveShortageScheduler;
+    m_liveShortageScheduler = nullptr;
+    m_shortageTaskGateway.reset();
+
     const unsigned long sharedScanWaitMs = qMin<unsigned long>(
         boundedScanWaitMs(m_nscanTestOptions) + boundedScanWaitMs(m_lineScanOptions),
         120000UL);

@@ -267,4 +267,7 @@ struct PlannerApplyResult {
     QString messageZh;        ///< 包含补料单、taskId、工位和处理动作。
 };
 
+Q_DECLARE_METATYPE(ShortageMaintenanceCorrection)
+Q_DECLARE_METATYPE(ShortageUiSnapshot)
+
 #endif // SHORTAGETYPES_H

@@ -79,6 +79,4 @@ private:
     ProductionMode m_lastMode = ProductionMode::LeftRight; ///< 最近样本模式。
 };
 
-Q_DECLARE_METATYPE(ShortageUiSnapshot)
-
 #endif // SHORTAGETESTCONTROLLER_H

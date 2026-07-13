@@ -175,6 +175,21 @@ set_tests_properties(shortage_dialog_tests PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
 
+add_shortage_cpp_test(live_shortage_coordinator_tests
+    test_live_shortage_coordinator.cpp
+    ../src/liveshortagecoordinator.cpp
+    ../src/shortagesamplecoordinator.cpp
+    ../src/customSysScheduler.cpp
+    ../src/shortagestatestore.cpp
+    ../src/shortageledger.cpp
+    ../src/replenishmentplanner.cpp
+    ../src/shortageengine.cpp
+    ../src/shortageconfigstore.cpp
+)
+target_compile_definitions(live_shortage_coordinator_tests PRIVATE
+    ROBOT_VISUAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
 add_shortage_cpp_test(shortage_config_tests
     test_shortage_config.cpp
     ../src/shortageconfigstore.cpp

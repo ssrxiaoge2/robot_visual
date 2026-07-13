@@ -21,6 +21,12 @@ class HuayanScheduler;
 class LineOrchestrator;
 class PalletScheduler;
 class QThread;
+class IShortageTaskGateway;
+class LiveShortageCoordinator;
+class ShortageEngine;
+class ShortageSampleCoordinator;
+class ShortageStateStore;
+class ShortageTestController;
 
 Q_DECLARE_METATYPE(NScanScheduler::ScanResult)
 Q_DECLARE_METATYPE(NScanScheduler::ScanOptions)
@@ -117,7 +123,15 @@ private:
     LineOrchestrator *m_lineOrch = nullptr;          ///< 旧单工位参考流程，不是新调度主线。
     LineManager      *m_lineManager = nullptr;       ///< 12 工位连续补料主调度。
     PalletScheduler  *m_palletScheduler = nullptr;   ///< 主流程和配置 UI 共用的码垛缓存。
+    std::unique_ptr<ShortageStateStore> m_productionShortageStore; ///< 正式状态仓库，后于生产 QObject 释放。
+    std::unique_ptr<ShortageEngine> m_productionShortageEngine; ///< 正式缺料账本/计划核心。
+    std::unique_ptr<ShortageStateStore> m_testShortageStore; ///< 独立测试状态仓库，禁止触碰正式文件。
+    std::unique_ptr<ShortageEngine> m_testShortageEngine; ///< 预留测试核心所有权，当前由测试控制器内部重建。
+    std::unique_ptr<IShortageTaskGateway> m_shortageTaskGateway; ///< 生产 FIFO 队尾适配器，无重排能力。
     CustomSysScheduler *m_liveShortageScheduler = nullptr; ///< 唯一真实缺料 MES/PLC 通信对象。
+    ShortageSampleCoordinator *m_shortageSampleCoordinator = nullptr; ///< 唯一采样层，测试/正式互斥复用。
+    ShortageTestController *m_shortageTestController = nullptr; ///< 独立测试控制器，由 DeviceManager 显式删除。
+    LiveShortageCoordinator *m_liveShortageCoordinator = nullptr; ///< 生产协调器，只接线一次。
     std::shared_ptr<NScanScheduler> m_nscanScheduler;
     QMutex            m_nscanScanMutex;      ///< 厂商扫码 SDK 串行保护，两个 worker 共用。
     QPointer<QThread> m_nscanTestThread;
