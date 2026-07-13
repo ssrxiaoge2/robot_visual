@@ -118,7 +118,8 @@ bool factMatchesOrder(const ReplenishmentOrder &order, const TaskFact &fact)
     return order.orderNo == fact.replenishmentOrderNo
         && order.taskId == fact.taskId
         && order.taskId != 0
-        && order.stationId == fact.stationId;
+        && order.stationId == fact.stationId
+        && order.origin == fact.origin;
 }
 
 bool sameOrders(const QList<ReplenishmentOrder> &left, const QList<ReplenishmentOrder> &right)

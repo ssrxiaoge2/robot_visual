@@ -71,3 +71,19 @@
 - `ctest --test-dir build-shortage -R '^replenishment_planner_tests$' --output-on-failure`：1/1 通过。
 - `ctest --test-dir build-shortage --output-on-failure`：11/12 通过；非本任务范围的 `shortage_sample_coordinator_tests` 仍失败于 `protocolReplyKeepsRoundIdAndAddressRange()` 的 `plcSpy.wait(2000)`。
 - `git diff --check`：无输出。
+
+## Final Review Fix 2026-07-14
+
+- 修复 TK-05 来源一致性校验：`factMatchesOrder()` 现在同时比较 `TaskFact::origin` 和 `ReplenishmentOrder::origin`，来源不一致与错补料单号、错 taskId、错工位一样走严重任务事实拒绝路径。
+- 来源不一致仍通过 Engine 的 invalid-fact 路径 `saveCritical()` 落盘 `criticalLock` 和审计；拒绝时不推进补料单状态，也不修改库存。
+- 修复 PS-15 防御性恢复安装：`installRestoredState()` 对 `ok=true` 但 `source=None` 的构造结果显式拒绝并进入恢复维护锁定，避免发布无来源恢复态。
+- 新增回归测试 `sourceMismatchTaskFactsPersistCriticalLock()`：覆盖人工补料单收到默认自动事实、自动补料单收到人工事实，均必须拒绝、落盘锁定并保持补料单/库存不变。
+- 新增回归测试 `restoreRejectsOkResultWithoutSource()`：覆盖 `ShortageStateLoadResult{ok=true, source=None}` 必须拒绝。
+- 调整既有 `duplicateUnloadLocksAndDoesNotAddSecondBox()` 测试夹具，使人工补料单的正常开始/倒料事实携带人工来源，继续专注覆盖重复倒料。
+
+## Final Review Fix Verification 2026-07-14
+
+- RED：新增回归测试后，focused test 失败在 `sourceMismatchTaskFactsPersistCriticalLock()` 的 `!result.ok` 和 `restoreRejectsOkResultWithoutSource()` 的 `!result.ok`，证明此前错误接受来源不一致事实和无来源恢复结果。
+- GREEN：补充来源比较和恢复来源校验后，`cmake --build build-shortage --target replenishment_planner_tests --parallel && ctest --test-dir build-shortage -R '^replenishment_planner_tests$' --output-on-failure`：1/1 通过。
+- `git diff --check`：无输出。
+- `ctest --test-dir build-shortage --output-on-failure`：12/12 通过。

@@ -356,6 +356,12 @@ ShortageEngineResult ShortageEngine::installRestoredState(
                               .arg(loadResult.messageZh),
                           true);
     }
+    if (loadResult.source == ShortageRestoreSource::None) {
+        m_restoreLocked = true;
+        installCriticalLock(&m_state, QStringLiteral("恢复安装失败：ok恢复结果缺少明确来源"));
+        return engineFail(QStringLiteral("%1，处理动作=进入维护锁定").arg(m_state.criticalReasonZh),
+                          true);
+    }
 
     const ShortageOperationResult ledgerValidation =
         m_ledger.validateRestoredState(loadResult.state);

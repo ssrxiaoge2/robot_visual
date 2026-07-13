@@ -159,6 +159,8 @@ private slots:
     void restoreRejectsMultipleOutstandingOrdersPerStation();// PS-15：同工位最多一个未倒料补料单。
     void unsafeRestoreLocksWithoutReplacingEngineState();// PS-15：不安全恢复不发布部分状态。
     void invalidTaskFactsPersistCriticalLock();          // TK-05：严重任务事实必须落盘锁定审计。
+    void sourceMismatchTaskFactsPersistCriticalLock();   // TK-05：补料来源不一致必须严重锁定。
+    void restoreRejectsOkResultWithoutSource();          // PS-15：ok恢复结果必须带明确来源。
 };
 
 void ReplenishmentPlannerTest::belowMinimumTriggersButEqualityDoesNot()
@@ -273,17 +275,21 @@ void ReplenishmentPlannerTest::duplicateUnloadLocksAndDoesNotAddSecondBox()
     QVERIFY(engine.requestManualBox(4, true, utc(2)).ok);
     const ShortageDispatchRequest request = engine.nextDispatchRequest().value();
     QVERIFY(engine.recordDispatchResult(request.replenishmentOrderNo, true, 4001, QString()).ok);
-    QVERIFY(engine.recordTaskStarted(fact(TaskFactKind::Started, request.replenishmentOrderNo, 4001, 4)).ok);
+    TaskFact started = fact(TaskFactKind::Started, request.replenishmentOrderNo, 4001, 4);
+    started.origin = request.origin;
+    QVERIFY(engine.recordTaskStarted(started).ok);
 
-    const ShortageEngineResult first =
-        engine.recordMaterialUnloaded(fact(TaskFactKind::MaterialUnloaded,
-                                           request.replenishmentOrderNo, 4001, 4, 10));
+    TaskFact firstUnload =
+        fact(TaskFactKind::MaterialUnloaded, request.replenishmentOrderNo, 4001, 4, 10);
+    firstUnload.origin = request.origin;
+    const ShortageEngineResult first = engine.recordMaterialUnloaded(firstUnload);
     QVERIFY2(first.ok, qPrintable(first.messageZh));
     QCOMPARE(station(engine.state(), 4)->stock, qint64{104});
 
-    const ShortageEngineResult duplicate =
-        engine.recordMaterialUnloaded(fact(TaskFactKind::MaterialUnloaded,
-                                           request.replenishmentOrderNo, 4001, 4, 11));
+    TaskFact duplicateUnload =
+        fact(TaskFactKind::MaterialUnloaded, request.replenishmentOrderNo, 4001, 4, 11);
+    duplicateUnload.origin = request.origin;
+    const ShortageEngineResult duplicate = engine.recordMaterialUnloaded(duplicateUnload);
     QVERIFY(!duplicate.ok);
     QVERIFY(duplicate.criticalLock);
     QCOMPARE(station(engine.state(), 4)->stock, qint64{104});
@@ -581,6 +587,90 @@ void ReplenishmentPlannerTest::invalidTaskFactsPersistCriticalLock()
     QCOMPARE(orderByNo(loaded.state, request.replenishmentOrderNo)->state,
              ReplenishmentOrderState::Queued);
     QCOMPARE(station(loaded.state, 5)->stock, station(before, 5)->stock);
+}
+
+void ReplenishmentPlannerTest::sourceMismatchTaskFactsPersistCriticalLock()
+{
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+        ShortageEngine engine(testConfiguration(), &store);
+        QVERIFY(engine.initializeZero(true, utc(1)).ok);
+        QVERIFY(engine.requestManualBox(5, true, utc(2)).ok);
+        const ShortageDispatchRequest request = engine.nextDispatchRequest().value();
+        QCOMPARE(request.origin, ReplenishmentOrigin::Manual);
+        QVERIFY(engine.recordDispatchResult(request.replenishmentOrderNo, true, 5001,
+                                            QString()).ok);
+        const ShortageRuntimeState before = engine.state();
+
+        const ShortageEngineResult result =
+            engine.recordTaskTerminal(fact(TaskFactKind::Failed, request.replenishmentOrderNo,
+                                           5001, 5, 30));
+
+        QVERIFY(!result.ok);
+        QVERIFY(result.criticalLock);
+        const ShortageStateLoadResult loaded = store.load();
+        QVERIFY2(loaded.ok, qPrintable(loaded.messageZh));
+        QVERIFY(loaded.state.criticalLock);
+        QCOMPARE(orderByNo(loaded.state, request.replenishmentOrderNo)->state,
+                 ReplenishmentOrderState::Queued);
+        QCOMPARE(station(loaded.state, 5)->stock, station(before, 5)->stock);
+    }
+
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+        ShortageEngine engine(testConfiguration(), &store);
+        QVERIFY(engine.initializeZero(true, utc(40)).ok);
+        ShortageSample sample;
+        sample.roundId = 1;
+        sample.product = ProductModel::Model88;
+        sample.mode = ProductionMode::LeftRight;
+        sample.actualQty = 1;
+        sample.capturedAtUtc = utc(41);
+        QVERIFY(engine.applyStableSample(sample).ok);
+        const ShortageDispatchRequest request = engine.nextDispatchRequest().value();
+        QCOMPARE(request.origin, ReplenishmentOrigin::Automatic);
+        QVERIFY(engine.recordDispatchResult(request.replenishmentOrderNo, true, 6001,
+                                            QString()).ok);
+        const ShortageRuntimeState before = engine.state();
+
+        TaskFact manualFact =
+            fact(TaskFactKind::Failed, request.replenishmentOrderNo, 6001, request.stationId, 42);
+        manualFact.origin = ReplenishmentOrigin::Manual;
+        const ShortageEngineResult result = engine.recordTaskTerminal(manualFact);
+
+        QVERIFY(!result.ok);
+        QVERIFY(result.criticalLock);
+        const ShortageStateLoadResult loaded = store.load();
+        QVERIFY2(loaded.ok, qPrintable(loaded.messageZh));
+        QVERIFY(loaded.state.criticalLock);
+        QCOMPARE(orderByNo(loaded.state, request.replenishmentOrderNo)->state,
+                 ReplenishmentOrderState::Queued);
+        QCOMPARE(station(loaded.state, request.stationId)->stock,
+                 station(before, request.stationId)->stock);
+    }
+}
+
+void ReplenishmentPlannerTest::restoreRejectsOkResultWithoutSource()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+    ShortageEngine engine(testConfiguration(), &store);
+
+    ShortageStateLoadResult load;
+    load.ok = true;
+    load.stateFound = false;
+    load.source = ShortageRestoreSource::None;
+    load.state = initializedState(50);
+
+    const ShortageEngineResult result = engine.installRestoredState(load, utc(50));
+    QVERIFY(!result.ok);
+    QVERIFY(result.criticalLock);
+    QVERIFY(!engine.nextDispatchRequest().has_value());
 }
 
 QTEST_MAIN(ReplenishmentPlannerTest)
