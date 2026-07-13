@@ -137,8 +137,12 @@ public:
     }
 
     LineSystemState lineState() const override { return state; }
+    bool pendingFifoEmpty() const override { return pendingFifoEmptyValue; }
+    bool currentTaskEmpty() const override { return currentTaskEmptyValue; }
 
     LineSystemState state = LineSystemState::Running;
+    bool pendingFifoEmptyValue = true;
+    bool currentTaskEmptyValue = true;
     bool acceptNext = true;
     quint64 nextTaskId = 7001;
     int appendCalls = 0;
@@ -207,6 +211,7 @@ private slots:
     void invalidConfigBlocksLiveMode();
     void pausedStationDoesNotBlockOtherStations();
     void criticalLockStopsNewAutomaticOnly();
+    void maintenanceCorrectionRechecksUnsafeRuntimeBeforeTouchingLedger();
     void everyErrorContainsStructuredChineseDetails();
     void startupInstallsRestoredStateBeforeUserConfirm();
     void startupRestoreFailureBlocksLiveAndDispatch();
@@ -510,6 +515,53 @@ void LiveShortageCoordinatorTest::criticalLockStopsNewAutomaticOnly()
     QCOMPARE(harness.gateway.sources.first(), TaskSource::LiveManual);
     QVERIFY(harness.gateway.orderNos.first() != 0);
     QCOMPARE(rejected.size(), 0);
+}
+
+void LiveShortageCoordinatorTest::maintenanceCorrectionRechecksUnsafeRuntimeBeforeTouchingLedger()
+{
+    struct UnsafeCase {
+        QString name;
+        LineSystemState lineState = LineSystemState::Idle;
+        bool liveActive = false;
+        bool fifoEmpty = true;
+        bool currentTaskEmpty = true;
+        QString expectedReason;
+    };
+    const QList<UnsafeCase> cases {
+        {QStringLiteral("整线运行"), LineSystemState::Running, false, true, true,
+         QStringLiteral("LineManager 正在 Running/ReturningHome")},
+        {QStringLiteral("真实采样未停"), LineSystemState::Idle, true, true, true,
+         QStringLiteral("正式采样未停止")},
+        {QStringLiteral("FIFO 非空"), LineSystemState::Idle, false, false, true,
+         QStringLiteral("Pending FIFO 不为空")},
+        {QStringLiteral("当前任务非空"), LineSystemState::Idle, false, true, false,
+         QStringLiteral("当前执行任务不为空")},
+    };
+
+    for (const UnsafeCase &testCase : cases) {
+        Harness harness;
+        installConfirmedState(&harness);
+        harness.gateway.state = testCase.lineState;
+        harness.gateway.pendingFifoEmptyValue = testCase.fifoEmpty;
+        harness.gateway.currentTaskEmptyValue = testCase.currentTaskEmpty;
+        if (testCase.liveActive)
+            harness.coordinator.setInputSource(ShortageInputSource::Live);
+        QSignalSpy rejected(&harness.coordinator, &LiveShortageCoordinator::operationRejected);
+
+        ShortageMaintenanceCorrection correction;
+        correction.stationId = 4;
+        correction.oldStock = station(harness.engine.state(), 4)->stock;
+        correction.newStock = 777;
+        correction.reason = QStringLiteral("测试维护修正业务层复验");
+        correction.typedStationId = QString::number(correction.stationId);
+
+        harness.coordinator.applyMaintenanceCorrection(correction);
+
+        QCOMPARE(station(harness.engine.state(), 4)->stock, qint64{100});
+        QVERIFY2(!rejected.isEmpty(), qPrintable(testCase.name));
+        QVERIFY2(rejected.last().at(0).toString().contains(testCase.expectedReason),
+                 qPrintable(testCase.name));
+    }
 }
 
 void LiveShortageCoordinatorTest::everyErrorContainsStructuredChineseDetails()

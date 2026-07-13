@@ -79,6 +79,21 @@ public:
         return m_lineManager->state();
     }
 
+    bool pendingFifoEmpty() const override
+    {
+        const QList<Task> tasks = m_lineManager->queueSnapshot();
+        for (const Task &task : tasks) {
+            if (task.state == TaskState::Pending)
+                return false;
+        }
+        return true;
+    }
+
+    bool currentTaskEmpty() const override
+    {
+        return m_lineManager->currentTask().taskId == 0;
+    }
+
 private:
     LineManager *m_lineManager = nullptr; ///< 非拥有指针，只提供队尾追加和状态读取。
 };

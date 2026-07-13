@@ -19,6 +19,10 @@ public:
                                      quint64 replenishmentOrderNo) = 0;
     /// 读取 LineManager 当前状态；选择 Live 不得通过该接口启动 LineManager。
     virtual LineSystemState lineState() const = 0;
+    /// 只读确认 Pending FIFO 是否为空；维护修正前业务层必须二次复验。
+    virtual bool pendingFifoEmpty() const = 0;
+    /// 只读确认当前执行任务是否为空；维护修正不能依赖 UI 预检。
+    virtual bool currentTaskEmpty() const = 0;
 };
 
 /// 人工补料二次确认所需的只读现场摘要；不向普通 UI 暴露内部可变账本引用。

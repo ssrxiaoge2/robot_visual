@@ -1909,7 +1909,7 @@ void MainWindow::onOpenShortageConfigDialog()
                                             [] {
                                                 return ShortageEditConditions {};
                                             },
-                                            nullptr,
+                                            m_devMgr->shortageTestController(),
                                             m_shortageSnapshot,
                                             this);
     dialog->setAttribute(Qt::WA_DeleteOnClose);

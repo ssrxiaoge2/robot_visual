@@ -71,6 +71,8 @@ public:
     CustomSysScheduler *liveShortageScheduler() const { return m_liveShortageScheduler; }
     /// 生产缺料协调器由 DeviceManager 唯一持有；UI 可读取只读确认摘要，不取得所有权。
     LiveShortageCoordinator *liveShortageCoordinator() const { return m_liveShortageCoordinator; }
+    /// 独立完整逻辑测试控制器由配置弹窗短期连接；DeviceManager 保持所有权。
+    ShortageTestController *shortageTestController() const { return m_shortageTestController; }
     bool              lightIsOn()        const { return m_lightOn;      }
     bool              nscanTestRunning() const { return m_nscanTestRunning; }
     const Config     &config()           const { return m_cfg;          }

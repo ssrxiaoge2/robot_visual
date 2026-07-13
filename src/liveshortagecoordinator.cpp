@@ -172,6 +172,29 @@ void LiveShortageCoordinator::applyMaintenanceCorrection(
 {
     if (m_engine == nullptr)
         return;
+    if (m_taskGateway == nullptr) {
+        rejectOperation(structuredError(QStringLiteral("维护修正"),
+                                        QStringLiteral("taskGateway 缺失")));
+        return;
+    }
+
+    ShortageEditConditions conditions;
+    conditions.standaloneTestStopped = true;
+    // 维护修正属于停线维护命令：即使 UI 误调用，也必须在业务层再次复验
+    // 整线停止、正式 Live 停止、Pending FIFO 为空、当前任务为空，满足后才允许改账本。
+    const LineSystemState lineState = m_taskGateway->lineState();
+    conditions.lineStopped = lineState != LineSystemState::Running
+        && lineState != LineSystemState::ReturningHome;
+    conditions.liveSamplingStopped = m_inputSource != ShortageInputSource::Live;
+    conditions.fifoEmpty = m_taskGateway->pendingFifoEmpty();
+    conditions.currentTaskEmpty = m_taskGateway->currentTaskEmpty();
+    const ShortageOperationResult allowed =
+        ShortageConfigStore::canEditConfiguration(conditions);
+    if (!allowed.ok) {
+        rejectOperation(structuredError(QStringLiteral("维护修正"), allowed.messageZh));
+        return;
+    }
+
     applyEngineResult(m_engine->applyMaintenanceCorrection(correction,
                                                            QDateTime::currentDateTimeUtc()));
     pumpDispatch();

@@ -32,6 +32,7 @@ private slots:
     void fifoShowsTaskSourceAndCountInTabTitle();
     void activeAutomaticPlanDisablesManualButtons();
     void configAndRecoveryOpenSeparateDialogs();
+    void configDialogReceivesProductionTestControllerFromMainWindow();
 };
 
 void LiveShortageUiTest::mockAndLiveRadiosAreExclusiveAndMockIsDefault()
@@ -109,6 +110,17 @@ void LiveShortageUiTest::configAndRecoveryOpenSeparateDialogs()
     requireContains(cpp, QStringLiteral("applyShortageMaintenanceCorrection"));
     QVERIFY2(!cpp.contains(QStringLiteral("客户系统通信测试")),
              "不得重新加入旧客户系统通信测试入口");
+}
+
+void LiveShortageUiTest::configDialogReceivesProductionTestControllerFromMainWindow()
+{
+    const QString header = sourceText(QStringLiteral("src/devicemanager.h"));
+    const QString cpp = sourceText(QStringLiteral("src/mainwindow.cpp"));
+
+    requireContains(header, QStringLiteral("ShortageTestController *shortageTestController() const"));
+    requireContains(cpp, QStringLiteral("m_devMgr->shortageTestController()"));
+    QVERIFY2(!cpp.contains(QStringLiteral("ShortageConfigDialog(ShortageConfigStore::sheet3Defaults(),\n                                            [] {\n                                                return ShortageEditConditions {};\n                                            },\n                                            nullptr")),
+             "MainWindow 打开配置弹窗时不得把测试控制器传 nullptr");
 }
 
 QTEST_MAIN(LiveShortageUiTest)
