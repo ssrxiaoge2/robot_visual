@@ -286,6 +286,10 @@ void TaskExecutor::onArmStageCompleted(const QString &stageName)
                      QStringLiteral("AGV 前往倒料位 LM%1").arg(m_stationCfg->unloadLm));
         break;
     case ExecState::ArmUnload:
+        // 修改前：倒料完成后直接进入收姿态，上层无法知道物料何时已经进入工位。
+        // 修改后：先发布唯一物料事实，再保持原顺序进入 StowAfterUnload。
+        // 不影响：机械臂倒料动作、收姿态、码垛和任务成功判定均不改变。
+        emit materialUnloaded(m_task);
         enterState(ExecState::StowAfterUnload, QStringLiteral("倒料完成，机械臂收姿态"));
         break;
     case ExecState::StowAfterUnload:

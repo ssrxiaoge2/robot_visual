@@ -51,6 +51,8 @@ signals:
     void taskFailed(const Task &task, const QString &reason);
     /// 设备/配置/安全恢复失败；LineManager 必须进入 Error 并清 Pending。
     void systemError(const Task &task, const QString &reason);
+    /// 仅在 ArmUnload 动作成功后、进入 StowAfterUnload 前发一次；不表示整个任务成功。
+    void materialUnloaded(const Task &task);
     void logMessage(const QString &message);
     /// 请求上层把数字 LM 直接下发给 AgvController。
     void agvDispatchRequested(int lm);

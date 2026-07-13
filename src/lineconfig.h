@@ -19,8 +19,33 @@ enum class LineSystemState { Idle, Running, ReturningHome, Error };
  */
 enum class TaskState { Pending, Running, Succeeded, Failed, Canceled };
 
-/// 缺料任务的来源；v1 仅使用 UiMock，CustomerSystem 为后续客户接口预留。
-enum class TaskSource { UiMock, CustomerSystem };
+/// 任务来源决定是否允许修改正式账本；模拟来源永远不能入账。
+enum class TaskSource {
+    UiMock,        ///< 现有 UI 模拟缺料。
+    LiveAutomatic, ///< 正式账本自动计划的一箱任务。
+    LiveManual     ///< 人工二次确认的一箱正式任务。
+};
+
+/// 统一 UI/FIFO/日志文案，避免各界面自行翻译产生不一致来源名称。
+inline QString taskSourceText(TaskSource source)
+{
+    switch (source) {
+    case TaskSource::UiMock:
+        return QStringLiteral("模拟");
+    case TaskSource::LiveAutomatic:
+        return QStringLiteral("真实自动");
+    case TaskSource::LiveManual:
+        return QStringLiteral("人工补料");
+    }
+    return QStringLiteral("未知来源");
+}
+
+/// 真实缺料任务追加结果；拒收时 taskId 固定为 0，reason 可直接展示。
+struct TaskEnqueueResult {
+    bool accepted = false; ///< true 表示任务已经追加到 FIFO。
+    quint64 taskId = 0;    ///< accepted=false 时必须为 0。
+    QString reason;        ///< 拒收时可直接展示的中文原因。
+};
 
 /// 夹紧后的机械臂离开策略。
 ///
@@ -61,6 +86,7 @@ struct Task {
     quint64 taskId = 0;                         ///< 进程内递增任务号，用于日志追踪。
     int stationId = 0;                         ///< 客户业务工位号，合法范围 1-12。
     TaskSource source = TaskSource::UiMock;     ///< 任务来源。
+    quint64 replenishmentOrderNo = 0;           ///< 真实补料单号；模拟任务保持 0，便于默认兼容。
     TaskState state = TaskState::Pending;       ///< 当前任务状态。
     TaskStep step = TaskStep::Waiting;          ///< 当前业务步骤。
     int stepIndex = 0;                          ///< UI 排序/展示使用的稳定步骤序号。

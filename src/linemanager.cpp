@@ -28,6 +28,8 @@ LineManager::LineManager(AgvController *agv,
             this, &LineManager::onExecutorTaskFailed);
     connect(m_executor, &TaskExecutor::systemError,
             this, &LineManager::onExecutorSystemError);
+    connect(m_executor, &TaskExecutor::materialUnloaded,
+            this, &LineManager::onExecutorMaterialUnloaded);
     connect(m_executor, &TaskExecutor::logMessage,
             this, &LineManager::logMessage);
     connect(m_executor, &TaskExecutor::agvDispatchRequested,
@@ -113,6 +115,7 @@ void LineManager::stop()
         canceled.statusText = QStringLiteral("人工 Stop，当前任务已取消");
         canceled.lastError = reason;
         setCurrentTask(canceled);
+        emit shortageTaskTerminal(canceled, reason);
     } else {
         clearCurrentTask();
     }
@@ -153,37 +156,66 @@ void LineManager::resetError()
 
 void LineManager::reportShortage(int stationId)
 {
-    if (stationId < 1 || stationId > 12) {
-        emit logMessage(QStringLiteral("[LineManager] 忽略非法缺料工位：%1").arg(stationId));
+    const TaskEnqueueResult result = enqueueShortageTask(stationId, TaskSource::UiMock, 0);
+    if (!result.accepted) {
+        emit logMessage(result.reason);
         return;
+    }
+
+    // 不变：UI 模拟缺料继续使用原日志文案，避免现场操作提示变化。
+    emit logMessage(QStringLiteral("工位%1已加入送料队列").arg(stationId));
+}
+
+TaskEnqueueResult LineManager::enqueueShortageTask(int stationId,
+                                                   TaskSource source,
+                                                   quint64 replenishmentOrderNo)
+{
+    if (stationId < 1 || stationId > 12) {
+        return {false,
+                0,
+                QStringLiteral("[LineManager] 忽略非法缺料工位：%1").arg(stationId)};
     }
 
     if (m_state == LineSystemState::Error) {
-        emit logMessage(QStringLiteral("[LineManager] 系统报警中，拒绝工位 %1 的缺料请求").arg(stationId));
-        return;
+        return {false,
+                0,
+                QStringLiteral("[LineManager] 系统报警中，拒绝工位 %1 的缺料请求").arg(stationId)};
+    }
+
+    if (source == TaskSource::UiMock && replenishmentOrderNo != 0) {
+        return {false,
+                0,
+                QStringLiteral("[LineManager] 模拟缺料任务不能携带补料单号：%1").arg(replenishmentOrderNo)};
+    }
+
+    if (source != TaskSource::UiMock && replenishmentOrderNo == 0) {
+        return {false,
+                0,
+                QStringLiteral("[LineManager] %1 任务必须携带非 0 补料单号").arg(taskSourceText(source))};
     }
 
     // 每次点击都生成独立任务，不按工位去重；客户可能连续需要多个料箱。
-    const Task task = m_queue.enqueue(stationId, TaskSource::UiMock);
-    Q_UNUSED(task);
+    const Task task = m_queue.enqueue(stationId, source, replenishmentOrderNo);
+    emit shortageTaskAccepted(task);
 
     emitQueueChanged();
-    emit logMessage(QStringLiteral("工位%1已加入送料队列").arg(stationId));
 
     if (m_state == LineSystemState::Idle) {
-        return;
+        return {true, task.taskId, QString()};
     }
 
     if (m_state == LineSystemState::ReturningHome) {
         // 新任务优先于空闲回站；取消回 LM1 是正常调度切换，不属于 AGV 故障。
         cancelReturnHomeForNewTask();
         tryStartNext();
-        return;
+        return {true, task.taskId, QString()};
     }
 
     if (m_state == LineSystemState::Running && !m_executor->isBusy()) {
         tryStartNext();
     }
+
+    return {true, task.taskId, QString()};
 }
 
 void LineManager::onScanFinished(const NScanScheduler::ScanResult &result)
@@ -208,6 +240,7 @@ void LineManager::onExecutorTaskSucceeded(const Task &task)
     }
 
     emit logMessage(QStringLiteral("工位%1送料完成").arg(task.stationId));
+    emit shortageTaskTerminal(task, QString());
 
     // 连续任务之间不回 LM1，直接启动队首可减少无效往返。
     if (m_queue.hasPending()) {
@@ -227,6 +260,7 @@ void LineManager::onExecutorTaskFailed(const Task &task, const QString &reason)
 
     // 任务失败只影响当前单，不影响后续 FIFO 调度；后面有单就继续，没有单再回 LM1。
     emit logMessage(QStringLiteral("工位%1送料失败：%2").arg(task.stationId).arg(reason));
+    emit shortageTaskTerminal(task, reason);
 
     // 能走到此信号说明 TaskExecutor 已成功完成安全收姿态，因此允许继续队列。
     if (m_queue.hasPending()) {
@@ -240,13 +274,31 @@ void LineManager::onExecutorTaskFailed(const Task &task, const QString &reason)
 
 void LineManager::onExecutorSystemError(const Task &task, const QString &reason)
 {
-    Q_UNUSED(task);
-
     if (m_manualStopInProgress) {
         return;
     }
 
+    // systemError 前复制当前任务快照并发布明确终态；随后保持原 Error 入口不变。
+    Task terminal = task;
+    if (terminal.taskId == 0) {
+        terminal = m_currentTask;
+    }
+    if (terminal.taskId != 0) {
+        terminal.state = TaskState::Failed;
+        terminal.step = TaskStep::Done;
+        terminal.stepIndex = 15;
+        terminal.statusText = QStringLiteral("系统级 ERROR：%1").arg(reason);
+        terminal.lastError = reason;
+        setCurrentTask(terminal);
+        emit shortageTaskTerminal(terminal, reason);
+    }
     enterError(reason);
+}
+
+void LineManager::onExecutorMaterialUnloaded(const Task &task)
+{
+    // 只转发 TaskExecutor 在 ArmUnload 成功点发布的唯一物料事实，不推导额外事实。
+    emit shortageMaterialUnloaded(task);
 }
 
 void LineManager::onAgvMonitorUpdated(const AgvMonitorData &data)
@@ -348,6 +400,7 @@ void LineManager::tryStartNext()
     // takeNext() 严格取 FIFO 队首，并把该副本标记为 Running。
     Task nextTask = m_queue.takeNext();
     emit logMessage(QStringLiteral("工位%1开始送料").arg(nextTask.stationId));
+    emit shortageTaskStarted(nextTask);
     m_executor->start(nextTask);
 }
 
@@ -427,7 +480,8 @@ void LineManager::enterError(const QString &reason)
 
 void LineManager::clearPendingForError(const QString &reason)
 {
-    const int pendingCount = m_queue.pendingCount();
+    const QList<Task> pending = m_queue.pendingSnapshot();
+    const int pendingCount = pending.size();
     if (pendingCount <= 0) {
         emitQueueChanged();
         return;
@@ -436,6 +490,14 @@ void LineManager::clearPendingForError(const QString &reason)
     emit logMessage(QStringLiteral("[LineManager] 清空 %1 个 Pending 任务：%2")
                         .arg(pendingCount)
                         .arg(reason));
+    for (Task canceled : pending) {
+        canceled.state = TaskState::Canceled;
+        canceled.step = TaskStep::Done;
+        canceled.stepIndex = 15;
+        canceled.statusText = QStringLiteral("系统清队列，任务已取消");
+        canceled.lastError = reason;
+        emit shortageTaskTerminal(canceled, reason);
+    }
     m_queue.clearPendingAsCanceled(reason);
     emitQueueChanged();
 }

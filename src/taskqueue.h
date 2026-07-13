@@ -16,13 +16,14 @@
 class TaskQueue
 {
 public:
-    /// 创建新任务并追加到队尾；返回副本供调用方立即刷新 UI/日志。
-    Task enqueue(int stationId, TaskSource source)
+    /// 创建新任务并追加到队尾；不插队、不重排，返回副本供调用方立即刷新 UI/日志。
+    Task enqueue(int stationId, TaskSource source, quint64 replenishmentOrderNo = 0)
     {
         Task task;
         task.taskId = m_nextTaskId++;
         task.stationId = stationId;
         task.source = source;
+        task.replenishmentOrderNo = replenishmentOrderNo;
         task.state = TaskState::Pending;
         task.step = TaskStep::Waiting;
         task.stepIndex = 0;
@@ -30,6 +31,7 @@ public:
         task.statusText.clear();
         task.lastError.clear();
 
+        // 不变：Pending 任务只追加到队尾，保持调用顺序作为 FIFO 顺序。
         m_pending.append(task);
         return task;
     }
@@ -53,6 +55,7 @@ public:
             return Task{};
         }
 
+        // 不变：严格取队首，不按工位、来源或补料单重排。
         Task task = m_pending.takeFirst();
         task.state = TaskState::Running;
         return task;

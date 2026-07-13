@@ -110,6 +110,13 @@ target_link_libraries(task_executor_pallet_commit_semantics_tests PRIVATE
 add_test(NAME task_executor_pallet_commit_semantics_tests
          COMMAND task_executor_pallet_commit_semantics_tests)
 
+add_shortage_cpp_test(shortage_task_lifecycle_tests
+    test_shortage_task_lifecycle.cpp
+)
+target_compile_definitions(shortage_task_lifecycle_tests PRIVATE
+    PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
 add_executable(pallet_param_dialog_contract_tests
     test_pallet_param_dialog_contract.cpp
 )

@@ -43,6 +43,10 @@ public slots:
     void resetError();
     /// 接收一次独立缺料事件；同一工位允许重复调用并生成不同 taskId。
     void reportShortage(int stationId);
+    /// 只追加任务；不插队、不重排、不启动未处于允许状态的任务。
+    TaskEnqueueResult enqueueShortageTask(int stationId,
+                                          TaskSource source,
+                                          quint64 replenishmentOrderNo);
     /// 仅转发调度专用扫码结果给当前 TaskExecutor。
     void onScanFinished(const NScanScheduler::ScanResult &result);
 
@@ -56,12 +60,21 @@ signals:
     void logMessage(QString message);
     void agvDispatchRequested(int lm);
     void scanRequested(NScanScheduler::ScanOptions options);
+    /// 已追加 FIFO，包含来源和补料单号。
+    void shortageTaskAccepted(Task task);
+    /// takeNext 后开始执行，完整保留来源和补料单号。
+    void shortageTaskStarted(Task task);
+    /// 原样转发 TaskExecutor 的唯一倒料事实。
+    void shortageMaterialUnloaded(Task task);
+    /// 成功、失败、取消、系统错误均发一次完整终态事实。
+    void shortageTaskTerminal(Task task, QString reason);
 
 private slots:
     void onExecutorTaskUpdated(const Task &task);
     void onExecutorTaskSucceeded(const Task &task);
     void onExecutorTaskFailed(const Task &task, const QString &reason);
     void onExecutorSystemError(const Task &task, const QString &reason);
+    void onExecutorMaterialUnloaded(const Task &task);
     void onAgvMonitorUpdated(const AgvMonitorData &data);
     void onAgvErrorOccurred(const QString &message);
     void onReturnHomeTimeout();
