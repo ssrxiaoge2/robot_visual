@@ -26,6 +26,7 @@
 #include "camerawindow.h"
 
 #include <QAbstractItemView>
+#include <QButtonGroup>
 #include <QDate>
 #include <QDir>
 #include <QFile>
@@ -39,7 +40,9 @@
 #include <QHeaderView>
 #include <QIntValidator>
 #include <QMessageBox>
+#include <QRadioButton>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSizePolicy>
 #include <QTextStream>
 
@@ -48,9 +51,12 @@
 
 #include "handeyedialog.h"
 #include "huayanScheduler.h"
+#include "liveshortagecoordinator.h"
 #include "lineorchestrator.h"
 #include "palletparamdialog.h"
 #include "palletscheduler.h"
+#include "shortageconfigdialog.h"
+#include "shortagerecoverydialog.h"
 
 namespace {
 
@@ -253,6 +259,54 @@ QString latestTaskResultText(const QString &prefix, const Task &task, const QStr
         .arg(QDateTime::currentDateTime().toString(QStringLiteral("HH:mm:ss")));
 }
 
+QString shortageProductText(ProductModel product)
+{
+    switch (product) {
+    case ProductModel::Model88:
+        return QStringLiteral("88");
+    case ProductModel::Model88R:
+        return QStringLiteral("88R");
+    case ProductModel::Model92:
+        return QStringLiteral("92");
+    }
+    return QStringLiteral("未知产品");
+}
+
+QString shortageModeText(ProductionMode mode)
+{
+    switch (mode) {
+    case ProductionMode::LeftRight:
+        return QStringLiteral("L/R");
+    case ProductionMode::LeftOnly:
+        return QStringLiteral("L/L");
+    case ProductionMode::RightOnly:
+        return QStringLiteral("R/H");
+    }
+    return QStringLiteral("未知模式");
+}
+
+const ShortageStationRuntime *shortageRuntimeStation(const ShortageUiSnapshot &snapshot,
+                                                     int stationId)
+{
+    for (const ShortageStationRuntime &station : snapshot.runtime.stations) {
+        if (station.stationId == stationId)
+            return &station;
+    }
+    return nullptr;
+}
+
+QString shortageStationStatusText(const ShortageUiSnapshot &snapshot,
+                                  const ShortageStationRuntime &station)
+{
+    if (snapshot.runtime.criticalLock)
+        return QStringLiteral("锁定");
+    if (snapshot.runtime.activeStationId == station.stationId)
+        return QStringLiteral("补料中");
+    if (snapshot.runtime.waitingStationIds.contains(station.stationId))
+        return QStringLiteral("待补料");
+    return QStringLiteral("正常");
+}
+
 } // namespace
 
 // ============================================================
@@ -322,6 +376,9 @@ MainWindow::MainWindow(QWidget *parent)
             this, &MainWindow::onLightChanged);
     connect(m_devMgr, &DeviceManager::configApplied,
             this, &MainWindow::onConfigApplied);
+    // MainWindow 只观察生产协调器快照；正式库存事实仍由 DeviceManager/Coordinator 管理。
+    connect(m_devMgr, &DeviceManager::shortageSnapshotChanged,
+            this, &MainWindow::onShortageSnapshotChanged);
 
     // ── 4. AGV Modbus 连接状态 ──────────────────────────────
     connect(m_devMgr, &DeviceManager::agvModbusConnected, this, [this]() {
@@ -617,9 +674,28 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
     controlRow->addWidget(m_lineResetBtn);
     layout->addLayout(controlRow);
 
-    auto *stationTitle = new QLabel(QStringLiteral("模拟缺料"));
-    stationTitle->setProperty("sectionTitle", true);
-    layout->addWidget(stationTitle);
+    // 原行为：12 个按钮固定触发模拟缺料。现在增加 Mock/Live 二选一，
+    // 但 Mock 默认和 LineManager::reportShortage(stationId) 调用保持不变。
+    m_shortageSourceGroup = new QButtonGroup(gbLine);
+    m_shortageSourceGroup->setObjectName(QStringLiteral("shortageSourceButtonGroup"));
+    m_shortageSourceGroup->setExclusive(true);
+    m_shortageMockRadio = new QRadioButton(QStringLiteral("模拟缺料"));
+    m_shortageMockRadio->setObjectName(QStringLiteral("shortageMockRadio"));
+    m_shortageLiveRadio = new QRadioButton(QStringLiteral("真实缺料"));
+    m_shortageLiveRadio->setObjectName(QStringLiteral("shortageLiveRadio"));
+    m_shortageMockRadio->setChecked(true);
+    m_shortageSourceGroup->addButton(m_shortageMockRadio, int(ShortageInputSource::Mock));
+    m_shortageSourceGroup->addButton(m_shortageLiveRadio, int(ShortageInputSource::Live));
+    auto *sourceRow = new QHBoxLayout();
+    sourceRow->addWidget(new QLabel(QStringLiteral("缺料来源:")));
+    sourceRow->addWidget(m_shortageMockRadio);
+    sourceRow->addWidget(m_shortageLiveRadio);
+    sourceRow->addStretch();
+    layout->addLayout(sourceRow);
+
+    m_shortageStationTitle = new QLabel(QStringLiteral("模拟缺料"));
+    m_shortageStationTitle->setProperty("sectionTitle", true);
+    layout->addWidget(m_shortageStationTitle);
 
     auto *stationGrid = new QGridLayout();
     stationGrid->setHorizontalSpacing(4);
@@ -628,28 +704,52 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
         auto *button = new QPushButton(QStringLiteral("工位%1").arg(stationId));
         button->setProperty("stationId", stationId);
         button->setMinimumHeight(28);
-        // 按钮只上报一次缺料事件；任务编号、FIFO 入队和执行时机由 LineManager 决定。
-        connect(button, &QPushButton::clicked, this, [this, button]() {
-            LineManager *lm = m_devMgr ? m_devMgr->lineManager() : nullptr;
-            if (!lm) {
-                return;
-            }
-            const int stationId = button->property("stationId").toInt();
-            lm->reportShortage(stationId);
-        });
+        // 按钮入口复用：Mock 仍只上报原模拟缺料；Live 只做人工补料确认后转发协调器。
+        connect(button, &QPushButton::clicked, this, &MainWindow::onStationShortageClicked);
         stationGrid->addWidget(button, (stationId - 1) / 3, (stationId - 1) % 3);
         m_stationButtons.append(button);
     }
     layout->addLayout(stationGrid);
 
-    auto *queueTitle = new QLabel(QStringLiteral("FIFO 队列"));
-    queueTitle->setProperty("sectionTitle", true);
-    layout->addWidget(queueTitle);
+    m_shortageSummaryLine1 = makeValueLabel();
+    m_shortageSummaryLine1->setObjectName(QStringLiteral("shortageSummaryLine1"));
+    m_shortageSummaryLine2 = makeValueLabel();
+    m_shortageSummaryLine2->setObjectName(QStringLiteral("shortageSummaryLine2"));
+    layout->addWidget(m_shortageSummaryLine1);
+    layout->addWidget(m_shortageSummaryLine2);
+
+    m_lineStatusTabs = new QTabWidget(gbLine);
+    m_lineStatusTabs->setObjectName(QStringLiteral("lineStatusTabs"));
+
+    // QStringLiteral("工位、库存、最低/最高、状态")：源码契约说明四列固定含义。
+    m_lineStationTable = new QTableWidget(kLineStationCount, 4, gbLine);
+    m_lineStationTable->setObjectName(QStringLiteral("lineStationStatusTable"));
+    m_lineStationTable->setHorizontalHeaderLabels(
+        {QStringLiteral("工位"), QStringLiteral("库存"), QStringLiteral("最低/最高"), QStringLiteral("状态")});
+    m_lineStationTable->verticalHeader()->setVisible(false);
+    m_lineStationTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
+    m_lineStationTable->setSelectionMode(QAbstractItemView::NoSelection);
+    m_lineStationTable->setFocusPolicy(Qt::NoFocus);
+    m_lineStationTable->setAlternatingRowColors(true);
+    m_lineStationTable->setMinimumHeight(160);
+    m_lineStationTable->horizontalHeader()->setStretchLastSection(true);
+    m_lineStationTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
+    for (int stationId = 1; stationId <= kLineStationCount; ++stationId) {
+        auto *stationItem = new QTableWidgetItem(QStringLiteral("工位%1").arg(stationId));
+        stationItem->setTextAlignment(Qt::AlignCenter);
+        m_lineStationTable->setItem(stationId - 1, 0, stationItem);
+        for (int column = 1; column < 4; ++column) {
+            auto *item = new QTableWidgetItem(QStringLiteral("-"));
+            item->setTextAlignment(Qt::AlignCenter);
+            m_lineStationTable->setItem(stationId - 1, column, item);
+        }
+    }
 
     // 仅展示 Running + Pending；长期历史写日志，避免表格随运行时间无限增长。
-    m_lineQueueTable = new QTableWidget(0, 4, gbLine);
+    m_lineQueueTable = new QTableWidget(0, 5, gbLine);
+    m_lineQueueTable->setObjectName(QStringLiteral("lineFifoQueueTable"));
     m_lineQueueTable->setHorizontalHeaderLabels(
-        {QStringLiteral("任务号"), QStringLiteral("工位"), QStringLiteral("状态"), QStringLiteral("入队时间")});
+        {QStringLiteral("任务号"), QStringLiteral("工位"), QStringLiteral("来源"), QStringLiteral("状态"), QStringLiteral("入队时间")});
     m_lineQueueTable->verticalHeader()->setVisible(false);
     m_lineQueueTable->setEditTriggers(QAbstractItemView::NoEditTriggers);
     m_lineQueueTable->setSelectionMode(QAbstractItemView::NoSelection);
@@ -658,7 +758,19 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
     m_lineQueueTable->setMinimumHeight(180);
     m_lineQueueTable->horizontalHeader()->setStretchLastSection(true);
     m_lineQueueTable->horizontalHeader()->setSectionResizeMode(QHeaderView::ResizeToContents);
-    layout->addWidget(m_lineQueueTable);
+    m_lineStatusTabs->addTab(m_lineStationTable, QStringLiteral("工位状态"));
+    m_lineStatusTabs->addTab(m_lineQueueTable, QStringLiteral("FIFO 队列(0)"));
+    layout->addWidget(m_lineStatusTabs);
+
+    auto *shortageDialogRow = new QHBoxLayout();
+    m_shortageConfigButton = new QPushButton(QStringLiteral("缺料配置与完整逻辑测试..."));
+    m_shortageConfigButton->setObjectName(QStringLiteral("shortageConfigDialogButton"));
+    m_shortageRecoveryButton = new QPushButton(QStringLiteral("异常恢复..."));
+    m_shortageRecoveryButton->setObjectName(QStringLiteral("shortageRecoveryDialogButton"));
+    m_shortageRecoveryButton->setEnabled(false);
+    shortageDialogRow->addWidget(m_shortageConfigButton);
+    shortageDialogRow->addWidget(m_shortageRecoveryButton);
+    layout->addLayout(shortageDialogRow);
 
     addInfoRow(QStringLiteral("最近完成"), m_lineLastDoneLabel);
     addInfoRow(QStringLiteral("最近失败"), m_lineLastFailedLabel);
@@ -670,6 +782,12 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
             m_devMgr->lineManager()->resetError();
         }
     });
+    connect(m_shortageSourceGroup, &QButtonGroup::idClicked,
+            this, &MainWindow::onShortageInputSourceChanged);
+    connect(m_shortageConfigButton, &QPushButton::clicked,
+            this, &MainWindow::onOpenShortageConfigDialog);
+    connect(m_shortageRecoveryButton, &QPushButton::clicked,
+            this, &MainWindow::onOpenShortageRecoveryDialog);
 
     m_lineStateLabel->setText(QStringLiteral("未启动"));
     m_lineCurrentLabel->setText(QStringLiteral("当前无任务"));
@@ -677,6 +795,8 @@ void MainWindow::initLineDispatchPanel(QVBoxLayout *leftPanel)
     m_lineAlarmLabel->setText(QStringLiteral("无"));
     m_lineLastDoneLabel->setText(QStringLiteral("暂无"));
     m_lineLastFailedLabel->setText(QStringLiteral("暂无"));
+    m_shortageSummaryLine1->setText(QStringLiteral("真实摘要：未启动"));
+    m_shortageSummaryLine2->setText(QStringLiteral("活动工位=0，等待数=0，严重锁定=否"));
 
     leftPanel->addWidget(gbLine);
 }
@@ -1410,6 +1530,84 @@ void MainWindow::onApplyConfig()
     m_devMgr->applyConfig();
 }
 
+void MainWindow::onShortageInputSourceChanged(int id)
+{
+    const auto source = static_cast<ShortageInputSource>(id);
+    // DeviceManager::setShortageInputSource：UI 只转发来源选择，Live 启停门禁由协调器复验。
+    if (m_devMgr != nullptr)
+        m_devMgr->setShortageInputSource(source);
+    updateShortageSourceUi();
+}
+
+void MainWindow::onStationShortageClicked()
+{
+    auto *button = qobject_cast<QPushButton *>(sender());
+    if (button == nullptr || m_devMgr == nullptr)
+        return;
+
+    const int stationId = button->property("stationId").toInt();
+    if (!m_shortageLiveRadio || !m_shortageLiveRadio->isChecked()) {
+        // 修改前行为：按钮直接产生模拟缺料；修改后 Mock 来源仍保持该调用路径不变。
+        LineManager *lm = m_devMgr->lineManager();
+        if (lm != nullptr)
+            lm->reportShortage(stationId);
+        return;
+    }
+
+    LiveShortageCoordinator *coordinator = m_devMgr->liveShortageCoordinator();
+    if (coordinator == nullptr)
+        return;
+
+    const ManualBoxConfirmation confirmation =
+        coordinator->manualBoxConfirmation(stationId);
+    if (confirmation.stationId != stationId) {
+        QMessageBox::warning(this,
+                             QStringLiteral("人工补料确认"),
+                             QStringLiteral("无法取得工位%1的真实缺料确认信息，未创建任务。")
+                                 .arg(stationId));
+        return;
+    }
+
+    const QString message = QStringList {
+        QStringLiteral("请确认人工补料一箱："),
+        QStringLiteral("产品：%1").arg(shortageProductText(confirmation.product)),
+        QStringLiteral("模式：%1").arg(shortageModeText(confirmation.mode)),
+        QStringLiteral("工位：%1").arg(confirmation.stationId),
+        QStringLiteral("现场位置：%1").arg(confirmation.sitePosition),
+        QStringLiteral("品号：%1").arg(confirmation.partNumber),
+        QStringLiteral("每箱数量：%1").arg(confirmation.boxQuantity),
+        QStringLiteral("当前库存：%1").arg(confirmation.currentStock),
+        QStringLiteral("最低安全位：%1").arg(confirmation.minimumStock),
+        QStringLiteral("最高安全位：%1").arg(confirmation.maximumStock),
+    }.join(QLatin1Char('\n'));
+    if (QMessageBox::question(this,
+                              QStringLiteral("人工补料确认"),
+                              message)
+        != QMessageBox::Yes) {
+        return;
+    }
+
+    if (confirmation.highStockRisk) {
+        const QString riskMessage =
+            QStringLiteral("工位%1当前库存 %2 已达到或超过最高安全位 %3。\n"
+                           "确认仍要创建一箱人工补料任务吗？")
+                .arg(stationId)
+                .arg(confirmation.currentStock)
+                .arg(confirmation.maximumStock);
+        if (QMessageBox::warning(this,
+                                 QStringLiteral("高位库存风险二次确认"),
+                                 riskMessage,
+                                 QMessageBox::Yes | QMessageBox::No,
+                                 QMessageBox::No)
+            != QMessageBox::Yes) {
+            return;
+        }
+    }
+
+    // 确认后只调用生产协调器人工补料入口；UI 不直接访问 ShortageLedger/Planner。
+    m_devMgr->requestManualShortageBox(stationId, confirmation.highStockRisk);
+}
+
 /// 各设备测试按钮回调：先更新配置，再执行 TCP 连通性测试
 void MainWindow::onTestRobot()
 {
@@ -1684,8 +1882,61 @@ void MainWindow::onConfigApplied(const QString &robotIP, const QString &agvIP)
     m_indAGV->setStatus(true, QString("待连接 %1").arg(agvIP));
 }
 
+void MainWindow::onShortageSnapshotChanged(ShortageUiSnapshot snapshot)
+{
+    m_shortageSnapshot = snapshot;
+    m_hasShortageSnapshot = true;
+    if (m_shortageSummaryLine1)
+        m_shortageSummaryLine1->setText(snapshot.summaryLine1Zh);
+    if (m_shortageSummaryLine2)
+        m_shortageSummaryLine2->setText(snapshot.summaryLine2Zh);
+
+    if (m_shortageMockRadio && m_shortageLiveRadio) {
+        const QSignalBlocker mockBlocker(m_shortageMockRadio);
+        const QSignalBlocker liveBlocker(m_shortageLiveRadio);
+        m_shortageMockRadio->setChecked(snapshot.inputSource == ShortageInputSource::Mock);
+        m_shortageLiveRadio->setChecked(snapshot.inputSource == ShortageInputSource::Live);
+    }
+
+    updateShortageStationTable();
+    updateShortageSourceUi();
+}
+
+void MainWindow::onOpenShortageConfigDialog()
+{
+    // 配置与完整逻辑测试改为宽屏弹窗；不恢复已废弃的旧通信诊断区域。
+    auto *dialog = new ShortageConfigDialog(ShortageConfigStore::sheet3Defaults(),
+                                            [] {
+                                                return ShortageEditConditions {};
+                                            },
+                                            nullptr,
+                                            m_shortageSnapshot,
+                                            this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->show();
+}
+
+void MainWindow::onOpenShortageRecoveryDialog()
+{
+    if (!m_hasShortageSnapshot) {
+        QMessageBox::information(this,
+                                 QStringLiteral("异常恢复"),
+                                 QStringLiteral("尚未取得正式缺料快照，不能打开恢复窗口。"));
+        return;
+    }
+    const int stationId = m_shortageSnapshot.runtime.activeStationId > 0
+        ? m_shortageSnapshot.runtime.activeStationId
+        : 1;
+    auto *dialog = new ShortageRecoveryDialog(m_shortageSnapshot, stationId, this);
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &ShortageRecoveryDialog::maintenanceCorrectionRequested,
+            m_devMgr, &DeviceManager::applyShortageMaintenanceCorrection);
+    dialog->show();
+}
+
 void MainWindow::updateLineSystemState(LineSystemState state, const QString &text)
 {
+    m_lastLineSystemState = state;
     const QString displayText = text.isEmpty() ? fallbackLineStateText(state) : text;
     if (m_lineStateLabel) {
         m_lineStateLabel->setText(displayText);
@@ -1706,8 +1957,11 @@ void MainWindow::updateLineSystemState(LineSystemState state, const QString &tex
         m_lineStopBtn->setEnabled(canStop);
     if (m_lineResetBtn)
         m_lineResetBtn->setEnabled(canReset);
+    const ShortageUiSnapshot &snapshot = m_shortageSnapshot;
+    const bool manualBlockedByLivePlan = m_shortageLiveRadio && m_shortageLiveRadio->isChecked()
+        && m_hasShortageSnapshot && snapshot.runtime.activeStationId != 0;
     for (QPushButton *button : std::as_const(m_stationButtons)) {
-        button->setEnabled(shortageEnabled);
+        button->setEnabled(shortageEnabled && !manualBlockedByLivePlan);
     }
 
     if (state != LineSystemState::Error && m_lineAlarmLabel) {
@@ -1717,6 +1971,7 @@ void MainWindow::updateLineSystemState(LineSystemState state, const QString &tex
         setProperty("lineAlarmLastReason", QString());
     }
 
+    updateShortageSourceUi();
 }
 
 void MainWindow::updateLineQueue(const QList<Task> &tasks)
@@ -1738,6 +1993,11 @@ void MainWindow::updateLineQueue(const QList<Task> &tasks)
         }
         m_lineQueueCountLabel->setText(text);
     }
+    if (m_lineStatusTabs && m_lineQueueTable) {
+        const int queueTabIndex = m_lineStatusTabs->indexOf(m_lineQueueTable);
+        if (queueTabIndex >= 0)
+            m_lineStatusTabs->setTabText(queueTabIndex, QStringLiteral("FIFO 队列(%1)").arg(tasks.size()));
+    }
 
     if (!m_lineQueueTable) {
         return;
@@ -1749,17 +2009,78 @@ void MainWindow::updateLineQueue(const QList<Task> &tasks)
         const Task &task = tasks[row];
         auto *taskIdItem = new QTableWidgetItem(QString::number(task.taskId));
         auto *stationItem = new QTableWidgetItem(QStringLiteral("工位%1").arg(task.stationId));
+        auto *sourceItem = new QTableWidgetItem(taskSourceText(task.source));
         auto *stateItem = new QTableWidgetItem(lineQueueStatusText(task));
         auto *timeItem = new QTableWidgetItem(lineTaskTimeText(task));
         taskIdItem->setTextAlignment(Qt::AlignCenter);
         stationItem->setTextAlignment(Qt::AlignCenter);
+        sourceItem->setTextAlignment(Qt::AlignCenter);
         stateItem->setTextAlignment(Qt::AlignCenter);
         timeItem->setTextAlignment(Qt::AlignCenter);
         m_lineQueueTable->setItem(row, 0, taskIdItem);
         m_lineQueueTable->setItem(row, 1, stationItem);
-        m_lineQueueTable->setItem(row, 2, stateItem);
-        m_lineQueueTable->setItem(row, 3, timeItem);
+        m_lineQueueTable->setItem(row, 2, sourceItem);
+        m_lineQueueTable->setItem(row, 3, stateItem);
+        m_lineQueueTable->setItem(row, 4, timeItem);
     }
+}
+
+void MainWindow::updateShortageStationTable()
+{
+    if (!m_lineStationTable)
+        return;
+
+    for (int stationId = 1; stationId <= kLineStationCount; ++stationId) {
+        const int row = stationId - 1;
+        const ShortageStationRuntime *station =
+            shortageRuntimeStation(m_shortageSnapshot, stationId);
+        const QString stockText = station ? QString::number(station->stock) : QStringLiteral("-");
+        const QString limitText = QStringLiteral("-");
+        const QString statusText = station
+            ? shortageStationStatusText(m_shortageSnapshot, *station)
+            : QStringLiteral("未建账");
+
+        const QList<QString> values {
+            QStringLiteral("工位%1").arg(stationId),
+            stockText,
+            limitText,
+            statusText,
+        };
+        for (int column = 0; column < values.size(); ++column) {
+            QTableWidgetItem *item = m_lineStationTable->item(row, column);
+            if (item == nullptr) {
+                item = new QTableWidgetItem();
+                item->setTextAlignment(Qt::AlignCenter);
+                m_lineStationTable->setItem(row, column, item);
+            }
+            item->setText(values[column]);
+        }
+    }
+}
+
+void MainWindow::updateShortageSourceUi()
+{
+    if (m_shortageStationTitle) {
+        m_shortageStationTitle->setText(m_shortageLiveRadio->isChecked()
+                                            ? QStringLiteral("人工补料")
+                                            : QStringLiteral("模拟缺料"));
+    }
+
+    const bool manualBlockedByLivePlan = m_shortageLiveRadio && m_shortageLiveRadio->isChecked()
+        && m_hasShortageSnapshot && m_shortageSnapshot.runtime.activeStationId != 0;
+    const bool shortageEnabled = (m_lastLineSystemState != LineSystemState::Error);
+    for (QPushButton *button : std::as_const(m_stationButtons)) {
+        button->setEnabled(shortageEnabled && !manualBlockedByLivePlan);
+    }
+
+    // 异常恢复按钮只是 UI 预检：提交后仍由 LiveShortageCoordinator 再次校验整线/Live/FIFO/当前任务。
+    const bool recoveryAllowedByUi = m_hasShortageSnapshot
+        && m_lastLineSystemState == LineSystemState::Idle
+        && m_shortageSnapshot.inputSource == ShortageInputSource::Mock
+        && m_shortageSnapshot.runtime.activeStationId == 0
+        && m_shortageSnapshot.runtime.waitingStationIds.isEmpty();
+    if (m_shortageRecoveryButton)
+        m_shortageRecoveryButton->setEnabled(recoveryAllowedByUi);
 }
 
 void MainWindow::updateLineCurrentTask(const Task &task)
