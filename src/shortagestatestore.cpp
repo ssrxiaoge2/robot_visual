@@ -9,6 +9,9 @@
 #include <QJsonObject>
 #include <QSaveFile>
 #include <QSet>
+#include <QtGlobal>
+
+#include <limits>
 
 namespace {
 
@@ -31,10 +34,12 @@ QString i64(qint64 value)
 
 bool parseU64(const QJsonValue &value, quint64 *out)
 {
+    if (value.isUndefined() || value.isNull())
+        return false;
     bool ok = false;
-    const QString text = value.isString()
-        ? value.toString()
-        : QString::number(qint64(value.toDouble()));
+    const QString text = value.isString() ? value.toString() : QString();
+    if (text.isEmpty())
+        return false;
     const quint64 parsed = text.toULongLong(&ok);
     if (ok)
         *out = parsed;
@@ -43,14 +48,79 @@ bool parseU64(const QJsonValue &value, quint64 *out)
 
 bool parseI64(const QJsonValue &value, qint64 *out)
 {
+    if (value.isUndefined() || value.isNull())
+        return false;
     bool ok = false;
-    const QString text = value.isString()
-        ? value.toString()
-        : QString::number(qint64(value.toDouble()));
+    const QString text = value.isString() ? value.toString() : QString();
+    if (text.isEmpty())
+        return false;
     const qint64 parsed = text.toLongLong(&ok);
     if (ok)
         *out = parsed;
     return ok;
+}
+
+bool requireBool(const QJsonObject &object, const QString &field, bool *out, QString *errorZh)
+{
+    const QJsonValue value = object.value(field);
+    if (!value.isBool()) {
+        *errorZh = QStringLiteral("运行状态字段 %1 缺失或格式非法").arg(field);
+        return false;
+    }
+    *out = value.toBool();
+    return true;
+}
+
+bool requireInt(const QJsonObject &object, const QString &field, int *out, QString *errorZh)
+{
+    const QJsonValue value = object.value(field);
+    if (!value.isDouble()) {
+        *errorZh = QStringLiteral("运行状态字段 %1 缺失或格式非法").arg(field);
+        return false;
+    }
+    const double number = value.toDouble();
+    if (!qIsFinite(number)
+        || number < std::numeric_limits<int>::min()
+        || number > std::numeric_limits<int>::max()
+        || number != int(number)) {
+        *errorZh = QStringLiteral("运行状态字段 %1 缺失或格式非法").arg(field);
+        return false;
+    }
+    *out = int(number);
+    return true;
+}
+
+bool requireString(const QJsonObject &object, const QString &field, QString *out, QString *errorZh)
+{
+    const QJsonValue value = object.value(field);
+    if (!value.isString()) {
+        *errorZh = QStringLiteral("运行状态字段 %1 缺失或格式非法").arg(field);
+        return false;
+    }
+    *out = value.toString();
+    return true;
+}
+
+bool requireObject(const QJsonObject &object, const QString &field, QJsonObject *out, QString *errorZh)
+{
+    const QJsonValue value = object.value(field);
+    if (!value.isObject()) {
+        *errorZh = QStringLiteral("运行状态字段 %1 缺失或格式非法").arg(field);
+        return false;
+    }
+    *out = value.toObject();
+    return true;
+}
+
+bool requireArray(const QJsonObject &object, const QString &field, QJsonArray *out, QString *errorZh)
+{
+    const QJsonValue value = object.value(field);
+    if (!value.isArray()) {
+        *errorZh = QStringLiteral("运行状态字段 %1 缺失或格式非法").arg(field);
+        return false;
+    }
+    *out = value.toArray();
+    return true;
 }
 
 QString productToString(ProductModel product)
@@ -220,16 +290,25 @@ QJsonObject stationToJson(const ShortageStationRuntime &station)
 
 bool stationFromJson(const QJsonObject &object, ShortageStationRuntime *station, QString *errorZh)
 {
-    station->stationId = object.value(QStringLiteral("stationId")).toInt();
+    if (!requireInt(object, QStringLiteral("stationId"), &station->stationId, errorZh))
+        return false;
+    if (station->stationId < 1 || station->stationId > 12) {
+        *errorZh = QStringLiteral("工位编号%1超出1到12范围").arg(station->stationId);
+        return false;
+    }
     if (!parseI64(object.value(QStringLiteral("stock")), &station->stock)) {
         *errorZh = QStringLiteral("工位%1库存格式非法").arg(station->stationId);
         return false;
     }
-    station->firstLowAtUtc = dateFromString(object.value(QStringLiteral("firstLowAtUtc")).toString());
-    station->consecutivePreUnloadFailures =
-        object.value(QStringLiteral("consecutivePreUnloadFailures")).toInt();
-    station->automaticPaused = object.value(QStringLiteral("automaticPaused")).toBool();
-    station->pauseReasonZh = object.value(QStringLiteral("pauseReasonZh")).toString();
+    QString firstLowAtUtc;
+    if (!requireString(object, QStringLiteral("firstLowAtUtc"), &firstLowAtUtc, errorZh)
+        || !requireInt(object, QStringLiteral("consecutivePreUnloadFailures"),
+                       &station->consecutivePreUnloadFailures, errorZh)
+        || !requireBool(object, QStringLiteral("automaticPaused"), &station->automaticPaused, errorZh)
+        || !requireString(object, QStringLiteral("pauseReasonZh"), &station->pauseReasonZh, errorZh)) {
+        return false;
+    }
+    station->firstLowAtUtc = dateFromString(firstLowAtUtc);
     return true;
 }
 
@@ -246,9 +325,12 @@ QJsonObject actualQtyToJson(const ActualQtyRuntime &actualQty)
 
 bool actualQtyFromJson(const QJsonObject &object, ActualQtyRuntime *actualQty, QString *errorZh)
 {
-    actualQty->hasBaseline = object.value(QStringLiteral("hasBaseline")).toBool();
-    actualQty->hasResetCandidate = object.value(QStringLiteral("hasResetCandidate")).toBool();
-    actualQty->interrupted = object.value(QStringLiteral("interrupted")).toBool();
+    if (!requireBool(object, QStringLiteral("hasBaseline"), &actualQty->hasBaseline, errorZh)
+        || !requireBool(object, QStringLiteral("hasResetCandidate"),
+                        &actualQty->hasResetCandidate, errorZh)
+        || !requireBool(object, QStringLiteral("interrupted"), &actualQty->interrupted, errorZh)) {
+        return false;
+    }
     if (!parseI64(object.value(QStringLiteral("baseline")), &actualQty->baseline)
         || !parseI64(object.value(QStringLiteral("resetCandidate")), &actualQty->resetCandidate)) {
         *errorZh = QStringLiteral("actualQty 64位字段格式非法");
@@ -278,15 +360,20 @@ bool orderFromJson(const QJsonObject &object, ReplenishmentOrder *order, QString
         *errorZh = QStringLiteral("补料单64位编号格式非法");
         return false;
     }
-    order->stationId = object.value(QStringLiteral("stationId")).toInt();
+    if (!requireInt(object, QStringLiteral("stationId"), &order->stationId, errorZh))
+        return false;
     if (!originFromString(object.value(QStringLiteral("origin")).toString(), &order->origin)
         || !orderStateFromString(object.value(QStringLiteral("state")).toString(), &order->state)) {
         *errorZh = QStringLiteral("补料单枚举字段非法");
         return false;
     }
-    order->unloadAccounted = object.value(QStringLiteral("unloadAccounted")).toBool();
-    order->createdAtUtc = dateFromString(object.value(QStringLiteral("createdAtUtc")).toString());
-    order->lastReasonZh = object.value(QStringLiteral("lastReasonZh")).toString();
+    QString createdAtUtc;
+    if (!requireBool(object, QStringLiteral("unloadAccounted"), &order->unloadAccounted, errorZh)
+        || !requireString(object, QStringLiteral("createdAtUtc"), &createdAtUtc, errorZh)
+        || !requireString(object, QStringLiteral("lastReasonZh"), &order->lastReasonZh, errorZh)) {
+        return false;
+    }
+    order->createdAtUtc = dateFromString(createdAtUtc);
     return true;
 }
 
@@ -333,7 +420,8 @@ QJsonObject stateToJson(const ShortageRuntimeState &state)
 bool stateFromJson(const QJsonObject &object, ShortageRuntimeState *state, QString *errorZh)
 {
     ShortageRuntimeState parsed;
-    parsed.formatVersion = object.value(QStringLiteral("formatVersion")).toInt();
+    if (!requireInt(object, QStringLiteral("formatVersion"), &parsed.formatVersion, errorZh))
+        return false;
     if (parsed.formatVersion != kShortageStateFormatVersion) {
         *errorZh = QStringLiteral("状态格式版本%1不兼容，当前仅支持%2")
                        .arg(parsed.formatVersion)
@@ -353,44 +441,96 @@ bool stateFromJson(const QJsonObject &object, ShortageRuntimeState *state, QStri
         return false;
     }
 
-    parsed.initialized = object.value(QStringLiteral("initialized")).toBool();
-    parsed.operatorConfirmedRestore =
-        object.value(QStringLiteral("operatorConfirmedRestore")).toBool();
-    parsed.hasStableContext = object.value(QStringLiteral("hasStableContext")).toBool();
-    parsed.hasPendingContext = object.value(QStringLiteral("hasPendingContext")).toBool();
-    parsed.hasPendingActualQty = object.value(QStringLiteral("hasPendingActualQty")).toBool();
-    parsed.activeStationId = object.value(QStringLiteral("activeStationId")).toInt();
-    parsed.criticalLock = object.value(QStringLiteral("criticalLock")).toBool();
-    parsed.criticalReasonZh = object.value(QStringLiteral("criticalReasonZh")).toString();
-    parsed.lastSavedAtUtc = dateFromString(object.value(QStringLiteral("lastSavedAtUtc")).toString());
+    if (!requireBool(object, QStringLiteral("initialized"), &parsed.initialized, errorZh)
+        || !requireBool(object, QStringLiteral("operatorConfirmedRestore"),
+                        &parsed.operatorConfirmedRestore, errorZh)
+        || !requireBool(object, QStringLiteral("hasStableContext"), &parsed.hasStableContext, errorZh)
+        || !requireBool(object, QStringLiteral("hasPendingContext"), &parsed.hasPendingContext, errorZh)
+        || !requireBool(object, QStringLiteral("hasPendingActualQty"),
+                        &parsed.hasPendingActualQty, errorZh)
+        || !requireInt(object, QStringLiteral("activeStationId"), &parsed.activeStationId, errorZh)
+        || !requireBool(object, QStringLiteral("criticalLock"), &parsed.criticalLock, errorZh)
+        || !requireString(object, QStringLiteral("criticalReasonZh"),
+                          &parsed.criticalReasonZh, errorZh)) {
+        return false;
+    }
+    QString lastSavedAtUtc;
+    if (!requireString(object, QStringLiteral("lastSavedAtUtc"), &lastSavedAtUtc, errorZh))
+        return false;
+    parsed.lastSavedAtUtc = dateFromString(lastSavedAtUtc);
 
-    if (!productFromString(object.value(QStringLiteral("product")).toString(), &parsed.product)
-        || !productFromString(object.value(QStringLiteral("pendingProduct")).toString(),
-                              &parsed.pendingProduct)
-        || !modeFromString(object.value(QStringLiteral("mode")).toString(), &parsed.mode)
-        || !modeFromString(object.value(QStringLiteral("pendingMode")).toString(),
-                           &parsed.pendingMode)
-        || !actualQtyFromJson(object.value(QStringLiteral("actualQty")).toObject(),
-                              &parsed.actualQty, errorZh)) {
+    QString product;
+    QString pendingProduct;
+    QString mode;
+    QString pendingMode;
+    QJsonObject actualQty;
+    if (!requireString(object, QStringLiteral("product"), &product, errorZh)
+        || !requireString(object, QStringLiteral("pendingProduct"), &pendingProduct, errorZh)
+        || !requireString(object, QStringLiteral("mode"), &mode, errorZh)
+        || !requireString(object, QStringLiteral("pendingMode"), &pendingMode, errorZh)
+        || !requireObject(object, QStringLiteral("actualQty"), &actualQty, errorZh)) {
+        return false;
+    }
+
+    if (!productFromString(product, &parsed.product)
+        || !productFromString(pendingProduct, &parsed.pendingProduct)
+        || !modeFromString(mode, &parsed.mode)
+        || !modeFromString(pendingMode, &parsed.pendingMode)
+        || !actualQtyFromJson(actualQty, &parsed.actualQty, errorZh)) {
         if (errorZh->isEmpty())
             *errorZh = QStringLiteral("运行状态枚举字段非法");
         return false;
     }
 
-    const QJsonArray stations = object.value(QStringLiteral("stations")).toArray();
+    QJsonArray stations;
+    if (!requireArray(object, QStringLiteral("stations"), &stations, errorZh))
+        return false;
+    if (stations.size() != 12) {
+        *errorZh = QStringLiteral("工位状态数量必须恰好为12，当前为%1").arg(stations.size());
+        return false;
+    }
+    QSet<int> stationIds;
     for (const QJsonValue &value : stations) {
+        if (!value.isObject()) {
+            *errorZh = QStringLiteral("工位状态格式非法");
+            return false;
+        }
         ShortageStationRuntime station;
         if (!stationFromJson(value.toObject(), &station, errorZh))
             return false;
+        if (stationIds.contains(station.stationId)) {
+            *errorZh = QStringLiteral("工位%1状态重复").arg(station.stationId);
+            return false;
+        }
+        stationIds.insert(station.stationId);
         parsed.stations.append(station);
     }
+    for (int stationId = 1; stationId <= 12; ++stationId) {
+        if (!stationIds.contains(stationId)) {
+            *errorZh = QStringLiteral("工位%1状态缺失").arg(stationId);
+            return false;
+        }
+    }
 
-    const QJsonArray waitingStationIds = object.value(QStringLiteral("waitingStationIds")).toArray();
-    for (const QJsonValue &value : waitingStationIds)
+    QJsonArray waitingStationIds;
+    if (!requireArray(object, QStringLiteral("waitingStationIds"), &waitingStationIds, errorZh))
+        return false;
+    for (const QJsonValue &value : waitingStationIds) {
+        if (!value.isDouble()) {
+            *errorZh = QStringLiteral("等待工位字段格式非法");
+            return false;
+        }
         parsed.waitingStationIds.append(value.toInt());
+    }
 
-    const QJsonArray orders = object.value(QStringLiteral("orders")).toArray();
+    QJsonArray orders;
+    if (!requireArray(object, QStringLiteral("orders"), &orders, errorZh))
+        return false;
     for (const QJsonValue &value : orders) {
+        if (!value.isObject()) {
+            *errorZh = QStringLiteral("补料单字段格式非法");
+            return false;
+        }
         ReplenishmentOrder order;
         if (!orderFromJson(value.toObject(), &order, errorZh))
             return false;
@@ -486,8 +626,22 @@ ShortageOperationResult writeSnapshot(const QString &mainPath,
     }
 
     if (QFile::exists(mainPath)) {
-        QFile::remove(backupPath);
-        if (!QFile::copy(mainPath, backupPath)) {
+        QFile mainFile(mainPath);
+        if (!mainFile.open(QIODevice::ReadOnly)) {
+            return {false, QStringLiteral("写入主快照前读取现有快照 %1 失败：%2")
+                               .arg(mainPath, mainFile.errorString())};
+        }
+        const QByteArray backupBytes = mainFile.readAll();
+        QSaveFile backupFile(backupPath);
+        if (!backupFile.open(QIODevice::WriteOnly | QIODevice::Truncate)) {
+            return {false, QStringLiteral("写入主快照前打开备份 %1 失败：%2")
+                               .arg(backupPath, backupFile.errorString())};
+        }
+        if (backupFile.write(backupBytes) != backupBytes.size()) {
+            return {false, QStringLiteral("写入主快照前写入备份 %1 失败：%2")
+                               .arg(backupPath, backupFile.errorString())};
+        }
+        if (!backupFile.commit()) {
             return {false, QStringLiteral("写入主快照前创建备份 %1 失败").arg(backupPath)};
         }
     }
@@ -680,7 +834,10 @@ ShortageOperationResult ShortageStateStore::saveCritical(const ShortageRuntimeSt
         return journal;
     if (event.sequence == 0 || event.eventType.isEmpty())
         return journal;
-    return writeSnapshot(paths.mainPath, paths.backupPath, state);
+    ShortageRuntimeState snapshot = state;
+    if (!snapshot.lastSavedAtUtc.isValid())
+        snapshot.lastSavedAtUtc = event.occurredAtUtc.toUTC();
+    return writeSnapshot(paths.mainPath, paths.backupPath, snapshot);
 }
 
 ShortageOperationResult ShortageStateStore::savePeriodic(const ShortageRuntimeState &state,
@@ -697,7 +854,9 @@ ShortageOperationResult ShortageStateStore::savePeriodic(const ShortageRuntimeSt
     if (!state.lastSavedAtUtc.isValid()
         || state.lastSavedAtUtc.secsTo(nowUtc.toUTC()) >= 60
         || !QFile::exists(paths.mainPath)) {
-        return writeSnapshot(paths.mainPath, paths.backupPath, state);
+        ShortageRuntimeState snapshot = state;
+        snapshot.lastSavedAtUtc = nowUtc.toUTC();
+        return writeSnapshot(paths.mainPath, paths.backupPath, snapshot);
     }
     return {true, QStringLiteral("状态流水已写入，距离上次快照不足60秒")};
 }

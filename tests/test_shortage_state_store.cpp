@@ -4,6 +4,7 @@
 #include <QDir>
 #include <QFile>
 #include <QJsonDocument>
+#include <QJsonArray>
 #include <QJsonObject>
 #include <QTemporaryDir>
 #include <QTest>
@@ -105,6 +106,19 @@ void refreshChecksum(QJsonObject *root)
     root->insert(QStringLiteral("checksum"), QString::fromLatin1(checksum));
 }
 
+QJsonObject snapshotRoot(const QString &path)
+{
+    return QJsonDocument::fromJson(readAll(path)).object();
+}
+
+void overwriteSnapshotState(const QString &path, const QJsonObject &stateObject)
+{
+    QJsonObject root = snapshotRoot(path);
+    root[QStringLiteral("state")] = stateObject;
+    refreshChecksum(&root);
+    overwrite(path, QJsonDocument(root).toJson(QJsonDocument::Compact));
+}
+
 QDateTime utcFromSeconds(qint64 seconds)
 {
     return QDateTime::fromSecsSinceEpoch(seconds, QTimeZone::UTC);
@@ -125,6 +139,7 @@ private slots:
     void journalReplayRestoresPostSnapshotState();
     void journalGapOrDuplicateRejectsBareSnapshot();
     void checksumAndVersionErrorsAreRejected();
+    void semanticSnapshotErrorsAreRejected();
     void allCorruptSourcesLockAutomaticMode();
     void testNamespaceNeverTouchesProductionFiles();
     void persistenceFailureAfterUnloadKeepsMemoryFact();
@@ -174,6 +189,10 @@ void ShortageStateStoreTest::periodicSnapshotIsLimitedToSixtySeconds()
     const QByteArray firstSnapshot = readAll(productionMain(dir));
     QVERIFY(!firstSnapshot.isEmpty());
 
+    const ShortageStateLoadResult firstLoaded = store.load();
+    QVERIFY2(firstLoaded.ok, qPrintable(firstLoaded.messageZh));
+    QCOMPARE(firstLoaded.state.lastSavedAtUtc, first.lastSavedAtUtc);
+
     ShortageRuntimeState second = first;
     second.nextAuditSequence = 3;
     second.stations[0].stock = 777;
@@ -183,6 +202,16 @@ void ShortageStateStoreTest::periodicSnapshotIsLimitedToSixtySeconds()
 
     QCOMPARE(readAll(productionMain(dir)), firstSnapshot);
     QCOMPARE(nonEmptyLineCount(productionJournal(dir)), 2);
+
+    ShortageRuntimeState third = second;
+    third.nextAuditSequence = 4;
+    third.lastSavedAtUtc = first.lastSavedAtUtc;
+    const QDateTime thirdSaveTime = first.lastSavedAtUtc.addSecs(60);
+    QVERIFY(store.savePeriodic(third, auditEvent(3), thirdSaveTime).ok);
+
+    const ShortageStateLoadResult loaded = store.load();
+    QVERIFY2(loaded.ok, qPrintable(loaded.messageZh));
+    QCOMPARE(loaded.state.lastSavedAtUtc, thirdSaveTime);
 }
 
 void ShortageStateStoreTest::criticalEventsForceImmediateSnapshot()
@@ -312,6 +341,69 @@ void ShortageStateStoreTest::checksumAndVersionErrorsAreRejected()
     ShortageStateLoadResult badVersion = store.load();
     QVERIFY(!badVersion.ok);
     QVERIFY(badVersion.messageZh.contains(QStringLiteral("版本")));
+}
+
+void ShortageStateStoreTest::semanticSnapshotErrorsAreRejected()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+    ShortageRuntimeState state = sampleState(1);
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+
+    QJsonObject stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    QJsonArray stations = stateObject.value(QStringLiteral("stations")).toArray();
+    stations.removeLast();
+    stateObject[QStringLiteral("stations")] = stations;
+    overwriteSnapshotState(productionMain(dir), stateObject);
+    ShortageStateLoadResult missingStation = store.load();
+    QVERIFY(!missingStation.ok);
+    QVERIFY(missingStation.requiresMaintenance);
+    QVERIFY(missingStation.messageZh.contains(QStringLiteral("工位")));
+
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    stations = stateObject.value(QStringLiteral("stations")).toArray();
+    QJsonObject duplicateStation = stations.at(1).toObject();
+    duplicateStation[QStringLiteral("stationId")] = 1;
+    stations[1] = duplicateStation;
+    stateObject[QStringLiteral("stations")] = stations;
+    overwriteSnapshotState(productionMain(dir), stateObject);
+    ShortageStateLoadResult duplicateStationLoad = store.load();
+    QVERIFY(!duplicateStationLoad.ok);
+    QVERIFY(duplicateStationLoad.requiresMaintenance);
+    QVERIFY(duplicateStationLoad.messageZh.contains(QStringLiteral("工位")));
+
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    stations = stateObject.value(QStringLiteral("stations")).toArray();
+    QJsonObject outOfRangeStation = stations.at(11).toObject();
+    outOfRangeStation[QStringLiteral("stationId")] = 13;
+    stations[11] = outOfRangeStation;
+    stateObject[QStringLiteral("stations")] = stations;
+    overwriteSnapshotState(productionMain(dir), stateObject);
+    ShortageStateLoadResult outOfRangeStationLoad = store.load();
+    QVERIFY(!outOfRangeStationLoad.ok);
+    QVERIFY(outOfRangeStationLoad.requiresMaintenance);
+    QVERIFY(outOfRangeStationLoad.messageZh.contains(QStringLiteral("工位")));
+
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    stateObject.remove(QStringLiteral("configurationRevision"));
+    overwriteSnapshotState(productionMain(dir), stateObject);
+    ShortageStateLoadResult missingScalar = store.load();
+    QVERIFY(!missingScalar.ok);
+    QVERIFY(missingScalar.requiresMaintenance);
+    QVERIFY(missingScalar.messageZh.contains(QStringLiteral("字段")));
+
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    stateObject[QStringLiteral("activeStationId")] = QStringLiteral("3");
+    overwriteSnapshotState(productionMain(dir), stateObject);
+    ShortageStateLoadResult malformedScalar = store.load();
+    QVERIFY(!malformedScalar.ok);
+    QVERIFY(malformedScalar.requiresMaintenance);
+    QVERIFY(malformedScalar.messageZh.contains(QStringLiteral("字段")));
 }
 
 void ShortageStateStoreTest::allCorruptSourcesLockAutomaticMode()
