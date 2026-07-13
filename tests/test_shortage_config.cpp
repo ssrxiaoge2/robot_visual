@@ -109,6 +109,8 @@ private slots:
     void saveRejectsRevisionOverflowFromCurrentMain();        // CF-05：主文件 revision 已满时拒绝覆盖。
     void loadRejectsUnknownProductText();                    // CF-05：未知产品文本不得默认为 88。
     void loadRejectsMalformedNumericStrings();               // CF-05：畸形数字字符串不得退回 double。
+    void loadRejectsMalformedRevisionString();               // CF-05：畸形 revision 字符串不得退回 double。
+    void loadRejectsOverflowRevisionString();                 // CF-05：溢出 revision 字符串不得退回 double。
     void busyGuardListsEveryBlockingCondition();       // CF-06：五类忙碌门禁。
     void allNineProductModeCombinationsResolveUsage(); // CH-05：3×3 用量选择。
 };
@@ -496,6 +498,70 @@ void ShortageConfigTest::loadRejectsMalformedNumericStrings()
     QVERIFY2(containsAll(loadResult.messageZh, {
                  QStringLiteral("boxQuantity"),
                  QStringLiteral("123abc"),
+             }),
+             qPrintable(loadResult.messageZh));
+}
+
+void ShortageConfigTest::loadRejectsMalformedRevisionString()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString configPath = dir.filePath(QStringLiteral("bad-revision.json"));
+
+    ShortageConfiguration configuration = ShortageConfigStore::sheet3Defaults();
+    const ShortageOperationResult saveResult =
+        ShortageConfigStore::exportCopy(configPath, configuration);
+    QVERIFY2(saveResult.ok, qPrintable(saveResult.messageZh));
+
+    QFile file(configPath);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+    file.close();
+    QJsonObject root = document.object();
+    root[QStringLiteral("revision")] = QStringLiteral("123abc");
+    document.setObject(root);
+    QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QVERIFY(file.write(document.toJson(QJsonDocument::Indented)) > 0);
+    file.close();
+
+    ShortageConfiguration loaded = ShortageConfigStore::sheet3Defaults();
+    const ShortageOperationResult loadResult = ShortageConfigStore::load(configPath, &loaded);
+    QVERIFY(!loadResult.ok);
+    QVERIFY2(containsAll(loadResult.messageZh, {
+                 QStringLiteral("revision"),
+                 QStringLiteral("123abc"),
+             }),
+             qPrintable(loadResult.messageZh));
+}
+
+void ShortageConfigTest::loadRejectsOverflowRevisionString()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString configPath = dir.filePath(QStringLiteral("overflow-revision.json"));
+
+    ShortageConfiguration configuration = ShortageConfigStore::sheet3Defaults();
+    const ShortageOperationResult saveResult =
+        ShortageConfigStore::exportCopy(configPath, configuration);
+    QVERIFY2(saveResult.ok, qPrintable(saveResult.messageZh));
+
+    QFile file(configPath);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+    file.close();
+    QJsonObject root = document.object();
+    root[QStringLiteral("revision")] = QStringLiteral("18446744073709551616");
+    document.setObject(root);
+    QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QVERIFY(file.write(document.toJson(QJsonDocument::Indented)) > 0);
+    file.close();
+
+    ShortageConfiguration loaded = ShortageConfigStore::sheet3Defaults();
+    const ShortageOperationResult loadResult = ShortageConfigStore::load(configPath, &loaded);
+    QVERIFY(!loadResult.ok);
+    QVERIFY2(containsAll(loadResult.messageZh, {
+                 QStringLiteral("revision"),
+                 QStringLiteral("18446744073709551616"),
              }),
              qPrintable(loadResult.messageZh));
 }

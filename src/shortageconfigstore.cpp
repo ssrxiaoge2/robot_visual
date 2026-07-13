@@ -11,6 +11,7 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <cmath>
 #include <limits>
 
 namespace {
@@ -135,6 +136,50 @@ bool qint64FromJsonValue(const QJsonObject &object,
     return true;
 }
 
+/// 从根对象恢复 revision；字符串必须完整解析为 quint64，旧 number 仅兼容非负整数。
+bool revisionFromJsonValue(const QJsonObject &object,
+                           quint64 *parsedRevision,
+                           QString *errorZh)
+{
+    const QJsonValue value = object.value(QStringLiteral("revision"));
+    if (value.isString()) {
+        bool ok = false;
+        const QString text = value.toString();
+        const quint64 parsed = text.toULongLong(&ok);
+        if (!ok) {
+            *errorZh = QStringLiteral("字段 revision 值%1：修订号字符串格式非法或超出 quint64 范围，拒绝退回 double")
+                           .arg(text);
+            return false;
+        }
+        *parsedRevision = parsed;
+        return true;
+    }
+
+    if (value.isDouble()) {
+        const double number = value.toDouble();
+        constexpr double kFirstUnrepresentableQuint64 =
+            18446744073709551616.0; // 2^64，quint64 最大值的下一位。
+        if (!std::isfinite(number)
+            || number < 0.0
+            || number >= kFirstUnrepresentableQuint64
+            || std::trunc(number) != number) {
+            *errorZh = QStringLiteral("字段 revision 值%1：修订号必须是非负整数且不能超出 quint64 范围")
+                           .arg(QString::number(number, 'g', 17));
+            return false;
+        }
+        *parsedRevision = quint64(number);
+        return true;
+    }
+
+    if (value.isUndefined() || value.isNull()) {
+        *parsedRevision = 1;
+        return true;
+    }
+
+    *errorZh = QStringLiteral("字段 revision：修订号必须是字符串或数字");
+    return false;
+}
+
 /// JSON 单行恢复为领域对象；未知产品会直接报错，避免静默落到 88。
 bool stationFromJson(const QJsonObject &object,
                      int row,
@@ -219,10 +264,8 @@ bool configurationFromJson(const QByteArray &bytes,
 
     const QJsonObject root = document.object();
     ShortageConfiguration parsed;
-    bool revisionOk = false;
-    parsed.revision = root.value(QStringLiteral("revision")).toString().toULongLong(&revisionOk);
-    if (!revisionOk)
-        parsed.revision = quint64(root.value(QStringLiteral("revision")).toDouble(1));
+    if (!revisionFromJsonValue(root, &parsed.revision, errorZh))
+        return false;
 
     const QJsonObject parameters = root.value(QStringLiteral("parameters")).toObject();
     parsed.parameters.liveMesDayEndpoint =
