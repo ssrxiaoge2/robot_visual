@@ -195,6 +195,7 @@ private slots:
     void criticalLockStopsNewAutomaticOnly();
     void everyErrorContainsStructuredChineseDetails();
     void startupInstallsRestoredStateBeforeUserConfirm();
+    void startupRestoreFailureBlocksLiveAndDispatch();
     void deviceManagerUsesOnlyTheSingleLiveScheduler();
 };
 
@@ -401,10 +402,14 @@ void LiveShortageCoordinatorTest::criticalLockStopsNewAutomaticOnly()
     harness.coordinator.setInputSource(ShortageInputSource::Live);
 
     applySample(&harness, 3, 1100);
+    QCOMPARE(harness.gateway.appendCalls, 0);
+
     harness.coordinator.requestManualBox(3, true);
 
-    QCOMPARE(harness.gateway.appendCalls, 0);
-    QVERIFY(rejected.size() >= 1);
+    QCOMPARE(harness.gateway.appendCalls, 1);
+    QCOMPARE(harness.gateway.sources.first(), TaskSource::LiveManual);
+    QVERIFY(harness.gateway.orderNos.first() != 0);
+    QCOMPARE(rejected.size(), 0);
 }
 
 void LiveShortageCoordinatorTest::everyErrorContainsStructuredChineseDetails()
@@ -446,6 +451,29 @@ void LiveShortageCoordinatorTest::startupInstallsRestoredStateBeforeUserConfirm(
     QCOMPARE(gateway.appendCalls, 0);
 }
 
+void LiveShortageCoordinatorTest::startupRestoreFailureBlocksLiveAndDispatch()
+{
+    QTemporaryDir dir;
+    ShortageConfiguration configuration = testConfiguration();
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+    ShortageEngine engine(configuration, &store);
+    ShortageStateLoadResult failed;
+    failed.ok = false;
+    failed.requiresMaintenance = true;
+    failed.messageZh = QStringLiteral("三份状态均损坏");
+    QVERIFY(!engine.installRestoredState(failed, utc(1)).ok);
+    FakeGateway gateway;
+    LiveShortageCoordinator coordinator(&engine, nullptr, &gateway);
+    QSignalSpy rejected(&coordinator, &LiveShortageCoordinator::operationRejected);
+
+    coordinator.setInputSource(ShortageInputSource::Live);
+    coordinator.onLineStateChanged(LineSystemState::Running, QStringLiteral("运行"));
+
+    QVERIFY(!coordinator.liveInputActive());
+    QCOMPARE(gateway.appendCalls, 0);
+    QVERIFY(!rejected.isEmpty());
+}
+
 void LiveShortageCoordinatorTest::deviceManagerUsesOnlyTheSingleLiveScheduler()
 {
     const QString header = readSourceFile(QStringLiteral("src/devicemanager.h"));
@@ -457,6 +485,14 @@ void LiveShortageCoordinatorTest::deviceManagerUsesOnlyTheSingleLiveScheduler()
     QVERIFY(source.contains(QStringLiteral("new CustomSysScheduler(this)")));
     QCOMPARE(countOccurrences(source, QStringLiteral("new CustomSysScheduler")), 1);
     QVERIFY(source.contains(QStringLiteral("new LiveShortageCoordinator")));
+    QVERIFY(header.contains(QStringLiteral("LiveShortageCoordinator *liveShortageCoordinator() const")));
+    QVERIFY(header.contains(QStringLiteral("void setShortageInputSource(ShortageInputSource source)")));
+    QVERIFY(header.contains(QStringLiteral("void confirmShortageRecoveredState(bool accepted)")));
+    QVERIFY(header.contains(QStringLiteral("void requestManualShortageBox(int stationId, bool highStockRiskConfirmed)")));
+    QVERIFY(header.contains(QStringLiteral("void applyShortageMaintenanceCorrection(ShortageMaintenanceCorrection correction)")));
+    QVERIFY(header.contains(QStringLiteral("void shortageSnapshotChanged(ShortageUiSnapshot snapshot)")));
+    QVERIFY(source.contains(QStringLiteral("&LiveShortageCoordinator::snapshotChanged")));
+    QVERIFY(source.contains(QStringLiteral("&DeviceManager::shortageSnapshotChanged")));
 }
 
 QTEST_MAIN(LiveShortageCoordinatorTest)

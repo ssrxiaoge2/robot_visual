@@ -14,6 +14,7 @@
 #include "lineconfig.h"
 #include "linemanager.h"
 #include "nscanscheduler.h"
+#include "shortagetypes.h"
 
 class AgvController;
 class VisionHttpClient;
@@ -68,6 +69,8 @@ public:
     PalletScheduler  *palletScheduler() const { return m_palletScheduler; }
     /// 真实缺料 MES/PLC 协议对象由 DeviceManager 唯一持有；Task 10 再接入采样协调器。
     CustomSysScheduler *liveShortageScheduler() const { return m_liveShortageScheduler; }
+    /// 生产缺料协调器由 DeviceManager 唯一持有；UI 可读取只读确认摘要，不取得所有权。
+    LiveShortageCoordinator *liveShortageCoordinator() const { return m_liveShortageCoordinator; }
     bool              lightIsOn()        const { return m_lightOn;      }
     bool              nscanTestRunning() const { return m_nscanTestRunning; }
     const Config     &config()           const { return m_cfg;          }
@@ -92,6 +95,14 @@ public slots:
     void cancelAgvNav();
     void pauseAgvNav();
     void resumeAgvNav();
+    /// UI 切换正式缺料输入源；DeviceManager 只转发到唯一生产协调器，不重复接线。
+    void setShortageInputSource(ShortageInputSource source);
+    /// UI 确认启动恢复摘要；accepted=false 时生产协调器继续保持停止门禁。
+    void confirmShortageRecoveredState(bool accepted);
+    /// UI 人工补一箱入口；仍走生产协调器账本、审计和 FIFO 队尾追加路径。
+    void requestManualShortageBox(int stationId, bool highStockRiskConfirmed);
+    /// UI 维护修正入口；生产协调器负责再次校验并调用 Engine 维护事务。
+    void applyShortageMaintenanceCorrection(ShortageMaintenanceCorrection correction);
 
 signals:
     void robotStatusChanged(bool ok, const QString &statusText);
@@ -111,6 +122,8 @@ signals:
     void agvModbusError(const QString &msg);
     void handEyeMatrixApplied();
     void logMessage(const QString &msg);
+    /// 生产缺料快照转发信号；UI 只观察 DeviceManager 暴露的唯一协调器状态。
+    void shortageSnapshotChanged(ShortageUiSnapshot snapshot);
 
 private:
     bool tcpPing(const QString &ip, int port, int timeoutMs = 2000);

@@ -314,6 +314,8 @@ DeviceManager::DeviceManager(QObject *parent)
             this, [this](const QString &reason) {
         emit logMessage(QStringLiteral("[缺料严重报警] %1").arg(reason));
     });
+    connect(m_liveShortageCoordinator, &LiveShortageCoordinator::snapshotChanged,
+            this, &DeviceManager::shortageSnapshotChanged);
     connect(m_shortageTestController, &ShortageTestController::eventLogged,
             this, [this](const QString &message) {
         emit logMessage(QStringLiteral("[缺料测试] %1").arg(message));
@@ -616,6 +618,31 @@ void DeviceManager::resumeAgvNav()
 {
     m_agvCtrl->resumeNavigation();
     emit logMessage(QStringLiteral("[AGV] 已发送继续导航"));
+}
+
+void DeviceManager::setShortageInputSource(ShortageInputSource source)
+{
+    if (m_liveShortageCoordinator != nullptr)
+        m_liveShortageCoordinator->setInputSource(source);
+}
+
+void DeviceManager::confirmShortageRecoveredState(bool accepted)
+{
+    if (m_liveShortageCoordinator != nullptr)
+        m_liveShortageCoordinator->confirmRecoveredState(accepted);
+}
+
+void DeviceManager::requestManualShortageBox(int stationId, bool highStockRiskConfirmed)
+{
+    if (m_liveShortageCoordinator != nullptr)
+        m_liveShortageCoordinator->requestManualBox(stationId, highStockRiskConfirmed);
+}
+
+void DeviceManager::applyShortageMaintenanceCorrection(
+    ShortageMaintenanceCorrection correction)
+{
+    if (m_liveShortageCoordinator != nullptr)
+        m_liveShortageCoordinator->applyMaintenanceCorrection(correction);
 }
 
 #include "devicemanager.moc"

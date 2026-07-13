@@ -515,8 +515,10 @@ ShortageEngineResult ShortageEngine::requestManualBox(int stationId,
                                                       bool highStockRiskConfirmed,
                                                       const QDateTime &nowUtc)
 {
-    if (m_state.criticalLock)
-        return engineFail(QStringLiteral("人工补料失败：当前严重锁定"), true);
+    if (m_restoreLocked)
+        return engineFail(QStringLiteral("人工补料失败：启动恢复处于维护锁定"), true);
+    if (!m_state.initialized || !m_state.operatorConfirmedRestore)
+        return engineFail(QStringLiteral("人工补料失败：账本尚未恢复确认"));
     ShortageRuntimeState work = m_state;
     const PlannerApplyResult planner =
         m_planner.requestManualBox(&work, stationId, highStockRiskConfirmed, nowUtc);

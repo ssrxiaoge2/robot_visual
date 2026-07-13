@@ -50,6 +50,8 @@ public:
     /// 只读接口供 UI 确认和状态刷新；调用方不得 const_cast 修改。
     const ShortageConfiguration &configuration() const;
     const ShortageRuntimeState &state() const;
+    /// true 表示启动恢复失败或需要维护，生产 Live 采样和派单入口必须保持关闭。
+    bool restoreLocked() const { return m_restoreLocked; }
 
 private:
     ShortageConfiguration m_configuration; ///< Engine 使用的配置修订副本。

@@ -23,3 +23,16 @@
 
 - 工作区存在任务前已有的未提交 docs 和 `tests/test_station_pickup_config.cpp` 改动；本任务未暂存这些文件。
 - 本任务没有创建 brief 之外的新文件；为解决 Qt MOC 声明顺序，修改了既有 metatype 声明位置。
+
+Review 修复追加：
+
+- 修复 ER-04：`criticalLock` 现在只阻止新的自动派单；人工补料不再被 `ShortageEngine::requestManualBox()` 拦截，`ReplenishmentPlanner::nextDispatchRequest()` 在严重锁定时只跳过自动单并允许 `Manual` 单派发，`LiveShortageCoordinator::pumpDispatch()` 改由 Planner 区分来源。这是跨 Task 10/Engine/Planner 的正确性修复。
+- 补强 PS-15：新增 `ShortageEngine::restoreLocked()` 只读门禁，恢复失败或需要维护时 `LiveShortageCoordinator::setInputSource(Live)` 保持 Mock、发出拒绝原因，且不进入真实采样/派单路径。
+- 补齐 DeviceManager 暴露面：新增生产协调器 getter、缺料输入源/恢复确认/人工补料/维护修正转发槽，以及 `shortageSnapshotChanged` 转发信号；注释明确 DeviceManager 持有所有权，UI 只观察/调用唯一生产协调器。
+- 新增/更新回归测试：`criticalLockStopsNewAutomaticOnly` 验证自动被挡、人工 `LiveManual` 被接受；`startupRestoreFailureBlocksLiveAndDispatch` 验证恢复失败时 Live 不激活且不派单；源码契约测试验证 DeviceManager getter/slot/signal 转发存在。
+
+Review 修复验证：
+
+- `cmake --build build-shortage --target live_shortage_coordinator_tests -j2 && ctest --test-dir build-shortage -R '^live_shortage_coordinator_tests$' --output-on-failure`：通过，1/1。
+- `cmake --build build-shortage --target replenishment_planner_tests -j2 && ctest --test-dir build-shortage -R '^replenishment_planner_tests$' --output-on-failure`：通过，1/1。
+- `ctest --test-dir build-shortage --output-on-failure`：通过，16/16。

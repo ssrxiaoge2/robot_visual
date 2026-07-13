@@ -108,6 +108,12 @@ void LiveShortageCoordinator::setInputSource(ShortageInputSource source)
             rejectOperation(structuredError(QStringLiteral("切换 Live"), reason));
             return;
         }
+        if (m_engine == nullptr || m_engine->restoreLocked() || !m_engine->state().initialized) {
+            rejectOperation(structuredError(
+                QStringLiteral("切换 Live"),
+                QStringLiteral("启动恢复未安全安装，处理动作=保持 Mock 并进入维护确认")));
+            return;
+        }
     }
 
     if (m_inputSource == source) {
@@ -266,7 +272,7 @@ void LiveShortageCoordinator::pumpDispatch()
     if (m_inputSource != ShortageInputSource::Live)
         return;
     const ShortageRuntimeState &state = m_engine->state();
-    if (!state.initialized || !state.operatorConfirmedRestore || state.criticalLock)
+    if (!state.initialized || !state.operatorConfirmedRestore)
         return;
     QString reason;
     if (!liveConfigurationValid(&reason))

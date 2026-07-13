@@ -288,11 +288,13 @@ PlannerApplyResult ReplenishmentPlanner::requestManualBox(ShortageRuntimeState *
 std::optional<ShortageDispatchRequest> ReplenishmentPlanner::nextDispatchRequest(
     const ShortageRuntimeState &state) const
 {
-    if (state.criticalLock || !state.initialized || !state.operatorConfirmedRestore)
+    if (!state.initialized || !state.operatorConfirmedRestore)
         return std::nullopt;
 
     for (const ReplenishmentOrder &order : state.orders) {
         if (order.state != ReplenishmentOrderState::AwaitingDispatch)
+            continue;
+        if (state.criticalLock && order.origin != ReplenishmentOrigin::Manual)
             continue;
         for (const ReplenishmentOrder &other : state.orders) {
             if (other.orderNo != order.orderNo
