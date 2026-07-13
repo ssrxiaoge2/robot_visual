@@ -288,7 +288,17 @@ DeviceManager::DeviceManager(QObject *parent)
         m_productionShortageEngine.get(),
         m_shortageSampleCoordinator,
         m_shortageTaskGateway.get(),
-        this);
+        this,
+        [this]() -> ShortageOperationResult {
+            if (m_shortageTestController != nullptr
+                && m_shortageTestController->fieldSamplingActive()) {
+                return {
+                    false,
+                    QStringLiteral("独立测试现场采样正在运行，处理动作=先停止测试现场采样")
+                };
+            }
+            return {true, QStringLiteral("允许正式 Live")};
+        });
 
     connect(m_shortageSampleCoordinator, &ShortageSampleCoordinator::stableSampleReady,
             m_liveShortageCoordinator, &LiveShortageCoordinator::onStableSample);

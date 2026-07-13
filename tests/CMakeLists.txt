@@ -184,6 +184,7 @@ add_shortage_cpp_test(live_shortage_coordinator_tests
     ../src/shortageledger.cpp
     ../src/replenishmentplanner.cpp
     ../src/shortageengine.cpp
+    ../src/shortagetestcontroller.cpp
     ../src/shortageconfigstore.cpp
 )
 target_compile_definitions(live_shortage_coordinator_tests PRIVATE

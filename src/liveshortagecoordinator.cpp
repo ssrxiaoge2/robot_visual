@@ -4,6 +4,8 @@
 
 #include <QDateTime>
 
+#include <utility>
+
 namespace {
 
 const ShortageStationRuntime *runtimeStation(const ShortageRuntimeState &state, int stationId)
@@ -49,11 +51,13 @@ QString structuredError(QString actionZh, QString detailZh)
 LiveShortageCoordinator::LiveShortageCoordinator(ShortageEngine *engine,
                                                  ShortageSampleCoordinator *sampleCoordinator,
                                                  IShortageTaskGateway *taskGateway,
-                                                 QObject *parent)
+                                                 QObject *parent,
+                                                 std::function<ShortageOperationResult()> liveStartGate)
     : QObject(parent)
     , m_engine(engine)
     , m_sampleCoordinator(sampleCoordinator)
     , m_taskGateway(taskGateway)
+    , m_liveStartGate(std::move(liveStartGate))
 {
     qRegisterMetaType<ShortageUiSnapshot>("ShortageUiSnapshot");
     qRegisterMetaType<ManualBoxConfirmation>("ManualBoxConfirmation");
@@ -106,6 +110,14 @@ void LiveShortageCoordinator::setInputSource(ShortageInputSource source)
         QString reason;
         if (!liveConfigurationValid(&reason)) {
             rejectOperation(structuredError(QStringLiteral("切换 Live"), reason));
+            return;
+        }
+        const ShortageOperationResult allowed =
+            m_liveStartGate ? m_liveStartGate()
+                            : ShortageOperationResult{true, QStringLiteral("允许正式 Live")};
+        if (!allowed.ok) {
+            rejectOperation(structuredError(QStringLiteral("正式 Live 启动"),
+                                            allowed.messageZh));
             return;
         }
         if (m_engine == nullptr || m_engine->restoreLocked() || !m_engine->state().initialized) {

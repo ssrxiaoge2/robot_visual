@@ -6,6 +6,7 @@
 #include "shortagesamplecoordinator.h"
 
 #include <QObject>
+#include <functional>
 
 /// 生产缺料任务队尾网关；实现只能追加 FIFO 和读取整线状态，禁止暴露重排/删除能力。
 class IShortageTaskGateway
@@ -43,7 +44,8 @@ public:
     LiveShortageCoordinator(ShortageEngine *engine,
                             ShortageSampleCoordinator *sampleCoordinator,
                             IShortageTaskGateway *taskGateway,
-                            QObject *parent = nullptr);
+                            QObject *parent = nullptr,
+                            std::function<ShortageOperationResult()> liveStartGate = {});
 
     /// 析构时只停止非拥有采样对象，不删除外部依赖，避免 QObject 子对象析构顺序隐患。
     ~LiveShortageCoordinator() override;
@@ -88,6 +90,7 @@ private:
     ShortageEngine *m_engine = nullptr; ///< 非拥有正式账本/计划核心，只通过公开事务接口修改。
     ShortageSampleCoordinator *m_sampleCoordinator = nullptr; ///< 非拥有唯一正式采样协调器。
     IShortageTaskGateway *m_taskGateway = nullptr; ///< 非拥有 LineManager 队尾适配器。
+    std::function<ShortageOperationResult()> m_liveStartGate; ///< 正式 Live 启动前只读硬门禁。
     ShortageInputSource m_inputSource = ShortageInputSource::Mock; ///< Mock/Live 互斥状态。
     LineSystemState m_lineState = LineSystemState::Idle; ///< 最近整线状态，Running 时才自动派单。
     ShortageCommunicationState m_communication = ShortageCommunicationState::Stopped; ///< 最近采样健康状态。

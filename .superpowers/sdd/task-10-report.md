@@ -47,3 +47,18 @@ Review 二次修复验证：
 
 - `cmake --build build-shortage --target live_shortage_coordinator_tests --parallel 2 && ctest --test-dir build-shortage -R '^live_shortage_coordinator_tests$' --output-on-failure`：通过，1/1。
 - `cmake --build build-shortage --target shortage_test_controller_tests --parallel 2 && ctest --test-dir build-shortage -R '^shortage_test_controller_tests$' --output-on-failure`：通过，1/1。
+
+Review 三次修复追加：
+
+- 将“独立测试现场采样 active 时禁止正式 Live”从 `DeviceManager::setShortageInputSource()` 下沉到 `LiveShortageCoordinator` 自身：构造函数注入只读 `liveStartGate`，`setInputSource(Live)` 在启动采样和入账前硬检查，直接调用公开槽也不能绕过。
+- `DeviceManager` 仍保留用户友好的中文拒绝日志，同时把 `ShortageTestController::fieldSamplingActive()` 通过只读回调注入生产协调器；生产协调器不依赖测试 Engine/FIFO 写入口。
+- 新增行为测试 `directLiveStartIsRejectedWhileStandaloneFieldSamplingActive`：测试采样 active 时直接调用生产 `LiveShortageCoordinator::setInputSource(Live)`，协调器保持 Mock、不派单，并给出包含“独立测试现场采样正在运行 / 处理动作”的中文拒绝原因。
+- 新增行为测试 `sharedStableSampleIsProcessedByTestOnlyWhenProductionLiveRejected`：测试控制器和生产协调器共用同一 `ShortageSampleCoordinator`，测试采样 active 时直接启动生产 Live 被拒；同一个稳定样本只进入测试 Engine，生产 Engine 基线不变且不追加 FIFO，避免两套 Engine 同时处理同一样本。
+- `live_shortage_coordinator_tests` 增加 `shortagetestcontroller.cpp` 测试依赖，仅用于验证生产/测试共用采样协调器的互斥行为。
+
+Review 三次修复验证：
+
+- `cmake --build build-shortage --target live_shortage_coordinator_tests --parallel 2 && ctest --test-dir build-shortage -R '^live_shortage_coordinator_tests$' --output-on-failure`：通过，1/1。
+- `cmake --build build-shortage --target shortage_test_controller_tests --parallel 2 && ctest --test-dir build-shortage -R '^shortage_test_controller_tests$' --output-on-failure`：通过，1/1。
+- `ctest --test-dir build-shortage --output-on-failure`：通过，16/16。
+- `git diff --check`：通过，无输出。

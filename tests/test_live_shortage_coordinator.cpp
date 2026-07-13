@@ -2,6 +2,7 @@
 #include "shortageconfigstore.h"
 #include "shortageengine.h"
 #include "shortagestatestore.h"
+#include "shortagetestcontroller.h"
 
 #include <QFile>
 #include <QSignalSpy>
@@ -152,7 +153,18 @@ struct Harness {
     ShortageStateStore store {dir.path(), ShortageStateNamespace::Production};
     ShortageEngine engine {configuration, &store};
     FakeGateway gateway;
-    LiveShortageCoordinator coordinator {&engine, nullptr, &gateway};
+    bool standaloneFieldSamplingActive = false;
+    LiveShortageCoordinator coordinator {
+        &engine,
+        nullptr,
+        &gateway,
+        nullptr,
+        [this]() -> ShortageOperationResult {
+            if (standaloneFieldSamplingActive) {
+                return {false, QStringLiteral("独立测试现场采样正在运行，处理动作=先停止测试现场采样")};
+            }
+            return {true, QStringLiteral("允许正式 Live")};
+        }};
 };
 
 void installConfirmedState(Harness *harness, ShortageRuntimeState state = initializedState())
@@ -184,6 +196,8 @@ private slots:
     void mockTaskUnloadNeverChangesFormalLedger();
     void switchingToMockStopsNewIntentButFinishesReal();
     void selectingLiveDoesNotStartLineManager();
+    void directLiveStartIsRejectedWhileStandaloneFieldSamplingActive();
+    void sharedStableSampleIsProcessedByTestOnlyWhenProductionLiveRejected();
     void repeatedModeSwitchDoesNotDuplicateConnections();
     void oldTasksMustDrainBeforeContextActivation();
     void contextSwitchDoesNotChangeStationStocks();
@@ -248,6 +262,92 @@ void LiveShortageCoordinatorTest::selectingLiveDoesNotStartLineManager()
     applySample(&harness, 1, 1100);
 
     QCOMPARE(harness.gateway.appendCalls, 0);
+}
+
+void LiveShortageCoordinatorTest::directLiveStartIsRejectedWhileStandaloneFieldSamplingActive()
+{
+    Harness harness;
+    installConfirmedState(&harness);
+    harness.standaloneFieldSamplingActive = true;
+    QSignalSpy rejected(&harness.coordinator, &LiveShortageCoordinator::operationRejected);
+
+    harness.coordinator.setInputSource(ShortageInputSource::Live);
+    applySample(&harness, 1, 1100);
+
+    QVERIFY(!harness.coordinator.liveInputActive());
+    QCOMPARE(harness.gateway.appendCalls, 0);
+    QVERIFY(!rejected.isEmpty());
+    const QString reason = rejected.first().at(0).toString();
+    QVERIFY(reason.contains(QStringLiteral("独立测试现场采样正在运行")));
+    QVERIFY(reason.contains(QStringLiteral("处理动作")));
+
+    harness.standaloneFieldSamplingActive = false;
+    harness.coordinator.setInputSource(ShortageInputSource::Live);
+    applySample(&harness, 1, 1200);
+
+    QVERIFY(harness.coordinator.liveInputActive());
+    QCOMPARE(harness.gateway.appendCalls, 1);
+}
+
+void LiveShortageCoordinatorTest::sharedStableSampleIsProcessedByTestOnlyWhenProductionLiveRejected()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    ShortageSampleCoordinator sampleCoordinator(nullptr);
+
+    ShortageTestController testController(
+        testConfiguration(),
+        directory.path(),
+        &sampleCoordinator,
+        [] { return ShortageOperationResult{true, QStringLiteral("允许测试采样")}; });
+    testController.initializeZeroAfterConfirmation();
+    testController.startFieldSampling();
+    QVERIFY(testController.fieldSamplingActive());
+
+    ShortageStateStore productionStore(directory.path(), ShortageStateNamespace::Production);
+    ShortageEngine productionEngine(testConfiguration(), &productionStore);
+    QVERIFY(productionEngine.installRestoredState(loadResult(initializedState()), utc(1)).ok);
+    QVERIFY(productionEngine.confirmRestoredState(true, utc(2)).ok);
+    FakeGateway gateway;
+    LiveShortageCoordinator productionCoordinator(
+        &productionEngine,
+        &sampleCoordinator,
+        &gateway,
+        nullptr,
+        [&testController]() -> ShortageOperationResult {
+            if (testController.fieldSamplingActive()) {
+                return {
+                    false,
+                    QStringLiteral("独立测试现场采样正在运行，处理动作=先停止测试现场采样")
+                };
+            }
+            return {true, QStringLiteral("允许正式 Live")};
+        });
+    connect(&sampleCoordinator, &ShortageSampleCoordinator::stableSampleReady,
+            &productionCoordinator, &LiveShortageCoordinator::onStableSample);
+    QSignalSpy rejected(&productionCoordinator, &LiveShortageCoordinator::operationRejected);
+    QSignalSpy testSnapshots(&testController, &ShortageTestController::snapshotChanged);
+
+    productionCoordinator.setInputSource(ShortageInputSource::Live);
+    ShortageSample sharedSample;
+    sharedSample.roundId = 77;
+    sharedSample.product = ProductModel::Model88;
+    sharedSample.mode = ProductionMode::LeftRight;
+    sharedSample.actualQty = 1100;
+    sharedSample.capturedAtUtc = utc(1100);
+    QVERIFY(QMetaObject::invokeMethod(&sampleCoordinator,
+                                      "stableSampleReady",
+                                      Qt::DirectConnection,
+                                      Q_ARG(ShortageSample, sharedSample)));
+
+    QVERIFY(!productionCoordinator.liveInputActive());
+    QCOMPARE(gateway.appendCalls, 0);
+    QCOMPARE(productionEngine.state().actualQty.baseline, qint64{1000});
+    QVERIFY(!rejected.isEmpty());
+    QVERIFY(testSnapshots.count() >= 1);
+    const ShortageRuntimeState testState =
+        qvariant_cast<ShortageUiSnapshot>(testSnapshots.last().at(0)).runtime;
+    QCOMPARE(testState.actualQty.baseline, qint64{1100});
 }
 
 void LiveShortageCoordinatorTest::repeatedModeSwitchDoesNotDuplicateConnections()
