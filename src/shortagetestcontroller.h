@@ -25,6 +25,8 @@ public:
     const ShortageEngine &engineForTest() const;
     /// 测试钩子：固定返回 StandaloneTest，防止误用正式状态文件。
     ShortageStateNamespace stateNamespaceForTest() const;
+    /// 正式 Live 启动门禁只读接口：true 表示独立测试正在接收现场采样。
+    bool fieldSamplingActive() const { return m_fieldSamplingActive; }
 
 public slots:
     void initializeZeroAfterConfirmation();

@@ -622,6 +622,13 @@ void DeviceManager::resumeAgvNav()
 
 void DeviceManager::setShortageInputSource(ShortageInputSource source)
 {
+    if (source == ShortageInputSource::Live
+        && m_shortageTestController != nullptr
+        && m_shortageTestController->fieldSamplingActive()) {
+        emit logMessage(QStringLiteral(
+            "[缺料协调器] 正式 Live 启动失败：独立测试现场采样正在运行，处理动作=先停止测试现场采样"));
+        return;
+    }
     if (m_liveShortageCoordinator != nullptr)
         m_liveShortageCoordinator->setInputSource(source);
 }

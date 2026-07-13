@@ -493,6 +493,11 @@ void LiveShortageCoordinatorTest::deviceManagerUsesOnlyTheSingleLiveScheduler()
     QVERIFY(header.contains(QStringLiteral("void shortageSnapshotChanged(ShortageUiSnapshot snapshot)")));
     QVERIFY(source.contains(QStringLiteral("&LiveShortageCoordinator::snapshotChanged")));
     QVERIFY(source.contains(QStringLiteral("&DeviceManager::shortageSnapshotChanged")));
+    QVERIFY2(source.contains(QStringLiteral("fieldSamplingActive()")),
+             "DeviceManager must reject production Live while standalone field sampling is active");
+    QVERIFY2(source.contains(QStringLiteral("正式 Live 启动失败"))
+                 && source.contains(QStringLiteral("独立测试现场采样正在运行")),
+             "reverse mutual exclusion rejection must provide a Chinese reason");
 }
 
 QTEST_MAIN(LiveShortageCoordinatorTest)

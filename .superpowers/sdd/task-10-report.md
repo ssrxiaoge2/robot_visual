@@ -36,3 +36,14 @@ Review 修复验证：
 - `cmake --build build-shortage --target live_shortage_coordinator_tests -j2 && ctest --test-dir build-shortage -R '^live_shortage_coordinator_tests$' --output-on-failure`：通过，1/1。
 - `cmake --build build-shortage --target replenishment_planner_tests -j2 && ctest --test-dir build-shortage -R '^replenishment_planner_tests$' --output-on-failure`：通过，1/1。
 - `ctest --test-dir build-shortage --output-on-failure`：通过，16/16。
+
+Review 二次修复追加：
+
+- 修复正式 Live 与独立测试现场采样互斥的反向缺口：`DeviceManager::setShortageInputSource(Live)` 在转发给生产协调器前检查 `ShortageTestController::fieldSamplingActive()`，若测试现场采样正在运行则拒绝启动正式 Live。
+- 新增只读门禁接口 `ShortageTestController::fieldSamplingActive()`，不暴露测试 Engine/FIFO 写入口；拒绝原因使用中文结构化提示“正式 Live 启动失败：独立测试现场采样正在运行，处理动作=先停止测试现场采样”。
+- 补强 `live_shortage_coordinator_tests` 源码契约，证明互斥两方向同时存在：测试现场采样启动已有正式 Live 门禁，正式 Live 启动现在也有测试现场采样门禁。
+
+Review 二次修复验证：
+
+- `cmake --build build-shortage --target live_shortage_coordinator_tests --parallel 2 && ctest --test-dir build-shortage -R '^live_shortage_coordinator_tests$' --output-on-failure`：通过，1/1。
+- `cmake --build build-shortage --target shortage_test_controller_tests --parallel 2 && ctest --test-dir build-shortage -R '^shortage_test_controller_tests$' --output-on-failure`：通过，1/1。
