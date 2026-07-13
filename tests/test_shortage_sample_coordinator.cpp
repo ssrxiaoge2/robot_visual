@@ -1,4 +1,5 @@
 #include "customSysScheduler.h"
+#include "shortagesamplecoordinator.h"
 
 #include <QCoreApplication>
 #include <QDirIterator>
@@ -14,6 +15,7 @@
 #include <QTest>
 #include <QTimer>
 #include <QUrlQuery>
+#include <limits>
 
 namespace {
 
@@ -106,6 +108,135 @@ public:
     QList<QUrlQuery> queries;
 };
 
+class FakeCustomSysScheduler final : public CustomSysScheduler
+{
+    Q_OBJECT
+public:
+    using BitList = QList<std::pair<int, bool>>;
+
+    struct PlcRequest {
+        quint64 roundId = 0;
+        int startAddress = 0;
+        int length = 0;
+    };
+
+    explicit FakeCustomSysScheduler(QObject *parent = nullptr)
+        : CustomSysScheduler(parent)
+    {
+    }
+
+    void fetchMesDayData(quint64 roundId) override { mesRequests.append(roundId); }
+
+    void fetchPlcBits(quint64 roundId, int startAddress, int length) override
+    {
+        plcRequests.append(PlcRequest{roundId, startAddress, length});
+    }
+
+    void replyMes(quint64 roundId, qint64 actualQty)
+    {
+        LiveMesDayReply reply;
+        reply.ok = true;
+        reply.actualQty = actualQty;
+        emit mesReplyReady(roundId, reply);
+    }
+
+    void failMes(quint64 roundId, const QString &reason)
+    {
+        LiveMesDayReply reply;
+        reply.errorMessage = reason;
+        emit mesReplyReady(roundId, reply);
+    }
+
+    void replyPlc(quint64 roundId, int startAddress, std::initializer_list<std::pair<int, bool>> bits)
+    {
+        replyPlc(roundId, startAddress, BitList(bits));
+    }
+
+    void replyPlc(quint64 roundId, int startAddress, const BitList &bits)
+    {
+        PlcBitReply reply;
+        reply.ok = true;
+        reply.timestamp = QStringLiteral("2026-06-25T08:00:00.123Z");
+        for (const auto &bit : bits)
+            reply.values.insert(bit.first, bit.second);
+        emit plcReplyReady(roundId, startAddress, reply);
+    }
+
+    void failPlc(quint64 roundId, int startAddress, const QString &reason)
+    {
+        PlcBitReply reply;
+        reply.errorMessage = reason;
+        emit plcReplyReady(roundId, startAddress, reply);
+    }
+
+    QList<quint64> mesRequests;
+    QList<PlcRequest> plcRequests;
+};
+
+ShortageParameters fastParameters()
+{
+    ShortageParameters parameters;
+    parameters.sampleIntervalSeconds = 5;
+    parameters.roundTimeoutSeconds = 1;
+    parameters.communicationAlarmMinutes = 1;
+    return parameters;
+}
+
+FakeCustomSysScheduler::BitList productBits(ProductModel product)
+{
+    switch (product) {
+    case ProductModel::Model88:
+        return FakeCustomSysScheduler::BitList{{71, true}, {72, false}, {73, false}};
+    case ProductModel::Model88R:
+        return FakeCustomSysScheduler::BitList{{71, false}, {72, true}, {73, false}};
+    case ProductModel::Model92:
+        return FakeCustomSysScheduler::BitList{{71, false}, {72, false}, {73, true}};
+    }
+    return FakeCustomSysScheduler::BitList{{71, false}, {72, false}, {73, false}};
+}
+
+FakeCustomSysScheduler::BitList modeBits68(ProductionMode mode)
+{
+    switch (mode) {
+    case ProductionMode::LeftRight:
+        return FakeCustomSysScheduler::BitList{{68, true}, {69, false}};
+    case ProductionMode::LeftOnly:
+        return FakeCustomSysScheduler::BitList{{68, false}, {69, true}};
+    case ProductionMode::RightOnly:
+        return FakeCustomSysScheduler::BitList{{68, false}, {69, false}};
+    }
+    return FakeCustomSysScheduler::BitList{{68, false}, {69, false}};
+}
+
+bool modeBit1998(ProductionMode mode)
+{
+    return mode == ProductionMode::RightOnly;
+}
+
+void completeRound(FakeCustomSysScheduler &scheduler,
+                   quint64 roundId,
+                   qint64 actualQty,
+                   ProductModel product = ProductModel::Model88,
+                   ProductionMode mode = ProductionMode::LeftRight)
+{
+    scheduler.replyMes(roundId, actualQty);
+    scheduler.replyPlc(roundId, 68, modeBits68(mode));
+    scheduler.replyPlc(roundId, 71, productBits(product));
+    scheduler.replyPlc(roundId, 1998, {{1998, modeBit1998(mode)}});
+}
+
+void establishInitialContext(ShortageSampleCoordinator &coordinator,
+                             FakeCustomSysScheduler &scheduler,
+                             qint64 secondActualQty = 100,
+                             ProductModel product = ProductModel::Model88,
+                             ProductionMode mode = ProductionMode::LeftRight)
+{
+    coordinator.start();
+    completeRound(scheduler, scheduler.mesRequests.last(), secondActualQty - 1, product, mode);
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), secondActualQty, product, mode);
+}
+
 } // namespace
 
 class ShortageSampleCoordinatorTest final : public QObject
@@ -117,6 +248,21 @@ private slots:
     void plcParserRejectsMissingDuplicateOrWrongTypeBits();
     void protocolReplyKeepsRoundIdAndAddressRange();
     void legacyDiagnosticSurfaceIsAbsent();
+    void emitsOnlyAfterAllFourRepliesOfSameRound();
+    void timeoutRejectsWholeRound();
+    void staleReplyCannotCompleteNewRound();
+    void productBitsRequireExactlyOneTrue();
+    void modeBitsRequireExactlyOneTrue();
+    void contextRequiresTwoConsecutiveValidRounds();
+    void newTimingParametersApplyToNextRound();
+    void reconnectAtOrAboveBaselineProducesCatchupSample();
+    void alarmTurnsRedAtConfiguredDuration();
+    void reconnectBelowBaselineRequiresMaintenance();
+    void httpAndJsonErrorsRejectWithoutPartialState();
+    void actualQtyUsesSignedSixtyFourBitValidation();
+    void oneRoundContextGlitchDoesNotSwitch();
+    void twoStableRoundsCreatePendingContext();
+    void allNineContextCombinationsAreRecognized();
 };
 
 void ShortageSampleCoordinatorTest::mesParserKeepsOldBranchPayloadContract()
@@ -226,8 +372,8 @@ void ShortageSampleCoordinatorTest::protocolReplyKeepsRoundIdAndAddressRange()
     scheduler.fetchMesDayData(1001);
     scheduler.fetchPlcBits(1002, 68, 2);
 
-    QVERIFY(mesSpy.wait(2000));
-    QVERIFY(plcSpy.wait(2000));
+    QTRY_VERIFY_WITH_TIMEOUT(mesSpy.count() > 0, 2000);
+    QTRY_VERIFY_WITH_TIMEOUT(plcSpy.count() > 0, 2000);
 
     QCOMPARE(mesSpy.first().at(0).toULongLong(), quint64{1001});
     const auto mesReply = qvariant_cast<CustomSysScheduler::LiveMesDayReply>(
@@ -254,6 +400,376 @@ void ShortageSampleCoordinatorTest::protocolReplyKeepsRoundIdAndAddressRange()
         }
     }
     QVERIFY(sawPlcQuery);
+}
+
+void ShortageSampleCoordinatorTest::emitsOnlyAfterAllFourRepliesOfSameRound()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+    QSignalSpy rejectedSpy(&coordinator, &ShortageSampleCoordinator::sampleRejected);
+
+    establishInitialContext(coordinator, scheduler);
+    stableSpy.clear();
+    rejectedSpy.clear();
+
+    coordinator.triggerNextRoundForTest();
+    const quint64 roundId = scheduler.mesRequests.last();
+    scheduler.replyMes(roundId, 120);
+    scheduler.replyPlc(roundId, 68, modeBits68(ProductionMode::LeftRight));
+    scheduler.replyPlc(roundId, 71, productBits(ProductModel::Model88));
+    QCOMPARE(stableSpy.count(), 0);
+
+    scheduler.replyPlc(roundId, 1998, {{1998, false}});
+    QCOMPARE(rejectedSpy.count(), 0);
+    QCOMPARE(stableSpy.count(), 1);
+    const auto sample = qvariant_cast<ShortageSample>(stableSpy.takeFirst().at(0));
+    QCOMPARE(sample.roundId, roundId);
+    QCOMPARE(sample.actualQty, qint64{120});
+}
+
+void ShortageSampleCoordinatorTest::timeoutRejectsWholeRound()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+    QSignalSpy rejectedSpy(&coordinator, &ShortageSampleCoordinator::sampleRejected);
+    QSignalSpy stateSpy(&coordinator, &ShortageSampleCoordinator::communicationStateChanged);
+
+    coordinator.start();
+    const quint64 roundId = scheduler.mesRequests.last();
+    coordinator.triggerRoundTimeoutForTest();
+    QCOMPARE(rejectedSpy.count(), 1);
+    QCOMPARE(rejectedSpy.first().at(0).toULongLong(), roundId);
+    QCOMPARE(qvariant_cast<ShortageCommunicationState>(stateSpy.last().at(0)),
+             ShortageCommunicationState::Interrupted);
+
+    completeRound(scheduler, roundId, 10);
+    QCOMPARE(stableSpy.count(), 0);
+    QCOMPARE(rejectedSpy.count(), 1);
+}
+
+void ShortageSampleCoordinatorTest::staleReplyCannotCompleteNewRound()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+    QSignalSpy rejectedSpy(&coordinator, &ShortageSampleCoordinator::sampleRejected);
+
+    coordinator.start();
+    const quint64 staleRound = scheduler.mesRequests.last();
+    scheduler.replyMes(staleRound, 1);
+    coordinator.triggerRoundTimeoutForTest();
+
+    coordinator.triggerNextRoundForTest();
+    const quint64 newRound = scheduler.mesRequests.last();
+    scheduler.replyPlc(staleRound, 68, modeBits68(ProductionMode::LeftRight));
+    scheduler.replyPlc(staleRound, 71, productBits(ProductModel::Model88));
+    scheduler.replyPlc(staleRound, 1998, {{1998, false}});
+    completeRound(scheduler, newRound, 20);
+    QCOMPARE(stableSpy.count(), 0);
+    QCOMPARE(rejectedSpy.count(), 1);
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 21);
+    QCOMPARE(stableSpy.count(), 1);
+}
+
+void ShortageSampleCoordinatorTest::productBitsRequireExactlyOneTrue()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy rejectedSpy(&coordinator, &ShortageSampleCoordinator::sampleRejected);
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+
+    coordinator.start();
+    const quint64 roundId = scheduler.mesRequests.last();
+    scheduler.replyMes(roundId, 10);
+    scheduler.replyPlc(roundId, 68, modeBits68(ProductionMode::LeftRight));
+    scheduler.replyPlc(roundId, 71, {{71, true}, {72, true}, {73, false}});
+    scheduler.replyPlc(roundId, 1998, {{1998, false}});
+
+    QCOMPARE(stableSpy.count(), 0);
+    QCOMPARE(rejectedSpy.count(), 1);
+    const QString reason = rejectedSpy.first().at(1).toString();
+    QVERIFY2(reason.contains(QStringLiteral("L71=true")), qPrintable(reason));
+    QVERIFY2(reason.contains(QStringLiteral("L72=true")), qPrintable(reason));
+    QVERIFY2(reason.contains(QStringLiteral("L73=false")), qPrintable(reason));
+    QVERIFY2(reason.contains(QStringLiteral("L68=true")), qPrintable(reason));
+    QVERIFY2(reason.contains(QStringLiteral("L69=false")), qPrintable(reason));
+    QVERIFY2(reason.contains(QStringLiteral("L1998=false")), qPrintable(reason));
+}
+
+void ShortageSampleCoordinatorTest::modeBitsRequireExactlyOneTrue()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy rejectedSpy(&coordinator, &ShortageSampleCoordinator::sampleRejected);
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+
+    coordinator.start();
+    const quint64 roundId = scheduler.mesRequests.last();
+    scheduler.replyMes(roundId, 10);
+    scheduler.replyPlc(roundId, 68, {{68, true}, {69, true}});
+    scheduler.replyPlc(roundId, 71, productBits(ProductModel::Model88));
+    scheduler.replyPlc(roundId, 1998, {{1998, false}});
+
+    QCOMPARE(stableSpy.count(), 0);
+    QCOMPARE(rejectedSpy.count(), 1);
+    const QString reason = rejectedSpy.first().at(1).toString();
+    QVERIFY2(reason.contains(QStringLiteral("模式")), qPrintable(reason));
+    QVERIFY2(reason.contains(QStringLiteral("L68=true")), qPrintable(reason));
+    QVERIFY2(reason.contains(QStringLiteral("L69=true")), qPrintable(reason));
+    QVERIFY2(reason.contains(QStringLiteral("L1998=false")), qPrintable(reason));
+}
+
+void ShortageSampleCoordinatorTest::contextRequiresTwoConsecutiveValidRounds()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+    QSignalSpy contextSpy(&coordinator, &ShortageSampleCoordinator::contextChangeConfirmed);
+
+    coordinator.start();
+    completeRound(scheduler, scheduler.mesRequests.last(), 10, ProductModel::Model88, ProductionMode::LeftRight);
+    QCOMPARE(stableSpy.count(), 0);
+    QCOMPARE(contextSpy.count(), 0);
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 11, ProductModel::Model88R, ProductionMode::LeftRight);
+    QCOMPARE(stableSpy.count(), 0);
+    QCOMPARE(contextSpy.count(), 0);
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 12, ProductModel::Model88R, ProductionMode::LeftRight);
+    QCOMPARE(contextSpy.count(), 1);
+    QCOMPARE(stableSpy.count(), 1);
+    const auto sample = qvariant_cast<ShortageSample>(stableSpy.first().at(0));
+    QCOMPARE(sample.product, ProductModel::Model88R);
+    QCOMPARE(sample.mode, ProductionMode::LeftRight);
+}
+
+void ShortageSampleCoordinatorTest::newTimingParametersApplyToNextRound()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    ShortageParameters parameters = fastParameters();
+    parameters.roundTimeoutSeconds = 2;
+    coordinator.setParameters(parameters);
+
+    coordinator.start();
+    QCOMPARE(coordinator.activeRoundTimeoutSecondsForTest(), 2);
+
+    parameters.roundTimeoutSeconds = 7;
+    parameters.sampleIntervalSeconds = 9;
+    coordinator.setParameters(parameters);
+    QCOMPARE(coordinator.activeRoundTimeoutSecondsForTest(), 2);
+
+    coordinator.triggerNextRoundForTest();
+    QCOMPARE(coordinator.activeRoundTimeoutSecondsForTest(), 7);
+    QCOMPARE(coordinator.activeRoundIntervalSecondsForTest(), 9);
+}
+
+void ShortageSampleCoordinatorTest::reconnectAtOrAboveBaselineProducesCatchupSample()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+
+    establishInitialContext(coordinator, scheduler, 100);
+    stableSpy.clear();
+    coordinator.triggerNextRoundForTest();
+    coordinator.triggerRoundTimeoutForTest();
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 130);
+    QCOMPARE(stableSpy.count(), 1);
+    const auto sample = qvariant_cast<ShortageSample>(stableSpy.first().at(0));
+    QCOMPARE(sample.actualQty, qint64{130});
+    QVERIFY(sample.recoveredAfterInterruption);
+}
+
+void ShortageSampleCoordinatorTest::alarmTurnsRedAtConfiguredDuration()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    ShortageParameters parameters = fastParameters();
+    parameters.communicationAlarmMinutes = 1;
+    coordinator.setParameters(parameters);
+    QSignalSpy stateSpy(&coordinator, &ShortageSampleCoordinator::communicationStateChanged);
+
+    coordinator.start();
+    coordinator.triggerRoundTimeoutForTest();
+    QCOMPARE(qvariant_cast<ShortageCommunicationState>(stateSpy.last().at(0)),
+             ShortageCommunicationState::Interrupted);
+
+    coordinator.advanceFailureDurationForTest(60);
+    coordinator.triggerNextRoundForTest();
+    coordinator.triggerRoundTimeoutForTest();
+    QCOMPARE(qvariant_cast<ShortageCommunicationState>(stateSpy.last().at(0)),
+             ShortageCommunicationState::Alarm);
+}
+
+void ShortageSampleCoordinatorTest::reconnectBelowBaselineRequiresMaintenance()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+    QSignalSpy rejectedSpy(&coordinator, &ShortageSampleCoordinator::sampleRejected);
+    QSignalSpy stateSpy(&coordinator, &ShortageSampleCoordinator::communicationStateChanged);
+
+    establishInitialContext(coordinator, scheduler, 100);
+    stableSpy.clear();
+    coordinator.triggerNextRoundForTest();
+    coordinator.triggerRoundTimeoutForTest();
+    rejectedSpy.clear();
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 90);
+    QCOMPARE(stableSpy.count(), 0);
+    QCOMPARE(rejectedSpy.count(), 1);
+    QCOMPARE(qvariant_cast<ShortageCommunicationState>(stateSpy.last().at(0)),
+             ShortageCommunicationState::RecoveryNeedsReview);
+}
+
+void ShortageSampleCoordinatorTest::httpAndJsonErrorsRejectWithoutPartialState()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+    QSignalSpy rejectedSpy(&coordinator, &ShortageSampleCoordinator::sampleRejected);
+
+    coordinator.start();
+    quint64 roundId = scheduler.mesRequests.last();
+    scheduler.failMes(roundId, QStringLiteral("HTTP 500"));
+    scheduler.replyPlc(roundId, 68, modeBits68(ProductionMode::LeftRight));
+    scheduler.replyPlc(roundId, 71, productBits(ProductModel::Model88));
+    scheduler.replyPlc(roundId, 1998, {{1998, false}});
+    QCOMPARE(rejectedSpy.count(), 1);
+    QCOMPARE(stableSpy.count(), 0);
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 10);
+    QCOMPARE(stableSpy.count(), 0);
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 11);
+    QCOMPARE(stableSpy.count(), 1);
+}
+
+void ShortageSampleCoordinatorTest::actualQtyUsesSignedSixtyFourBitValidation()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+    QSignalSpy rejectedSpy(&coordinator, &ShortageSampleCoordinator::sampleRejected);
+
+    coordinator.start();
+    completeRound(scheduler, scheduler.mesRequests.last(), std::numeric_limits<qint64>::max());
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), std::numeric_limits<qint64>::max());
+    QCOMPARE(stableSpy.count(), 1);
+    auto sample = qvariant_cast<ShortageSample>(stableSpy.takeFirst().at(0));
+    QCOMPARE(sample.actualQty, std::numeric_limits<qint64>::max());
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), -1);
+    QCOMPARE(rejectedSpy.count(), 1);
+    QCOMPARE(stableSpy.count(), 0);
+}
+
+void ShortageSampleCoordinatorTest::oneRoundContextGlitchDoesNotSwitch()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+    QSignalSpy contextSpy(&coordinator, &ShortageSampleCoordinator::contextChangeConfirmed);
+
+    establishInitialContext(coordinator, scheduler, 100);
+    stableSpy.clear();
+    contextSpy.clear();
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 101, ProductModel::Model92, ProductionMode::RightOnly);
+    QCOMPARE(stableSpy.count(), 0);
+    QCOMPARE(contextSpy.count(), 0);
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 102, ProductModel::Model88, ProductionMode::LeftRight);
+    QCOMPARE(contextSpy.count(), 0);
+    QCOMPARE(stableSpy.count(), 1);
+    const auto sample = qvariant_cast<ShortageSample>(stableSpy.first().at(0));
+    QCOMPARE(sample.product, ProductModel::Model88);
+    QCOMPARE(sample.mode, ProductionMode::LeftRight);
+}
+
+void ShortageSampleCoordinatorTest::twoStableRoundsCreatePendingContext()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+    QSignalSpy contextSpy(&coordinator, &ShortageSampleCoordinator::contextChangeConfirmed);
+
+    establishInitialContext(coordinator, scheduler, 100);
+    stableSpy.clear();
+    contextSpy.clear();
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 101, ProductModel::Model92, ProductionMode::RightOnly);
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 102, ProductModel::Model92, ProductionMode::RightOnly);
+    QCOMPARE(stableSpy.count(), 0);
+    QCOMPARE(contextSpy.count(), 1);
+    QCOMPARE(qvariant_cast<ProductModel>(contextSpy.first().at(0)), ProductModel::Model92);
+    QCOMPARE(qvariant_cast<ProductionMode>(contextSpy.first().at(1)), ProductionMode::RightOnly);
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 103, ProductModel::Model92, ProductionMode::RightOnly);
+    QCOMPARE(stableSpy.count(), 1);
+}
+
+void ShortageSampleCoordinatorTest::allNineContextCombinationsAreRecognized()
+{
+    const QList<ProductModel> products = {
+        ProductModel::Model88,
+        ProductModel::Model88R,
+        ProductModel::Model92
+    };
+    const QList<ProductionMode> modes = {
+        ProductionMode::LeftRight,
+        ProductionMode::LeftOnly,
+        ProductionMode::RightOnly
+    };
+
+    for (ProductModel product : products) {
+        for (ProductionMode mode : modes) {
+            FakeCustomSysScheduler scheduler;
+            ShortageSampleCoordinator coordinator(&scheduler);
+            coordinator.setParameters(fastParameters());
+            QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+
+            coordinator.start();
+            completeRound(scheduler, scheduler.mesRequests.last(), 1, product, mode);
+            coordinator.triggerNextRoundForTest();
+            completeRound(scheduler, scheduler.mesRequests.last(), 2, product, mode);
+            QCOMPARE(stableSpy.count(), 1);
+            const auto sample = qvariant_cast<ShortageSample>(stableSpy.first().at(0));
+            QCOMPARE(sample.product, product);
+            QCOMPARE(sample.mode, mode);
+        }
+    }
 }
 
 void ShortageSampleCoordinatorTest::legacyDiagnosticSurfaceIsAbsent()

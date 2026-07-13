@@ -129,6 +129,9 @@ add_shortage_cpp_test(shortage_sample_coordinator_tests
     test_shortage_sample_coordinator.cpp
     ../src/customSysScheduler.cpp
 )
+# Task 1 已建立协议/删除契约 target；Task 6 只追加采样协调器实现。
+target_sources(shortage_sample_coordinator_tests PRIVATE
+    ../src/shortagesamplecoordinator.cpp)
 target_compile_definitions(shortage_sample_coordinator_tests PRIVATE
     ROBOT_VISUAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )

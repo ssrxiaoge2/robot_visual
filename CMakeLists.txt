@@ -80,6 +80,8 @@ set(PROJECT_SOURCES
         src/replenishmentplanner.h
         src/shortageengine.cpp
         src/shortageengine.h
+        src/shortagesamplecoordinator.cpp
+        src/shortagesamplecoordinator.h
         src/shortagestatestore.cpp
         src/shortagestatestore.h
 )
