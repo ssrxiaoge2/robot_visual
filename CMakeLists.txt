@@ -82,6 +82,8 @@ set(PROJECT_SOURCES
         src/shortageengine.h
         src/shortagesamplecoordinator.cpp
         src/shortagesamplecoordinator.h
+        src/shortagetestcontroller.cpp
+        src/shortagetestcontroller.h
         src/shortagestatestore.cpp
         src/shortagestatestore.h
 )
