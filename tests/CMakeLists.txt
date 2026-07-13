@@ -142,3 +142,8 @@ add_shortage_cpp_test(shortage_state_store_tests
     test_shortage_state_store.cpp
     ../src/shortagestatestore.cpp
 )
+
+add_shortage_cpp_test(shortage_ledger_tests
+    test_shortage_ledger.cpp
+    ../src/shortageledger.cpp
+)
