@@ -215,6 +215,10 @@ void ShortageTestController::connectCoordinator()
             });
     connect(m_sampleCoordinator, &ShortageSampleCoordinator::contextChangeConfirmed, this,
             [this](ProductModel, ProductionMode) {
+                if (!m_fieldSamplingActive) {
+                    emit eventLogged(QStringLiteral("测试采样上下文确认已忽略：fieldSamplingActive=false"));
+                    return;
+                }
                 applyEngineResult(m_engine->activatePendingContextIfDrained(
                     false, QDateTime::currentDateTimeUtc()));
             });

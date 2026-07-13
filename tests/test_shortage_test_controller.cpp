@@ -1,9 +1,9 @@
 #include "shortagetestcontroller.h"
 
-#include "customSysScheduler.h"
 #include "shortagesamplecoordinator.h"
 
 #include <QCryptographicHash>
+#include <QFile>
 #include <QDirIterator>
 #include <QSignalSpy>
 #include <QTemporaryDir>
@@ -94,15 +94,12 @@ QByteArray productionHash(const QString &directoryPath)
     return hash.result();
 }
 
-int hardwareSignalCount(const QObject *object)
+QString readProjectFile(const QString &relativePath)
 {
-    int count = 0;
-    const QMetaObject *meta = object->metaObject();
-    for (int i = meta->methodOffset(); i < meta->methodCount(); ++i) {
-        if (meta->method(i).methodType() == QMetaMethod::Signal)
-            ++count;
-    }
-    return count;
+    QFile file(QStringLiteral(ROBOT_VISUAL_SOURCE_DIR) + QLatin1Char('/') + relativePath);
+    if (!file.open(QIODevice::ReadOnly | QIODevice::Text))
+        return {};
+    return QString::fromUtf8(file.readAll());
 }
 
 const ShortageStationRuntime *station(const ShortageRuntimeState &state, int stationId)
@@ -124,6 +121,8 @@ private slots:
     void controllerOwnsTheSameEngineTypeAsProduction();       // IN-01。
     void simulatedDispatchNeverCallsMainFifo();               // IN-02。
     void everyTestActionEmitsNoHardwareCommand();             // IN-03。
+    void failedFieldSamplingGuardKeepsControllerInactive();
+    void inactiveContextConfirmationDoesNotReachEngine();
     void testSaveClearReloadKeepsProductionHash();            // IN-04。
     void fullScenarioCoversSamplePlanUnloadFailureRestart();  // 完整闭环。
 };
@@ -140,9 +139,7 @@ void ShortageTestControllerTest::controllerOwnsTheSameEngineTypeAsProduction()
 
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
-    CustomSysScheduler scheduler;
-    ShortageSampleCoordinator coordinator(&scheduler);
-    ShortageTestController controller(testConfiguration(), directory.path(), &coordinator,
+    ShortageTestController controller(testConfiguration(), directory.path(), nullptr,
                                       [] { return ShortageOperationResult{true, QStringLiteral("允许")}; });
 
     QCOMPARE(controller.stateNamespaceForTest(), ShortageStateNamespace::StandaloneTest);
@@ -153,19 +150,28 @@ void ShortageTestControllerTest::simulatedDispatchNeverCallsMainFifo()
 {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
-    CustomSysScheduler scheduler;
-    ShortageSampleCoordinator coordinator(&scheduler);
-    int mainFifoCalls = 0;
-    ShortageTestController controller(testConfiguration(), directory.path(), &coordinator,
+    ShortageTestController controller(testConfiguration(), directory.path(), nullptr,
                                       [] { return ShortageOperationResult{true, QStringLiteral("允许")}; });
     QSignalSpy snapshotSpy(&controller, &ShortageTestController::snapshotChanged);
+    const QString controllerHeader = readProjectFile(QStringLiteral("src/shortagetestcontroller.h"));
+    const QString controllerSource = readProjectFile(QStringLiteral("src/shortagetestcontroller.cpp"));
+    QVERIFY2(!controllerHeader.isEmpty(), "controller header must be readable");
+    QVERIFY2(!controllerSource.isEmpty(), "controller source must be readable");
+    const QString controllerText = controllerHeader + controllerSource;
+    QVERIFY2(!controllerText.contains(QStringLiteral("TaskQueue")),
+             "standalone controller must not depend on the main FIFO TaskQueue");
+    QVERIFY2(!controllerText.contains(QStringLiteral("LineManager")),
+             "standalone controller must not depend on LineManager/FIFO orchestration");
+    QVERIFY2(!controllerText.contains(QStringLiteral("HuayanScheduler")),
+             "standalone controller must not dispatch through the robot scheduler");
+    QVERIFY2(!controllerText.contains(QStringLiteral("AgvController")),
+             "standalone controller must not command AGV hardware");
 
     controller.initializeZeroAfterConfirmation();
     controller.applyManualSample(ProductModel::Model88, ProductionMode::LeftRight, 0);
     controller.applyManualSample(ProductModel::Model88, ProductionMode::LeftRight, 100);
     controller.simulateDispatchAccepted();
 
-    QCOMPARE(mainFifoCalls, 0);
     QVERIFY(snapshotSpy.count() >= 3);
     const ShortageRuntimeState state =
         qvariant_cast<ShortageUiSnapshot>(snapshotSpy.last().at(0)).runtime;
@@ -178,11 +184,23 @@ void ShortageTestControllerTest::everyTestActionEmitsNoHardwareCommand()
 {
     QTemporaryDir directory;
     QVERIFY(directory.isValid());
-    CustomSysScheduler scheduler;
-    ShortageSampleCoordinator coordinator(&scheduler);
-    ShortageTestController controller(testConfiguration(), directory.path(), &coordinator,
+    ShortageTestController controller(testConfiguration(), directory.path(), nullptr,
                                       [] { return ShortageOperationResult{true, QStringLiteral("允许")}; });
-    const int before = hardwareSignalCount(&controller);
+    QSignalSpy rejectedSpy(&controller, &ShortageTestController::operationRejected);
+    QSignalSpy snapshotSpy(&controller, &ShortageTestController::snapshotChanged);
+    const QString controllerSource = readProjectFile(QStringLiteral("src/shortagetestcontroller.cpp"));
+    const QString controllerTest = readProjectFile(QStringLiteral("tests/test_shortage_test_controller.cpp"));
+    QVERIFY2(!controllerSource.isEmpty(), "controller source must be readable");
+    QVERIFY2(!controllerSource.contains(QStringLiteral("fetchMesDayData")),
+             "controller must never call MES requests directly");
+    QVERIFY2(!controllerSource.contains(QStringLiteral("fetchPlcBits")),
+             "controller must never call PLC requests directly");
+    QVERIFY2(!controllerSource.contains(QStringLiteral("CustomSysScheduler")),
+             "controller must not know the live MES/PLC scheduler type");
+    const QString liveSchedulerConstruction =
+        QStringLiteral("CustomSysScheduler ") + QStringLiteral("scheduler");
+    QVERIFY2(!controllerTest.contains(liveSchedulerConstruction),
+             "standalone controller tests must not construct live scheduler objects");
 
     controller.initializeZeroAfterConfirmation();
     controller.applyManualSample(ProductModel::Model88, ProductionMode::LeftRight, 0);
@@ -197,7 +215,52 @@ void ShortageTestControllerTest::everyTestActionEmitsNoHardwareCommand()
     controller.resendLastUnloadFact();
     controller.stop();
 
-    QCOMPARE(hardwareSignalCount(&controller), before);
+    QVERIFY(rejectedSpy.count() >= 1);
+    QVERIFY(!snapshotSpy.isEmpty());
+    const ShortageUiSnapshot snapshot =
+        qvariant_cast<ShortageUiSnapshot>(snapshotSpy.last().at(0));
+    QCOMPARE(snapshot.communication, ShortageCommunicationState::Stopped);
+    QCOMPARE(snapshot.inputSource, ShortageInputSource::Mock);
+}
+
+void ShortageTestControllerTest::failedFieldSamplingGuardKeepsControllerInactive()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    ShortageTestController controller(testConfiguration(), directory.path(), nullptr,
+                                      [] {
+                                          return ShortageOperationResult{
+                                              false, QStringLiteral("正式 Live 未停止")};
+                                      });
+    QSignalSpy rejectedSpy(&controller, &ShortageTestController::operationRejected);
+    QSignalSpy snapshotSpy(&controller, &ShortageTestController::snapshotChanged);
+
+    controller.startFieldSampling();
+
+    QCOMPARE(rejectedSpy.count(), 1);
+    QCOMPARE(snapshotSpy.count(), 1);
+    const ShortageUiSnapshot snapshot =
+        qvariant_cast<ShortageUiSnapshot>(snapshotSpy.last().at(0));
+    QCOMPARE(snapshot.communication, ShortageCommunicationState::Stopped);
+    QCOMPARE(snapshot.inputSource, ShortageInputSource::Mock);
+}
+
+void ShortageTestControllerTest::inactiveContextConfirmationDoesNotReachEngine()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    ShortageSampleCoordinator coordinator(nullptr);
+    ShortageTestController controller(testConfiguration(), directory.path(), &coordinator,
+                                      [] { return ShortageOperationResult{true, QStringLiteral("允许")}; });
+    QSignalSpy snapshotSpy(&controller, &ShortageTestController::snapshotChanged);
+
+    QMetaObject::invokeMethod(&coordinator,
+                              "contextChangeConfirmed",
+                              Qt::DirectConnection,
+                              Q_ARG(ProductModel, ProductModel::Model88R),
+                              Q_ARG(ProductionMode, ProductionMode::LeftOnly));
+
+    QCOMPARE(snapshotSpy.count(), 0);
 }
 
 void ShortageTestControllerTest::testSaveClearReloadKeepsProductionHash()
@@ -214,9 +277,7 @@ void ShortageTestControllerTest::testSaveClearReloadKeepsProductionHash()
     QVERIFY2(productionStore.saveCritical(productionState(), event).ok, "production seed failed");
     const QByteArray before = productionHash(directory.path());
 
-    CustomSysScheduler scheduler;
-    ShortageSampleCoordinator coordinator(&scheduler);
-    ShortageTestController controller(testConfiguration(), directory.path(), &coordinator,
+    ShortageTestController controller(testConfiguration(), directory.path(), nullptr,
                                       [] { return ShortageOperationResult{true, QStringLiteral("允许")}; });
     controller.initializeZeroAfterConfirmation();
     controller.applyManualSample(ProductModel::Model88, ProductionMode::LeftRight, 0);
@@ -233,9 +294,7 @@ void ShortageTestControllerTest::fullScenarioCoversSamplePlanUnloadFailureRestar
     QVERIFY(directory.isValid());
     const QByteArray productionBefore = productionHash(directory.path());
 
-    CustomSysScheduler scheduler;
-    ShortageSampleCoordinator coordinator(&scheduler);
-    ShortageTestController controller(testConfiguration(), directory.path(), &coordinator,
+    ShortageTestController controller(testConfiguration(), directory.path(), nullptr,
                                       [] { return ShortageOperationResult{true, QStringLiteral("允许")}; });
     QSignalSpy rejectedSpy(&controller, &ShortageTestController::operationRejected);
     QSignalSpy snapshotSpy(&controller, &ShortageTestController::snapshotChanged);
@@ -263,7 +322,7 @@ void ShortageTestControllerTest::fullScenarioCoversSamplePlanUnloadFailureRestar
     QVERIFY(stationOne != nullptr);
     QCOMPARE(stationOne->stock, qint64{72});
 
-    ShortageTestController restarted(testConfiguration(), directory.path(), &coordinator,
+    ShortageTestController restarted(testConfiguration(), directory.path(), nullptr,
                                      [] { return ShortageOperationResult{true, QStringLiteral("允许")}; });
     QSignalSpy restartSpy(&restarted, &ShortageTestController::snapshotChanged);
     restarted.reloadTestState();
