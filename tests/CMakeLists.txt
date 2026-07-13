@@ -132,3 +132,8 @@ add_shortage_cpp_test(shortage_sample_coordinator_tests
 target_compile_definitions(shortage_sample_coordinator_tests PRIVATE
     ROBOT_VISUAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
+
+add_shortage_cpp_test(shortage_config_tests
+    test_shortage_config.cpp
+    ../src/shortageconfigstore.cpp
+)

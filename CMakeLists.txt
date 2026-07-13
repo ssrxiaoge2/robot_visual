@@ -71,6 +71,9 @@ set(PROJECT_SOURCES
         src/palletplacesequence.h
         src/palletparamdialog.cpp
         src/palletparamdialog.h
+        src/shortagetypes.h
+        src/shortageconfigstore.cpp
+        src/shortageconfigstore.h
 )
 
 qt_add_executable(wh-robot-visual
