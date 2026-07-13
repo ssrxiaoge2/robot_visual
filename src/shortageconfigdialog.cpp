@@ -11,6 +11,7 @@
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
+#include <QRegularExpression>
 #include <QRadioButton>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -57,6 +58,45 @@ QString tableText(const QTableWidget *table, int row, int column)
     return item == nullptr ? QString() : item->text();
 }
 
+int productTabIndex(ProductModel product)
+{
+    return products().indexOf(product);
+}
+
+bool productFromName(const QString &name, ProductModel *product)
+{
+    if (name == QStringLiteral("88")) {
+        *product = ProductModel::Model88;
+        return true;
+    }
+    if (name == QStringLiteral("88R")) {
+        *product = ProductModel::Model88R;
+        return true;
+    }
+    if (name == QStringLiteral("92")) {
+        *product = ProductModel::Model92;
+        return true;
+    }
+    return false;
+}
+
+int stationFieldColumn(const QString &field)
+{
+    static const QHash<QString, int> kColumns {
+        {QStringLiteral("stationId"), 0},
+        {QStringLiteral("temporaryNo"), 1},
+        {QStringLiteral("sitePosition"), 2},
+        {QStringLiteral("partNumber"), 3},
+        {QStringLiteral("boxQuantity"), 5},
+        {QStringLiteral("minimumStock"), 6},
+        {QStringLiteral("maximumStock"), 7},
+        {QStringLiteral("usageLeftRight"), 8},
+        {QStringLiteral("usageLeftOnly"), 9},
+        {QStringLiteral("usageRightOnly"), 10},
+    };
+    return kColumns.value(field, -1);
+}
+
 } // namespace
 
 ShortageConfigDialog::ShortageConfigDialog(ShortageConfiguration configuration,
@@ -66,7 +106,9 @@ ShortageConfigDialog::ShortageConfigDialog(ShortageConfiguration configuration,
                                            QWidget *parent)
     : QDialog(parent),
       m_configuration(std::move(configuration)),
-      m_validatedConfiguration(m_configuration),
+      m_validatedConfiguration(ShortageConfigStore::validate(m_configuration).ok
+                                   ? m_configuration
+                                   : ShortageConfigStore::sheet3Defaults()),
       m_editGateProvider(std::move(editGateProvider)),
       m_testController(testController),
       m_snapshot(std::move(snapshot))
@@ -343,6 +385,89 @@ ShortageConfiguration ShortageConfigDialog::configurationFromUi() const
     return configuration;
 }
 
+void ShortageConfigDialog::focusConfigurationWidget(QWidget *widget)
+{
+    if (widget == nullptr)
+        return;
+    if (m_mainTabs != nullptr)
+        m_mainTabs->setCurrentIndex(0);
+    raise();
+    activateWindow();
+    widget->setFocus(Qt::OtherFocusReason);
+}
+
+bool ShortageConfigDialog::focusStationValidationFailure(const QString &messageZh)
+{
+    static const QRegularExpression stationError(
+        QStringLiteral("行\\d+ 产品(88R|88|92) 工位(\\d+) 字段([A-Za-z]+)"));
+    const QRegularExpressionMatch match = stationError.match(messageZh);
+    if (!match.hasMatch())
+        return false;
+
+    ProductModel product = ProductModel::Model88;
+    if (!productFromName(match.captured(1), &product))
+        return false;
+
+    QTableWidget *table = m_tables.value(product, nullptr);
+    if (table == nullptr)
+        return false;
+
+    const int column = stationFieldColumn(match.captured(3));
+    if (column < 0)
+        return false;
+
+    const qint64 stationId = match.captured(2).toLongLong();
+    int targetRow = -1;
+    for (int row = 0; row < table->rowCount(); ++row) {
+        if (tableNumber(table, row, 0) == stationId) {
+            targetRow = row;
+            break;
+        }
+    }
+    if (targetRow < 0)
+        return false;
+
+    if (m_mainTabs != nullptr)
+        m_mainTabs->setCurrentIndex(0);
+    if (m_productTabs != nullptr)
+        m_productTabs->setCurrentIndex(productTabIndex(product));
+    table->setCurrentCell(targetRow, column);
+    table->scrollToItem(table->item(targetRow, column), QAbstractItemView::PositionAtCenter);
+    raise();
+    activateWindow();
+    table->setFocus(Qt::OtherFocusReason);
+    return true;
+}
+
+bool ShortageConfigDialog::focusValidationFailure(const QString &messageZh)
+{
+    if (focusStationValidationFailure(messageZh))
+        return true;
+
+    if (messageZh.contains(QStringLiteral("liveMesDayEndpoint"))) {
+        focusConfigurationWidget(m_endpointEdit);
+        return true;
+    }
+    if (messageZh.contains(QStringLiteral("sampleIntervalSeconds"))
+        || messageZh.contains(QStringLiteral("timeout < interval"))) {
+        focusConfigurationWidget(m_intervalSpin);
+        return true;
+    }
+    if (messageZh.contains(QStringLiteral("roundTimeoutSeconds"))) {
+        focusConfigurationWidget(m_timeoutSpin);
+        return true;
+    }
+    if (messageZh.contains(QStringLiteral("communicationAlarmMinutes"))) {
+        focusConfigurationWidget(m_alarmSpin);
+        return true;
+    }
+    if (messageZh.contains(QStringLiteral("preUnloadFailureLimit"))) {
+        focusConfigurationWidget(m_failureLimitSpin);
+        return true;
+    }
+    return false;
+}
+
 void ShortageConfigDialog::saveConfiguration()
 {
     // UI 状态分支：保存先查外部运行门禁，再做配置校验；失败只定位控件，不改生产 Engine。
@@ -358,8 +483,7 @@ void ShortageConfigDialog::saveConfiguration()
     const ShortageOperationResult validation = ShortageConfigStore::validate(candidate);
     if (!validation.ok) {
         QMessageBox::warning(this, QStringLiteral("配置错误"), validation.messageZh);
-        if (validation.messageZh.contains(QStringLiteral("liveMesDayEndpoint")))
-            m_endpointEdit->setFocus();
+        focusValidationFailure(validation.messageZh);
         return;
     }
 

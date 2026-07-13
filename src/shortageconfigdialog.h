@@ -55,6 +55,9 @@ private:
                                 int column,
                                 void (ShortageTestController::*slot)());
     ShortageConfiguration configurationFromUi() const;
+    bool focusValidationFailure(const QString &messageZh);
+    bool focusStationValidationFailure(const QString &messageZh);
+    void focusConfigurationWidget(QWidget *widget);
     void saveConfiguration();
 
     ShortageConfiguration m_configuration; ///< UI 编辑副本，保存前统一交给 ShortageConfigStore 校验。

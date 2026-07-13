@@ -80,3 +80,30 @@ QT_QPA_PLATFORM=offscreen ctest --test-dir build-shortage -R '^shortage_dialog_t
 结果：
 
 - `shortage_dialog_tests`: 1/1 passed。
+
+## 复审修复
+
+- 保存校验失败后不再只定位 `liveMesDayEndpointEdit`：
+  - 参数错误会切回“宽屏配置”页并聚焦对应 objectName 控件。
+  - `timeout < interval` 交叉校验按采样间隔问题处理，聚焦 `sampleIntervalSecondsSpin`。
+  - 产品表格错误会解析校验消息中的产品/工位/字段，切换到对应产品页并选中、聚焦失败单元格。
+- 构造期 `m_validatedConfiguration` 只从有效输入初始化；传入非法配置时使用合法 Sheet3 默认配置作为安全交接副本，避免保存前暴露非法配置。
+- 新增回归测试：
+  - 非法采样间隔组合聚焦 `sampleIntervalSecondsSpin`。
+  - 88R 产品表格第 3 行品号为空时切换到 `stationTable_88R` 并选中失败单元格。
+  - 构造传入非法 endpoint 时 `validatedConfiguration()` 不暴露非法副本。
+
+## 复审修复验证
+
+```bash
+cmake --build build-shortage --target shortage_dialog_tests --parallel
+QT_QPA_PLATFORM=offscreen ctest --test-dir build-shortage -R '^shortage_dialog_tests$' --output-on-failure
+QT_QPA_PLATFORM=offscreen ctest --test-dir build-shortage --output-on-failure
+git diff --check
+```
+
+结果：
+
+- `shortage_dialog_tests`: 1/1 passed。
+- 全量 `ctest`: 14/14 passed。
+- `git diff --check`: 无输出。

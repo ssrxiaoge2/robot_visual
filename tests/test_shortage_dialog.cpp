@@ -84,6 +84,9 @@ private slots:
     void manualAndFieldSourcesAreExclusive();
     void testPageProvidesEightOperationButtons();
     void saveExposesLastValidatedConfigurationOnly();
+    void constructorDoesNotExposeInvalidConfigurationAsValidated();
+    void saveValidationFocusesInvalidParameterControl();
+    void saveValidationSwitchesToInvalidStationCell();
     void recoveryEditsOnlyOneStationWithReasonAndTypedId();
     void ordinaryRecoveryShowsNoTaskDecisionControls();
 };
@@ -225,6 +228,67 @@ void ShortageDialogTest::saveExposesLastValidatedConfigurationOnly()
 
     QCOMPARE(savedSpy.size(), 1);
     QCOMPARE(dialog.validatedConfiguration().parameters.liveMesDayEndpoint, validEndpoint);
+}
+
+void ShortageDialogTest::constructorDoesNotExposeInvalidConfigurationAsValidated()
+{
+    ShortageConfiguration invalid = ShortageConfigStore::sheet3Defaults();
+    invalid.parameters.liveMesDayEndpoint = QStringLiteral("ftp://192.168.115.229/legacy");
+
+    ShortageConfigDialog dialog(invalid, [] {
+        return ShortageEditConditions {};
+    });
+
+    QVERIFY(ShortageConfigStore::validate(dialog.validatedConfiguration()).ok);
+    QVERIFY(!dialog.validatedConfiguration().parameters.liveMesDayEndpoint.contains(
+        QStringLiteral(".229")));
+}
+
+void ShortageDialogTest::saveValidationFocusesInvalidParameterControl()
+{
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(), [] {
+        return ShortageEditConditions {};
+    });
+    dialog.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+
+    auto *mainTabs = requiredChild<QTabWidget>(&dialog, "shortageMainTabs");
+    auto *intervalSpin = requiredChild<QSpinBox>(&dialog, "sampleIntervalSecondsSpin");
+    auto *timeoutSpin = requiredChild<QSpinBox>(&dialog, "roundTimeoutSecondsSpin");
+    auto *save = requiredChild<QPushButton>(&dialog, "saveConfigurationButton");
+
+    intervalSpin->setValue(5);
+    timeoutSpin->setValue(5);
+    closeNextMessageBox();
+    save->click();
+
+    QCOMPARE(mainTabs->currentIndex(), 0);
+    QTRY_COMPARE(QApplication::focusWidget(), intervalSpin);
+}
+
+void ShortageDialogTest::saveValidationSwitchesToInvalidStationCell()
+{
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(), [] {
+        return ShortageEditConditions {};
+    });
+    dialog.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+
+    auto *mainTabs = requiredChild<QTabWidget>(&dialog, "shortageMainTabs");
+    auto *productTabs = requiredChild<QTabWidget>(&dialog, "shortageProductTabs");
+    auto *table = requiredChild<QTableWidget>(&dialog, "stationTable_88R");
+    auto *save = requiredChild<QPushButton>(&dialog, "saveConfigurationButton");
+
+    mainTabs->setCurrentIndex(1);
+    table->item(2, 3)->setText(QString());
+    closeNextMessageBox();
+    save->click();
+
+    QCOMPARE(mainTabs->currentIndex(), 0);
+    QCOMPARE(productTabs->currentWidget(), table);
+    QCOMPARE(table->currentRow(), 2);
+    QCOMPARE(table->currentColumn(), 3);
+    QTRY_COMPARE(QApplication::focusWidget(), table);
 }
 
 void ShortageDialogTest::recoveryEditsOnlyOneStationWithReasonAndTypedId()
