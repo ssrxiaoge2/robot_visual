@@ -1,4 +1,4 @@
-find_package(Qt6 REQUIRED COMPONENTS Core Network Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Network Test Widgets)
 
 function(add_shortage_cpp_test target)
     add_executable(${target} ${ARGN})
@@ -148,6 +148,24 @@ add_shortage_cpp_test(shortage_test_controller_tests
 )
 target_compile_definitions(shortage_test_controller_tests PRIVATE
     ROBOT_VISUAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+add_shortage_cpp_test(shortage_dialog_tests
+    test_shortage_dialog.cpp
+    ../src/customSysScheduler.cpp
+    ../src/shortagesamplecoordinator.cpp
+    ../src/shortagestatestore.cpp
+    ../src/shortageledger.cpp
+    ../src/replenishmentplanner.cpp
+    ../src/shortageengine.cpp
+    ../src/shortagetestcontroller.cpp
+    ../src/shortageconfigstore.cpp
+    ../src/shortageconfigdialog.cpp
+    ../src/shortagerecoverydialog.cpp
+)
+target_link_libraries(shortage_dialog_tests PRIVATE Qt6::Widgets)
+set_tests_properties(shortage_dialog_tests PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
 
 add_shortage_cpp_test(shortage_config_tests

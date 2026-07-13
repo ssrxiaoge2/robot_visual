@@ -86,6 +86,10 @@ set(PROJECT_SOURCES
         src/shortagetestcontroller.h
         src/shortagestatestore.cpp
         src/shortagestatestore.h
+        src/shortageconfigdialog.cpp
+        src/shortageconfigdialog.h
+        src/shortagerecoverydialog.cpp
+        src/shortagerecoverydialog.h
 )
 
 qt_add_executable(wh-robot-visual
