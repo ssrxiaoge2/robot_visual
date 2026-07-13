@@ -76,6 +76,10 @@ set(PROJECT_SOURCES
         src/shortageconfigstore.h
         src/shortageledger.cpp
         src/shortageledger.h
+        src/replenishmentplanner.cpp
+        src/replenishmentplanner.h
+        src/shortageengine.cpp
+        src/shortageengine.h
         src/shortagestatestore.cpp
         src/shortagestatestore.h
 )

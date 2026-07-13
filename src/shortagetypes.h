@@ -211,4 +211,60 @@ struct ShortageStateLoadResult {
     QString messageZh;                       ///< 安全恢复摘要或联系维护人员原因。
 };
 
+/// Planner 只请求追加一箱，不暴露 FIFO 插队、重排或删除能力。
+struct ShortageDispatchRequest {
+    quint64 replenishmentOrderNo = 0; ///< 跨重启幂等编号；拒收重试不得改变。
+    int stationId = 0;                ///< 目标代码工位 1～12。
+    ReplenishmentOrigin origin = ReplenishmentOrigin::Automatic; ///< 自动或人工。
+};
+
+/// LineManager 任务信号翻译后的领域事实；Engine 不依赖 UI Task 结构。
+enum class TaskFactKind {
+    Started,          ///< 已从 FIFO 取出并开始执行。
+    MaterialUnloaded, ///< 唯一倒料动作已经完成。
+    Succeeded,        ///< 全流程成功终态。
+    Failed,           ///< 任务失败；是否倒料由补料单状态判断。
+    Canceled,         ///< Stop/清队列取消。
+    SystemError       ///< 设备级错误进入 Error。
+};
+
+struct TaskFact {
+    TaskFactKind kind = TaskFactKind::Started; ///< 本次事实类型。
+    quint64 replenishmentOrderNo = 0;          ///< 跨重启幂等键。
+    quint64 taskId = 0;                        ///< 当前程序任务号。
+    int stationId = 0;                         ///< 事实声称的代码工位。
+    ReplenishmentOrigin origin = ReplenishmentOrigin::Automatic; ///< 正式来源。
+    QDateTime occurredAtUtc;                   ///< 事实发生 UTC 时间。
+    QString reasonZh;                          ///< 失败/取消/错误原因。
+};
+
+/// Engine 的统一结果；changed=false 时 UI 可以只追加日志而不重绘整表。
+struct ShortageEngineResult {
+    bool ok = false;          ///< 事务是否完整成功。
+    bool changed = false;     ///< 正式运行状态是否改变。
+    bool criticalLock = false;///< 是否已停止新的自动意图。
+    bool hasProductionDelta = false; ///< 账本确认正增量时透传给 UI 和结构化日志。
+    qint64 productionDelta = 0;      ///< 本轮实际用于扣减的产量增量，不做未定义上限判断。
+    QString messageZh;        ///< 完整中文结果。
+};
+
+/// UI 只读快照；不暴露可修改的 Ledger/Planner 引用。
+struct ShortageUiSnapshot {
+    ShortageInputSource inputSource = ShortageInputSource::Mock; ///< 当前二选一来源。
+    ShortageCommunicationState communication = ShortageCommunicationState::Stopped;
+    ShortageRuntimeState runtime;              ///< 复制后的账本/计划摘要。
+    bool hasLastProductionDelta = false;        ///< 最近一次已确认正增量是否可显示。
+    qint64 lastProductionDelta = 0;             ///< 最近一次已入账扣减增量；每次有效增量均更新日志和该字段。
+    QString summaryLine1Zh;                    ///< 产品/模式/actualQty/通信。
+    QString summaryLine2Zh;                    ///< 活动工位/等待数/账本报警。
+};
+
+/// Planner 操作结果；ok=false 时传入状态副本不得再发布为正式状态。
+struct PlannerApplyResult {
+    bool ok = false;          ///< 计划状态是否完整更新。
+    bool changed = false;     ///< 等待表、活动工位、补料单或失败计数是否变化。
+    bool criticalLock = false;///< 未知/重复/错工位事实是否触发严重锁定。
+    QString messageZh;        ///< 包含补料单、taskId、工位和处理动作。
+};
+
 #endif // SHORTAGETYPES_H

@@ -147,3 +147,11 @@ add_shortage_cpp_test(shortage_ledger_tests
     test_shortage_ledger.cpp
     ../src/shortageledger.cpp
 )
+
+add_shortage_cpp_test(replenishment_planner_tests
+    test_replenishment_planner.cpp
+    ../src/replenishmentplanner.cpp
+    ../src/shortageengine.cpp
+    ../src/shortageledger.cpp
+    ../src/shortagestatestore.cpp
+)
