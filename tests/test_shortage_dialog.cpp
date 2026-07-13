@@ -1,10 +1,12 @@
 #include "shortageconfigdialog.h"
 #include "shortagerecoverydialog.h"
 
+#include <QApplication>
 #include <QButtonGroup>
 #include <QDialogButtonBox>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSignalSpy>
@@ -13,6 +15,7 @@
 #include <QTableWidget>
 #include <QTest>
 #include <QTextEdit>
+#include <QTimer>
 
 namespace {
 
@@ -47,6 +50,26 @@ T *requiredChild(QObject *parent, const char *objectName)
     return child;
 }
 
+void closeNextMessageBox()
+{
+    QTimer::singleShot(0, [] {
+        for (QWidget *widget : QApplication::topLevelWidgets()) {
+            if (auto *messageBox = qobject_cast<QMessageBox *>(widget)) {
+                messageBox->accept();
+                return;
+            }
+        }
+        QTimer::singleShot(0, [] {
+            for (QWidget *widget : QApplication::topLevelWidgets()) {
+                if (auto *messageBox = qobject_cast<QMessageBox *>(widget)) {
+                    messageBox->accept();
+                    return;
+                }
+            }
+        });
+    });
+}
+
 } // namespace
 
 class ShortageDialogTest final : public QObject
@@ -59,6 +82,8 @@ private slots:
     void liveMesEndpointHasIndependentNamedEditor();
     void testBoundaryWarningIsAlwaysVisible();
     void manualAndFieldSourcesAreExclusive();
+    void testPageProvidesEightOperationButtons();
+    void saveExposesLastValidatedConfigurationOnly();
     void recoveryEditsOnlyOneStationWithReasonAndTypedId();
     void ordinaryRecoveryShowsNoTaskDecisionControls();
 };
@@ -142,6 +167,64 @@ void ShortageDialogTest::manualAndFieldSourcesAreExclusive()
     manual->click();
     QVERIFY(manual->isChecked());
     QVERIFY(!field->isChecked());
+}
+
+void ShortageDialogTest::testPageProvidesEightOperationButtons()
+{
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(), [] {
+        return ShortageEditConditions {};
+    });
+
+    const QList<const char *> buttonNames {
+        "testInitZeroButton",
+        "testStartFieldButton",
+        "testStopButton",
+        "testDispatchAcceptedButton",
+        "testDispatchRejectedButton",
+        "testFailureBeforeUnloadButton",
+        "testMaterialUnloadedButton",
+        "testTaskSucceededButton",
+    };
+    for (const char *name : buttonNames)
+        QVERIFY(requiredChild<QPushButton>(&dialog, name)->isEnabled());
+}
+
+void ShortageDialogTest::saveExposesLastValidatedConfigurationOnly()
+{
+    ShortageEditConditions editConditions;
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(), [&editConditions] {
+        return editConditions;
+    });
+    QSignalSpy savedSpy(&dialog, &ShortageConfigDialog::configurationSaved);
+
+    auto *endpointEdit = requiredChild<QLineEdit>(&dialog, "liveMesDayEndpointEdit");
+    auto *save = requiredChild<QPushButton>(&dialog, "saveConfigurationButton");
+
+    const QString validEndpoint =
+        QStringLiteral("https://192.168.115.228:5084/api/MesData/day");
+    endpointEdit->setText(validEndpoint);
+    save->click();
+
+    QCOMPARE(savedSpy.size(), 1);
+    QCOMPARE(dialog.validatedConfiguration().parameters.liveMesDayEndpoint, validEndpoint);
+
+    const QString blockedEndpoint =
+        QStringLiteral("https://192.168.115.228:5084/api/MesData/blocked");
+    editConditions.liveSamplingStopped = false;
+    endpointEdit->setText(blockedEndpoint);
+    closeNextMessageBox();
+    save->click();
+
+    QCOMPARE(savedSpy.size(), 1);
+    QCOMPARE(dialog.validatedConfiguration().parameters.liveMesDayEndpoint, validEndpoint);
+
+    editConditions.liveSamplingStopped = true;
+    endpointEdit->setText(QStringLiteral("ftp://192.168.115.228/api/MesData/day"));
+    closeNextMessageBox();
+    save->click();
+
+    QCOMPARE(savedSpy.size(), 1);
+    QCOMPARE(dialog.validatedConfiguration().parameters.liveMesDayEndpoint, validEndpoint);
 }
 
 void ShortageDialogTest::recoveryEditsOnlyOneStationWithReasonAndTypedId()

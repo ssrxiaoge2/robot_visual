@@ -57,3 +57,26 @@ cmake --build build-shortage --target wh-robot-visual -j2
 
 - 当前保存按钮只发出 `configurationSaved()`，未在 Dialog 内绑定具体正式配置路径；这是为了保持 Dialog 不直接写生产 Engine/外部状态，后续集成层应负责持久化路径与刷新。
 - 新增 UI 已具备 objectName 契约和控制器连接点，但尚未接入主窗口入口；Task 8 brief 未要求改主窗口。
+
+## 评审修复
+
+- 新增 `ShortageConfigDialog::validatedConfiguration() const` 安全交接 API：
+  - 返回最近一次同时通过运行门禁和 `ShortageConfigStore::validate()` 的配置副本。
+  - 保存被门禁或校验拦截时保持上一份成功值不变。
+  - Dialog 仍不直接写生产 Engine 或配置文件，由后续集成层读取该副本并负责持久化。
+- 新增回归测试：
+  - 有效保存后 `configurationSaved()` 发出一次，`validatedConfiguration()` 暴露已编辑的 MES 地址。
+  - 运行门禁拦截保存时不发出 `configurationSaved()`，已暴露配置不被污染。
+  - 非法 endpoint 拦截保存时不发出 `configurationSaved()`，已暴露配置不被污染。
+  - 明确断言完整逻辑测试页提供 8 个任务事件按钮。
+
+## 评审修复验证
+
+```bash
+cmake --build build-shortage --target shortage_dialog_tests --parallel
+QT_QPA_PLATFORM=offscreen ctest --test-dir build-shortage -R '^shortage_dialog_tests$' --output-on-failure
+```
+
+结果：
+
+- `shortage_dialog_tests`: 1/1 passed。

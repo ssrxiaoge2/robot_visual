@@ -66,11 +66,17 @@ ShortageConfigDialog::ShortageConfigDialog(ShortageConfiguration configuration,
                                            QWidget *parent)
     : QDialog(parent),
       m_configuration(std::move(configuration)),
+      m_validatedConfiguration(m_configuration),
       m_editGateProvider(std::move(editGateProvider)),
       m_testController(testController),
       m_snapshot(std::move(snapshot))
 {
     buildUi();
+}
+
+ShortageConfiguration ShortageConfigDialog::validatedConfiguration() const
+{
+    return m_validatedConfiguration;
 }
 
 void ShortageConfigDialog::buildUi()
@@ -358,5 +364,6 @@ void ShortageConfigDialog::saveConfiguration()
     }
 
     m_configuration = candidate;
+    m_validatedConfiguration = candidate;
     emit configurationSaved();
 }

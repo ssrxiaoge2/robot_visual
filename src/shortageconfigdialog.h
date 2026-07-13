@@ -33,6 +33,10 @@ public:
                                   ShortageUiSnapshot snapshot = {},
                                   QWidget *parent = nullptr);
 
+    /// 返回最近一次通过门禁和 ShortageConfigStore::validate() 的配置副本，供集成层持久化。
+    /// 保存被门禁/校验拦截时保持上一次成功值，Dialog 不直接写生产 Engine 或文件。
+    ShortageConfiguration validatedConfiguration() const;
+
 signals:
     /// 配置通过校验并完成保存动作后通知外层刷新只读视图。
     void configurationSaved();
@@ -54,6 +58,7 @@ private:
     void saveConfiguration();
 
     ShortageConfiguration m_configuration; ///< UI 编辑副本，保存前统一交给 ShortageConfigStore 校验。
+    ShortageConfiguration m_validatedConfiguration; ///< 最近一次可安全交给外层保存的已校验配置。
     EditGateProvider m_editGateProvider;   ///< 非拥有运行门禁查询，避免 Dialog 读取 Line/Engine。
     ShortageTestController *m_testController = nullptr; ///< 非拥有测试控制器，只连接测试页按钮。
     ShortageUiSnapshot m_snapshot; ///< 打开弹窗时的只读快照，用于摘要展示。
