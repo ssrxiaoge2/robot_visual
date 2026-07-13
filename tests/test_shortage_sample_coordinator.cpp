@@ -262,6 +262,7 @@ private slots:
     void actualQtyUsesSignedSixtyFourBitValidation();
     void oneRoundContextGlitchDoesNotSwitch();
     void twoStableRoundsCreatePendingContext();
+    void directContextConfirmationSlotCanActivateImmediately();
     void allNineContextCombinationsAreRecognized();
 };
 
@@ -767,6 +768,38 @@ void ShortageSampleCoordinatorTest::twoStableRoundsCreatePendingContext()
     coordinator.activateConfirmedContextForTestOrCaller(ProductModel::Model92, ProductionMode::RightOnly);
     coordinator.triggerNextRoundForTest();
     completeRound(scheduler, scheduler.mesRequests.last(), 104, ProductModel::Model92, ProductionMode::RightOnly);
+    QCOMPARE(stableSpy.count(), 1);
+    const auto activatedSample = qvariant_cast<ShortageSample>(stableSpy.first().at(0));
+    QCOMPARE(activatedSample.product, ProductModel::Model92);
+    QCOMPARE(activatedSample.mode, ProductionMode::RightOnly);
+}
+
+void ShortageSampleCoordinatorTest::directContextConfirmationSlotCanActivateImmediately()
+{
+    FakeCustomSysScheduler scheduler;
+    ShortageSampleCoordinator coordinator(&scheduler);
+    coordinator.setParameters(fastParameters());
+    QSignalSpy stableSpy(&coordinator, &ShortageSampleCoordinator::stableSampleReady);
+
+    establishInitialContext(coordinator, scheduler, 100);
+    stableSpy.clear();
+
+    connect(&coordinator,
+            &ShortageSampleCoordinator::contextChangeConfirmed,
+            &coordinator,
+            [&coordinator](ProductModel product, ProductionMode mode) {
+                coordinator.activateConfirmedContextForTestOrCaller(product, mode);
+            },
+            Qt::DirectConnection);
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 101, ProductModel::Model92, ProductionMode::RightOnly);
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 102, ProductModel::Model92, ProductionMode::RightOnly);
+    QCOMPARE(stableSpy.count(), 0);
+
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 103, ProductModel::Model92, ProductionMode::RightOnly);
     QCOMPARE(stableSpy.count(), 1);
     const auto activatedSample = qvariant_cast<ShortageSample>(stableSpy.first().at(0));
     QCOMPARE(activatedSample.product, ProductModel::Model92);

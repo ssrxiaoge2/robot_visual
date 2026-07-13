@@ -371,6 +371,9 @@ void ShortageSampleCoordinator::handleCompletedRound(ProductModel product,
     const bool initialContext = !m_hasStableContext;
     m_hasCandidateContext = false;
     m_candidateCount = 0;
+    m_hasPendingConfirmedContext = true;
+    m_pendingProduct = product;
+    m_pendingMode = mode;
     emit contextChangeConfirmed(product, mode);
 
     if (initialContext) {
@@ -378,14 +381,12 @@ void ShortageSampleCoordinator::handleCompletedRound(ProductModel product,
         m_hasStableContext = true;
         m_stableProduct = product;
         m_stableMode = mode;
+        m_hasPendingConfirmedContext = false;
         emitStableSample(product, mode, m_interruptedSinceLastSample);
         return;
     }
 
     // 换型只确认待切换上下文；旧任务排空前不得覆盖 stable context 或输出新上下文样本。
-    m_hasPendingConfirmedContext = true;
-    m_pendingProduct = product;
-    m_pendingMode = mode;
 }
 
 void ShortageSampleCoordinator::emitStableSample(ProductModel product,

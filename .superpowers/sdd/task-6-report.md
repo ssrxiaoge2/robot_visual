@@ -108,3 +108,23 @@ ctest --test-dir build-shortage -R '^shortage_sample_coordinator_tests$' --outpu
 ```
 
 结果：`shortage_sample_coordinator_tests` passed。
+
+## Review Fix 2026-07-14 Round 2
+
+修复复审阻塞项：
+
+- `contextChangeConfirmed` 发出前先写入 `m_hasPendingConfirmedContext/m_pendingProduct/m_pendingMode`，保证 Qt 同线程直接连接槽可以在信号回调内立即调用 `activateConfirmedContextForTestOrCaller(...)` 并成功激活。
+- 初次稳定上下文仍保持原语义：无旧任务需要排空，发出确认后立即建立 stable context、输出首个稳定样本，并清除 pending 标记。
+
+新增测试：
+
+- `directContextConfirmationSlotCanActivateImmediately()`：使用 `Qt::DirectConnection` 连接 `contextChangeConfirmed`，槽内立即调用 `activateConfirmedContextForTestOrCaller(...)`；下一轮同上下文必须输出 `stableSampleReady`。
+
+验证：
+
+```bash
+cmake --build build-shortage --target shortage_sample_coordinator_tests --parallel
+ctest --test-dir build-shortage -R '^shortage_sample_coordinator_tests$' --output-on-failure
+```
+
+结果：`shortage_sample_coordinator_tests` passed。
