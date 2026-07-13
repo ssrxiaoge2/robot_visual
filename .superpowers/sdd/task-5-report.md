@@ -57,3 +57,17 @@
 - `ctest --test-dir build-shortage -R '^replenishment_planner_tests$' --output-on-failure`：1/1 通过。
 - `ctest --test-dir build-shortage --output-on-failure`：11/12 通过；非本任务范围的 `shortage_sample_coordinator_tests` 持续失败于 `protocolReplyKeepsRoundIdAndAddressRange()` 的 `plcSpy.wait(2000)`。
 - `ctest --test-dir build-shortage -R '^shortage_sample_coordinator_tests$' --output-on-failure`：复现同一失败，确认不是本次 focused planner 测试失败。
+
+## Review Fix 2 2026-07-14
+
+- 修复 PS-15 恢复安装校验：恢复时按工位统计 `AwaitingDispatch`、`Queued`、`Running` 这类尚未倒料且仍代表一箱占用的非终态补料单，同一工位出现第二个即拒绝恢复并进入严重锁定。
+- 保留安全历史：`Succeeded`、`FailedBeforeUnload`、`FailedAfterUnload`、`Canceled` 等终态/历史补料单不计入未倒料占用，避免误拒绝可保留审计历史。
+- 新增回归测试 `restoreRejectsMultipleOutstandingOrdersPerStation()`：覆盖同工位两个 `AwaitingDispatch` 恢复必须拒绝，以及同工位一个 `AwaitingDispatch` + 一个 `Succeeded` 历史单可以安装。
+
+## Review Fix 2 Verification 2026-07-14
+
+- RED：新增回归测试后，focused test 失败在 `restoreRejectsMultipleOutstandingOrdersPerStation()` 的 `!duplicateResult.ok`，证明恢复校验此前错误接受同工位两个 `AwaitingDispatch`。
+- `cmake --build build-shortage --target replenishment_planner_tests -j2`：通过。
+- `ctest --test-dir build-shortage -R '^replenishment_planner_tests$' --output-on-failure`：1/1 通过。
+- `ctest --test-dir build-shortage --output-on-failure`：11/12 通过；非本任务范围的 `shortage_sample_coordinator_tests` 仍失败于 `protocolReplyKeepsRoundIdAndAddressRange()` 的 `plcSpy.wait(2000)`。
+- `git diff --check`：无输出。

@@ -73,6 +73,13 @@ bool hasInFlightOrder(const ShortageRuntimeState &state)
     return false;
 }
 
+bool isOutstandingNotUnloadedOrder(ReplenishmentOrderState state)
+{
+    return state == ReplenishmentOrderState::AwaitingDispatch
+        || state == ReplenishmentOrderState::Queued
+        || state == ReplenishmentOrderState::Running;
+}
+
 bool sampleChangesContext(const ShortageRuntimeState &state, const ShortageSample &sample)
 {
     return state.hasStableContext
@@ -101,6 +108,7 @@ ShortageOperationResult validatePlannerRestoreState(const ShortageConfiguration 
     }
 
     QSet<quint64> orderNos;
+    QSet<int> stationsWithOutstandingNotUnloadedOrder;
     quint64 maxOrderNo = 0;
     for (const ReplenishmentOrder &order : state.orders) {
         if (order.orderNo == 0)
@@ -131,6 +139,13 @@ ShortageOperationResult validatePlannerRestoreState(const ShortageConfiguration 
             && order.state != ReplenishmentOrderState::FailedAfterUnload) {
             return {false, QStringLiteral("恢复状态校验失败：补料单%1 已倒料但终态不一致")
                                .arg(order.orderNo)};
+        }
+        if (isOutstandingNotUnloadedOrder(order.state)) {
+            if (stationsWithOutstandingNotUnloadedOrder.contains(order.stationId)) {
+                return {false, QStringLiteral("恢复状态校验失败：工位%1存在多个未倒料补料单")
+                                   .arg(order.stationId)};
+            }
+            stationsWithOutstandingNotUnloadedOrder.insert(order.stationId);
         }
     }
     if (state.nextReplenishmentOrderNo <= maxOrderNo) {

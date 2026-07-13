@@ -156,6 +156,7 @@ private slots:
     void pendingContextWaitsForOldTasksThenDeducts();    // PS-11：旧任务排空前只保存待切换产量。
     void restoredStateInstallsOnlyAfterFullValidation(); // PS-15：恢复值只能经 Engine 安装。
     void restoreRejectsInvalidActiveAndWaitingSemantics();// PS-15：活动工位和等待表必须双向一致。
+    void restoreRejectsMultipleOutstandingOrdersPerStation();// PS-15：同工位最多一个未倒料补料单。
     void unsafeRestoreLocksWithoutReplacingEngineState();// PS-15：不安全恢复不发布部分状态。
     void invalidTaskFactsPersistCriticalLock();          // TK-05：严重任务事实必须落盘锁定审计。
 };
@@ -485,6 +486,49 @@ void ReplenishmentPlannerTest::restoreRejectsInvalidActiveAndWaitingSemantics()
     const ShortageEngineResult waitingResult = waitingEngine.installRestoredState(load, utc(21));
     QVERIFY(!waitingResult.ok);
     QVERIFY(waitingResult.criticalLock);
+}
+
+void ReplenishmentPlannerTest::restoreRejectsMultipleOutstandingOrdersPerStation()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+
+    ShortageRuntimeState duplicatedOutstanding = initializedState(50);
+    duplicatedOutstanding.operatorConfirmedRestore = false;
+    addAwaitingOrder(&duplicatedOutstanding, 4, 41);
+    addAwaitingOrder(&duplicatedOutstanding, 4, 42);
+    ShortageStateLoadResult load;
+    load.ok = true;
+    load.stateFound = true;
+    load.source = ShortageRestoreSource::Main;
+    load.state = duplicatedOutstanding;
+
+    ShortageEngine duplicateEngine(testConfiguration(), &store);
+    const ShortageEngineResult duplicateResult =
+        duplicateEngine.installRestoredState(load, utc(30));
+    QVERIFY(!duplicateResult.ok);
+    QVERIFY(duplicateResult.criticalLock);
+
+    ShortageRuntimeState retainedHistory = initializedState(50);
+    retainedHistory.operatorConfirmedRestore = false;
+    addAwaitingOrder(&retainedHistory, 4, 43);
+    ReplenishmentOrder historical;
+    historical.orderNo = 44;
+    historical.stationId = 4;
+    historical.origin = ReplenishmentOrigin::Automatic;
+    historical.state = ReplenishmentOrderState::Succeeded;
+    historical.taskId = 4401;
+    historical.unloadAccounted = true;
+    historical.createdAtUtc = utc(44);
+    retainedHistory.orders.append(historical);
+    retainedHistory.nextReplenishmentOrderNo = 45;
+    load.state = retainedHistory;
+
+    ShortageEngine historyEngine(testConfiguration(), &store);
+    const ShortageEngineResult historyResult =
+        historyEngine.installRestoredState(load, utc(31));
+    QVERIFY2(historyResult.ok, qPrintable(historyResult.messageZh));
 }
 
 void ReplenishmentPlannerTest::unsafeRestoreLocksWithoutReplacingEngineState()
