@@ -74,6 +74,8 @@ set(PROJECT_SOURCES
         src/shortagetypes.h
         src/shortageconfigstore.cpp
         src/shortageconfigstore.h
+        src/shortagestatestore.cpp
+        src/shortagestatestore.h
 )
 
 qt_add_executable(wh-robot-visual

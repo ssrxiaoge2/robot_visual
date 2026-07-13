@@ -2,6 +2,7 @@
 #define SHORTAGETYPES_H
 
 #include <QDateTime>
+#include <QJsonObject>
 #include <QList>
 #include <QString>
 
@@ -129,6 +130,85 @@ struct ReplenishmentOrder {
     bool unloadAccounted = false;                ///< true 后重复倒料不能再次加箱。
     QDateTime createdAtUtc;                      ///< 建单 UTC 时间。
     QString lastReasonZh;                        ///< 最近拒收/失败/终态原因。
+};
+
+/// 正式和独立测试使用不同目录前缀，禁止调用方自由拼接文件名。
+enum class ShortageStateNamespace {
+    Production,    ///< 正式账本、正式任务和正式审计。
+    StandaloneTest ///< 独立测试状态，不得影响 Production。
+};
+
+/// 一条聚合审计事件；details 保存确定字段，不保存不可解析的整段日志文本。
+struct ShortageAuditEvent {
+    quint64 sequence = 0;      ///< 状态命名空间内单调递增流水号。
+    QDateTime occurredAtUtc;   ///< UTC 事件时间，用于排序和现场追踪。
+    QString eventType;         ///< 稳定英文键，例如 sample_applied、box_unloaded。
+    QString messageZh;         ///< 面向维护人员的完整中文说明。
+    QJsonObject details;       ///< 工位、原值、新值、taskId、补料单等结构化字段。
+};
+
+/// 单工位的正式账本状态；库存属于事实，等待/暂停属于计划恢复所需状态。
+struct ShortageStationRuntime {
+    int stationId = 0;               ///< 代码工位 1～12。
+    qint64 stock = 0;                ///< 当前正式库存，允许为负数。
+    QDateTime firstLowAtUtc;         ///< 首次跌破最低位时间；不在等待表时为空。
+    int consecutivePreUnloadFailures = 0; ///< 连续倒料前失败次数。
+    bool automaticPaused = false;    ///< true 时只阻止该工位自动补料。
+    QString pauseReasonZh;           ///< 暂停原因和维护处理提示。
+};
+
+/// actualQty 基线及两轮清零候选；恢复回退时不能复用普通清零分支。
+struct ActualQtyRuntime {
+    bool hasBaseline = false;        ///< false 时首个有效样本只建立基线。
+    qint64 baseline = 0;             ///< 最近一次已经入账扣减的累计产量。
+    bool hasResetCandidate = false;  ///< true 表示观察到一次小于 baseline 的值。
+    qint64 resetCandidate = 0;       ///< 等待下一有效轮确认的较小值。
+    bool interrupted = false;        ///< 通信中断后恢复值回退必须联系维护。
+};
+
+inline constexpr int kShortageStateFormatVersion = 1; ///< JSON 格式版本，不兼容版本拒绝加载。
+
+/// 可从快照和流水完整恢复的全部正式/测试运行状态。
+struct ShortageRuntimeState {
+    int formatVersion = kShortageStateFormatVersion; ///< 序列化版本。
+    quint64 configurationRevision = 0;               ///< 建账/保存时配置修订号。
+    bool initialized = false;                        ///< 是否已经安全恢复或从现场清空建账。
+    bool operatorConfirmedRestore = false;           ///< 启动后人工确认前不得自动派单。
+    bool hasStableContext = false;                   ///< 当前产品/模式是否已两轮稳定。
+    ProductModel product = ProductModel::Model88;    ///< 当前稳定产品。
+    ProductionMode mode = ProductionMode::LeftRight;///< 当前稳定模式。
+    bool hasPendingContext = false;                  ///< 换型已确认但旧任务尚未排空。
+    ProductModel pendingProduct = ProductModel::Model88; ///< 待切换产品。
+    ProductionMode pendingMode = ProductionMode::LeftRight; ///< 待切换模式。
+    bool hasPendingActualQty = false;                ///< 换型等待期间是否保存了最新产量。
+    qint64 pendingActualQty = 0;                     ///< 旧任务排空后按新用量一次补扣到该值。
+    ActualQtyRuntime actualQty;                       ///< 产量基线和清零候选。
+    QList<ShortageStationRuntime> stations;           ///< 恰好 12 个代码工位状态。
+    QList<int> waitingStationIds;                     ///< 按首次时间/工位号排好的等待表。
+    int activeStationId = 0;                          ///< 0 表示无活动计划。
+    QList<ReplenishmentOrder> orders;                 ///< 恢复和幂等所需未完成/近期补料单。
+    quint64 nextReplenishmentOrderNo = 1;             ///< 下一个正式补料单号。
+    quint64 nextAuditSequence = 1;                    ///< 下一条流水号。
+    bool criticalLock = false;                        ///< true 时停止所有新自动派单。
+    QString criticalReasonZh;                         ///< 严重锁定原因和处理动作。
+    QDateTime lastSavedAtUtc;                         ///< 最近完整快照时间。
+};
+
+/// 恢复来源用于 UI 摘要和审计，不能只返回一个 bool。
+enum class ShortageRestoreSource {
+    None,    ///< 没有任何状态文件，可在现场清空确认后新建。
+    Main,    ///< 主快照校验通过。
+    Backup,  ///< 主快照失败，使用备份。
+    Journal  ///< 在有效快照后重放流水得到最终状态。
+};
+
+struct ShortageStateLoadResult {
+    bool ok = false;                         ///< false 时 state 不得进入自动模式。
+    bool stateFound = false;                 ///< None 且无文件时为 false。
+    bool requiresMaintenance = false;        ///< 三份损坏或语义不确定时为 true。
+    ShortageRestoreSource source = ShortageRestoreSource::None; ///< 实际恢复来源。
+    ShortageRuntimeState state;              ///< 仅 ok=true 时可使用。
+    QString messageZh;                       ///< 安全恢复摘要或联系维护人员原因。
 };
 
 #endif // SHORTAGETYPES_H

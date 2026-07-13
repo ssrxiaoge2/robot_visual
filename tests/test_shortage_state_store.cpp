@@ -1,0 +1,393 @@
+#include "shortagestatestore.h"
+
+#include <QCryptographicHash>
+#include <QDir>
+#include <QFile>
+#include <QJsonDocument>
+#include <QJsonObject>
+#include <QTemporaryDir>
+#include <QTest>
+#include <QTimeZone>
+
+namespace {
+
+QString productionMain(const QTemporaryDir &dir)
+{
+    return dir.filePath(QStringLiteral("production-state.json"));
+}
+
+QString productionBackup(const QTemporaryDir &dir)
+{
+    return dir.filePath(QStringLiteral("production-state.backup.json"));
+}
+
+QString productionJournal(const QTemporaryDir &dir)
+{
+    return dir.filePath(QStringLiteral("production-events.jsonl"));
+}
+
+QString testMain(const QTemporaryDir &dir)
+{
+    return dir.filePath(QStringLiteral("test-state.json"));
+}
+
+ShortageRuntimeState sampleState(quint64 nextSequence = 2)
+{
+    ShortageRuntimeState state;
+    state.configurationRevision = 42;
+    state.initialized = true;
+    state.operatorConfirmedRestore = true;
+    state.hasStableContext = true;
+    state.product = ProductModel::Model88R;
+    state.mode = ProductionMode::LeftOnly;
+    state.actualQty.hasBaseline = true;
+    state.actualQty.baseline = 1000;
+    state.nextAuditSequence = nextSequence;
+    state.nextReplenishmentOrderNo = 9;
+    state.stations.reserve(12);
+    for (int i = 1; i <= 12; ++i) {
+        ShortageStationRuntime station;
+        station.stationId = i;
+        station.stock = 1000 + i;
+        state.stations.append(station);
+    }
+    state.waitingStationIds = {3, 5};
+    state.activeStationId = 3;
+    return state;
+}
+
+ShortageAuditEvent auditEvent(quint64 sequence,
+                         const QString &eventType = QStringLiteral("sample_applied"))
+{
+    ShortageAuditEvent audit;
+    audit.sequence = sequence;
+    audit.occurredAtUtc = QDateTime::fromString(QStringLiteral("2026-07-13T01:02:03Z"),
+                                                Qt::ISODate);
+    audit.eventType = eventType;
+    audit.messageZh = QStringLiteral("测试流水 %1").arg(sequence);
+    audit.details = {{QStringLiteral("stationId"), 3},
+                     {QStringLiteral("newStock"), QString::number(900 - int(sequence))}};
+    return audit;
+}
+
+QByteArray readAll(const QString &path)
+{
+    QFile file(path);
+    if (!file.open(QIODevice::ReadOnly))
+        return {};
+    return file.readAll();
+}
+
+int nonEmptyLineCount(const QString &path)
+{
+    int count = 0;
+    const QList<QByteArray> lines = readAll(path).split('\n');
+    for (const QByteArray &line : lines) {
+        if (!line.trimmed().isEmpty())
+            ++count;
+    }
+    return count;
+}
+
+void overwrite(const QString &path, const QByteArray &bytes)
+{
+    QFile file(path);
+    QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QCOMPARE(file.write(bytes), qint64(bytes.size()));
+}
+
+void refreshChecksum(QJsonObject *root)
+{
+    root->remove(QStringLiteral("checksum"));
+    const QByteArray bytes = QJsonDocument(*root).toJson(QJsonDocument::Compact);
+    const QByteArray checksum =
+        QCryptographicHash::hash(bytes, QCryptographicHash::Sha256).toHex();
+    root->insert(QStringLiteral("checksum"), QString::fromLatin1(checksum));
+}
+
+QDateTime utcFromSeconds(qint64 seconds)
+{
+    return QDateTime::fromSecsSinceEpoch(seconds, QTimeZone::UTC);
+}
+
+} // namespace
+
+class ShortageStateStoreTest final : public QObject
+{
+    Q_OBJECT
+private slots:
+    void unchangedStateDoesNotWrite();
+    void oneSampleWritesOneAggregateEvent();
+    void periodicSnapshotIsLimitedToSixtySeconds();
+    void criticalEventsForceImmediateSnapshot();
+    void interruptedTemporaryWriteKeepsMainFile();
+    void corruptedMainFallsBackToBackup();
+    void journalReplayRestoresPostSnapshotState();
+    void journalGapOrDuplicateRejectsBareSnapshot();
+    void checksumAndVersionErrorsAreRejected();
+    void allCorruptSourcesLockAutomaticMode();
+    void testNamespaceNeverTouchesProductionFiles();
+    void persistenceFailureAfterUnloadKeepsMemoryFact();
+    void safeRestoreRequiresOperatorConfirmation();
+    void zeroLedgerRequiresSiteClearConfirmation();
+};
+
+void ShortageStateStoreTest::unchangedStateDoesNotWrite()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+    ShortageRuntimeState state = sampleState(1);
+
+    const ShortageOperationResult result =
+        store.savePeriodic(state, ShortageAuditEvent{}, QDateTime::currentDateTimeUtc());
+
+    QVERIFY2(result.ok, qPrintable(result.messageZh));
+    QVERIFY(!QFile::exists(productionMain(dir)));
+    QVERIFY(!QFile::exists(productionJournal(dir)));
+}
+
+void ShortageStateStoreTest::oneSampleWritesOneAggregateEvent()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+    ShortageRuntimeState state = sampleState(2);
+
+    const ShortageOperationResult result =
+        store.savePeriodic(state, auditEvent(1), utcFromSeconds(1000));
+
+    QVERIFY2(result.ok, qPrintable(result.messageZh));
+    QCOMPARE(nonEmptyLineCount(productionJournal(dir)), 1);
+    QVERIFY(readAll(productionJournal(dir)).contains("sample_applied"));
+}
+
+void ShortageStateStoreTest::periodicSnapshotIsLimitedToSixtySeconds()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+
+    ShortageRuntimeState first = sampleState(2);
+    first.lastSavedAtUtc = utcFromSeconds(1000);
+    QVERIFY(store.savePeriodic(first, auditEvent(1), first.lastSavedAtUtc).ok);
+    const QByteArray firstSnapshot = readAll(productionMain(dir));
+    QVERIFY(!firstSnapshot.isEmpty());
+
+    ShortageRuntimeState second = first;
+    second.nextAuditSequence = 3;
+    second.stations[0].stock = 777;
+    second.lastSavedAtUtc = first.lastSavedAtUtc;
+    QVERIFY(store.savePeriodic(second, auditEvent(2),
+                                first.lastSavedAtUtc.addSecs(59)).ok);
+
+    QCOMPARE(readAll(productionMain(dir)), firstSnapshot);
+    QCOMPARE(nonEmptyLineCount(productionJournal(dir)), 2);
+}
+
+void ShortageStateStoreTest::criticalEventsForceImmediateSnapshot()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+
+    ShortageRuntimeState state = sampleState(2);
+    state.stations[2].stock = -5;
+    const ShortageOperationResult result =
+        store.saveCritical(state, auditEvent(1, QStringLiteral("box_unloaded")));
+
+    QVERIFY2(result.ok, qPrintable(result.messageZh));
+    QVERIFY(QFile::exists(productionMain(dir)));
+    QCOMPARE(nonEmptyLineCount(productionJournal(dir)), 1);
+    QVERIFY(readAll(productionMain(dir)).contains("\"-5\""));
+}
+
+void ShortageStateStoreTest::interruptedTemporaryWriteKeepsMainFile()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+    ShortageRuntimeState state = sampleState(2);
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    const QByteArray mainBefore = readAll(productionMain(dir));
+
+    overwrite(dir.filePath(QStringLiteral("production-state.json.tmp")),
+              QByteArrayLiteral("{\"partial\":true}"));
+
+    QCOMPARE(readAll(productionMain(dir)), mainBefore);
+    const ShortageStateLoadResult loaded = store.load();
+    QVERIFY2(loaded.ok, qPrintable(loaded.messageZh));
+    QCOMPARE(loaded.state.nextAuditSequence, quint64{2});
+}
+
+void ShortageStateStoreTest::corruptedMainFallsBackToBackup()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+
+    ShortageRuntimeState first = sampleState(2);
+    first.stations[0].stock = 111;
+    QVERIFY(store.saveCritical(first, auditEvent(1)).ok);
+    ShortageRuntimeState second = first;
+    second.nextAuditSequence = 3;
+    second.stations[0].stock = 222;
+    QVERIFY(store.saveCritical(second, auditEvent(2)).ok);
+    overwrite(productionMain(dir), QByteArrayLiteral("{broken"));
+
+    const ShortageStateLoadResult loaded = store.load();
+    QVERIFY2(loaded.ok, qPrintable(loaded.messageZh));
+    QCOMPARE(loaded.source, ShortageRestoreSource::Journal);
+    QCOMPARE(loaded.state.stations[0].stock, qint64{222});
+}
+
+void ShortageStateStoreTest::journalReplayRestoresPostSnapshotState()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+
+    ShortageRuntimeState first = sampleState(2);
+    first.stations[0].stock = 123;
+    first.lastSavedAtUtc = utcFromSeconds(1000);
+    QVERIFY(store.savePeriodic(first, auditEvent(1), first.lastSavedAtUtc).ok);
+
+    ShortageRuntimeState second = first;
+    second.nextAuditSequence = 3;
+    second.stations[0].stock = 321;
+    second.lastSavedAtUtc = first.lastSavedAtUtc;
+    QVERIFY(store.savePeriodic(second, auditEvent(2),
+                                first.lastSavedAtUtc.addSecs(10)).ok);
+
+    const ShortageStateLoadResult loaded = store.load();
+    QVERIFY2(loaded.ok, qPrintable(loaded.messageZh));
+    QCOMPARE(loaded.source, ShortageRestoreSource::Journal);
+    QCOMPARE(loaded.state.stations[0].stock, qint64{321});
+    QCOMPARE(loaded.state.nextAuditSequence, quint64{3});
+}
+
+void ShortageStateStoreTest::journalGapOrDuplicateRejectsBareSnapshot()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+    ShortageRuntimeState state = sampleState(2);
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    overwrite(productionJournal(dir), readAll(productionJournal(dir))
+                                    + readAll(productionJournal(dir)));
+
+    const ShortageStateLoadResult duplicate = store.load();
+    QVERIFY(!duplicate.ok);
+    QVERIFY(duplicate.requiresMaintenance);
+
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    overwrite(productionJournal(dir), QByteArrayLiteral("{\"sequence\":\"3\"}\n"));
+    const ShortageStateLoadResult gap = store.load();
+    QVERIFY(!gap.ok);
+    QVERIFY(gap.requiresMaintenance);
+}
+
+void ShortageStateStoreTest::checksumAndVersionErrorsAreRejected()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+    ShortageRuntimeState state = sampleState(2);
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+
+    QJsonObject root = QJsonDocument::fromJson(readAll(productionMain(dir))).object();
+    root[QStringLiteral("state")] = QJsonObject{{QStringLiteral("formatVersion"), 999}};
+    overwrite(productionMain(dir), QJsonDocument(root).toJson(QJsonDocument::Compact));
+    ShortageStateLoadResult badChecksum = store.load();
+    QVERIFY(!badChecksum.ok);
+    QVERIFY(badChecksum.messageZh.contains(QStringLiteral("校验")));
+
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    root = QJsonDocument::fromJson(readAll(productionMain(dir))).object();
+    QJsonObject stateObject = root.value(QStringLiteral("state")).toObject();
+    stateObject[QStringLiteral("formatVersion")] = 999;
+    root[QStringLiteral("state")] = stateObject;
+    refreshChecksum(&root);
+    overwrite(productionMain(dir), QJsonDocument(root).toJson(QJsonDocument::Compact));
+    ShortageStateLoadResult badVersion = store.load();
+    QVERIFY(!badVersion.ok);
+    QVERIFY(badVersion.messageZh.contains(QStringLiteral("版本")));
+}
+
+void ShortageStateStoreTest::allCorruptSourcesLockAutomaticMode()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+    QVERIFY(store.saveCritical(sampleState(2), auditEvent(1)).ok);
+    overwrite(productionMain(dir), QByteArrayLiteral("{broken-main"));
+    overwrite(productionBackup(dir), QByteArrayLiteral("{broken-backup"));
+    overwrite(productionJournal(dir), QByteArrayLiteral("{broken-journal"));
+
+    const ShortageStateLoadResult loaded = store.load();
+    QVERIFY(!loaded.ok);
+    QVERIFY(loaded.requiresMaintenance);
+    QVERIFY(loaded.state.criticalLock);
+    QVERIFY(loaded.messageZh.contains(QStringLiteral("维护")));
+}
+
+void ShortageStateStoreTest::testNamespaceNeverTouchesProductionFiles()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::StandaloneTest);
+    QVERIFY(store.saveCritical(sampleState(2), auditEvent(1)).ok);
+
+    QVERIFY(QFile::exists(testMain(dir)));
+    QVERIFY(!QFile::exists(productionMain(dir)));
+    QVERIFY(!QFile::exists(productionBackup(dir)));
+    QVERIFY(!QFile::exists(productionJournal(dir)));
+}
+
+void ShortageStateStoreTest::persistenceFailureAfterUnloadKeepsMemoryFact()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString fileAsBase = dir.filePath(QStringLiteral("not-a-directory"));
+    overwrite(fileAsBase, QByteArrayLiteral("blocks mkdir"));
+    ShortageStateStore store(fileAsBase, ShortageStateNamespace::Production);
+
+    ShortageRuntimeState state = sampleState(2);
+    state.stations[0].stock = 2000;
+    const ShortageOperationResult result =
+        store.saveCritical(state, auditEvent(1, QStringLiteral("box_unloaded")));
+
+    QVERIFY(!result.ok);
+    QCOMPARE(state.stations[0].stock, qint64{2000});
+}
+
+void ShortageStateStoreTest::safeRestoreRequiresOperatorConfirmation()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+    ShortageRuntimeState state = sampleState(2);
+    state.operatorConfirmedRestore = false;
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+
+    const ShortageStateLoadResult loaded = store.load();
+    QVERIFY2(loaded.ok, qPrintable(loaded.messageZh));
+    QVERIFY(loaded.state.criticalLock);
+    QVERIFY(loaded.messageZh.contains(QStringLiteral("人工确认")));
+}
+
+void ShortageStateStoreTest::zeroLedgerRequiresSiteClearConfirmation()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+
+    const ShortageStateLoadResult loaded = store.load();
+    QVERIFY(!loaded.ok);
+    QVERIFY(!loaded.stateFound);
+    QVERIFY(loaded.requiresMaintenance);
+    QVERIFY(loaded.messageZh.contains(QStringLiteral("现场清空确认")));
+}
+
+QTEST_MAIN(ShortageStateStoreTest)
+#include "test_shortage_state_store.moc"
