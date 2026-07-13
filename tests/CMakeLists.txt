@@ -1,4 +1,18 @@
-find_package(Qt6 REQUIRED COMPONENTS Core Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Network Test)
+
+function(add_shortage_cpp_test target)
+    add_executable(${target} ${ARGN})
+    target_include_directories(${target} PRIVATE
+        "${CMAKE_SOURCE_DIR}/src"
+    )
+    target_link_libraries(${target} PRIVATE
+        Qt6::Core
+        Qt6::Network
+        Qt6::Test
+    )
+    add_test(NAME ${target}
+             COMMAND ${target})
+endfunction()
 
 add_executable(station_pickup_config_tests
     test_station_pickup_config.cpp
@@ -110,3 +124,11 @@ target_link_libraries(pallet_param_dialog_contract_tests PRIVATE
 
 add_test(NAME pallet_param_dialog_contract_tests
          COMMAND pallet_param_dialog_contract_tests)
+
+add_shortage_cpp_test(shortage_sample_coordinator_tests
+    test_shortage_sample_coordinator.cpp
+    ../src/customSysScheduler.cpp
+)
+target_compile_definitions(shortage_sample_coordinator_tests PRIVATE
+    ROBOT_VISUAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)

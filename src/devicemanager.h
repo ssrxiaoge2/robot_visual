@@ -48,7 +48,6 @@ public:
         QString scannerIP  = QStringLiteral("192.168.1.12");
         QString huayanIP   = QStringLiteral("192.168.1.11");
         quint16 huayanPort = 10003;
-        QString customSysEndpoint = QStringLiteral("http://192.168.115.229:5084/api/MesData/day");
     };
 
     explicit DeviceManager(QObject *parent = nullptr);
@@ -61,7 +60,8 @@ public:
     LineManager      *lineManager()     const { return m_lineManager; }
     NScanScheduler   *nscanScheduler() const { return m_nscanScheduler.get(); }
     PalletScheduler  *palletScheduler() const { return m_palletScheduler; }
-    CustomSysScheduler *customSysScheduler() const { return m_customSysScheduler; }
+    /// 真实缺料 MES/PLC 协议对象由 DeviceManager 唯一持有；Task 10 再接入采样协调器。
+    CustomSysScheduler *liveShortageScheduler() const { return m_liveShortageScheduler; }
     bool              lightIsOn()        const { return m_lightOn;      }
     bool              nscanTestRunning() const { return m_nscanTestRunning; }
     const Config     &config()           const { return m_cfg;          }
@@ -79,8 +79,6 @@ public slots:
     void testAgv();
     void testCamera();
     void testScanner();
-    void testCustomSystem();
-    void fetchCustomSystemDayData();
     void startNScanTest(const NScanScheduler::ScanOptions &options);
     void toggleLight();
     void applyHandEyeMatrix(const float m[16]);
@@ -100,13 +98,6 @@ signals:
     void nscanTestLog(const QString &message);
     void nscanScanRequested(const NScanScheduler::ScanOptions &options);
     void lineScanRequested(const NScanScheduler::ScanOptions &options);
-    void customSystemStatusChanged(bool ok, const QString &statusText);
-    void customSystemDayDataReady(const CustomSysScheduler::DayRecord &record,
-                                  const QString &rawJson);
-    void customSystemRequestStarted(const QString &operation);
-    void customSystemRequestFailed(const QString &operation,
-                                   const QString &errorMessage,
-                                   const QString &rawJson);
     void lightChanged(bool on, bool success);
     void configApplied(const QString &robotIP, const QString &agvIP);
     void agvModbusConnected();
@@ -126,7 +117,7 @@ private:
     LineOrchestrator *m_lineOrch = nullptr;          ///< 旧单工位参考流程，不是新调度主线。
     LineManager      *m_lineManager = nullptr;       ///< 12 工位连续补料主调度。
     PalletScheduler  *m_palletScheduler = nullptr;   ///< 主流程和配置 UI 共用的码垛缓存。
-    CustomSysScheduler *m_customSysScheduler = nullptr;
+    CustomSysScheduler *m_liveShortageScheduler = nullptr; ///< 唯一真实缺料 MES/PLC 通信对象。
     std::shared_ptr<NScanScheduler> m_nscanScheduler;
     QMutex            m_nscanScanMutex;      ///< 厂商扫码 SDK 串行保护，两个 worker 共用。
     QPointer<QThread> m_nscanTestThread;

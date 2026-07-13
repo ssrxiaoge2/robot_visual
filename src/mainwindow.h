@@ -52,16 +52,8 @@ private slots:
     void onNScanClear();
     void onNScanFinished(const NScanScheduler::ScanResult &result);
     void onNScanIdle();
-    void onCustomSystemConnect();
-    void onCustomSystemFetch();
     // 打开空箱码垛配置窗口；窗口可执行真实单步码垛调试，停止统一使用华研面板停止按钮。
     void onPalletConfig();
-    void onCustomSystemRequestStarted(const QString &operation);
-    void onCustomSystemDayDataReady(const CustomSysScheduler::DayRecord &record,
-                                    const QString &rawJson);
-    void onCustomSystemRequestFailed(const QString &operation,
-                                     const QString &errorMessage,
-                                     const QString &rawJson);
     void onHandEyeCalib();
     void onHuayanConnect();
     void onHuayanDisconnect();
@@ -93,7 +85,6 @@ private:
     void initCameraPanel(QVBoxLayout *leftPanel);
     void initScannerPanel(QVBoxLayout *leftPanel);
     void initNScanPanel(QVBoxLayout *leftPanel);
-    void initCustomSystemPanel(QVBoxLayout *leftPanel);
     // 在左侧控制面板添加空箱码垛配置入口。
     void initPalletPanel(QVBoxLayout *leftPanel);
     void initHuayanPanel(QVBoxLayout *leftPanel);
@@ -103,7 +94,6 @@ private:
     void refreshResolvedLabel();
     void updateAgvMonitor(const AgvMonitorData &d);
     void setNScanInputsEnabled(bool enabled);
-    void setCustomSystemInputsEnabled(bool enabled);
     void updateLineSystemState(LineSystemState state, const QString &text); ///< 只更新状态/报警控件。
     void updateLineQueue(const QList<Task> &tasks);                         ///< 只展示未完成任务快照。
     void updateLineCurrentTask(const Task &task);                           ///< 更新当前任务和最近结果文案。
@@ -189,16 +179,6 @@ private:
     QLabel          *m_nscanSuccessLabel      = nullptr;
     int              m_nscanSuccessCount      = 0;
     QString          m_nscanVisualState       = QStringLiteral("idle");
-
-    // ── 客户系统通信测试面板 ────────────────────────────────
-    QLineEdit       *m_customSysEndpointEdit  = nullptr;
-    QPushButton     *m_customSysConnectBtn    = nullptr;
-    QPushButton     *m_customSysFetchBtn      = nullptr;
-    DeviceIndicator *m_customSysIndicator     = nullptr;
-    QLineEdit       *m_customSysActualQtyEdit = nullptr;
-    QLabel          *m_customSysInfoLabel     = nullptr;
-    QLabel          *m_customSysRawLabel      = nullptr;
-    QString          m_customSysVisualState   = QStringLiteral("idle");
 
     // ── 空箱码垛配置面板：只持有配置入口和当前打开的单例对话框 ─────────
     QPushButton *m_btnPalletConfig = nullptr;

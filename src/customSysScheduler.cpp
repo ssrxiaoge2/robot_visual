@@ -7,207 +7,492 @@
 #include <QJsonValue>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QRegularExpression>
+#include <QSet>
+#include <QUrlQuery>
 #include <QVariant>
 
 namespace {
-constexpr int kRequestTimeoutMs = 5000;
-const char *kDefaultEndpoint = "http://192.168.115.229:5084/api/MesData/day";
+const char *kLiveMesDayEndpoint = "http://192.168.115.228:5084/api/MesData/day";
+const char *kPlcBitPath = "/api/PlcData/GetLBitRegister";
 
 bool isHttpOk(int status)
 {
     return status >= 200 && status < 300;
 }
+
+QString firstNonEmptyString(const QJsonObject &obj, const QStringList &keys)
+{
+    for (const QString &key : keys) {
+        const QString value = obj.value(key).toString().trimmed();
+        if (!value.isEmpty())
+            return value;
+    }
+    return QString();
 }
+
+bool parseAddress(const QString &raw, int *address)
+{
+    static const QRegularExpression pattern(QStringLiteral(R"(^L(\d+)$)"));
+    const QRegularExpressionMatch match = pattern.match(raw.trimmed());
+    if (!match.hasMatch())
+        return false;
+
+    bool ok = false;
+    const int parsed = match.captured(1).toInt(&ok);
+    if (!ok)
+        return false;
+
+    if (address)
+        *address = parsed;
+    return true;
+}
+
+bool readActualQty(const QJsonObject &obj,
+                   const QByteArray &payload,
+                   qint64 *value,
+                   QString *errorMessage)
+{
+    const QString key = QStringLiteral("actualQty");
+    const QJsonValue jsonValue = obj.value(key);
+    if (jsonValue.isUndefined()) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("缺少 actualQty 字段");
+        return false;
+    }
+
+    QString token;
+    if (jsonValue.isString()) {
+        token = jsonValue.toString().trimmed();
+    } else if (jsonValue.isDouble()) {
+        static const QRegularExpression tokenPattern(
+            QStringLiteral(R"("actualQty"\s*:\s*(-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?))"));
+        const QRegularExpressionMatch match = tokenPattern.match(QString::fromUtf8(payload));
+        if (!match.hasMatch()) {
+            if (errorMessage)
+                *errorMessage = QStringLiteral("actualQty 原始数值无法定位");
+            return false;
+        }
+        token = match.captured(1).trimmed();
+    } else {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("actualQty 字段不是数字或数字文本");
+        return false;
+    }
+
+    if (token.contains(QLatin1Char('.')) || token.contains(QLatin1Char('e'), Qt::CaseInsensitive)) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("actualQty 必须为整数：%1").arg(token);
+        return false;
+    }
+
+    bool ok = false;
+    const qint64 parsed = token.toLongLong(&ok);
+    if (!ok || token.startsWith(QLatin1Char('-'))) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("actualQty 文本无效：%1").arg(token);
+            return false;
+    }
+
+    if (!ok || parsed < 0) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("actualQty 必须为非负 64 位整数");
+        return false;
+    }
+
+    if (value)
+        *value = parsed;
+    return true;
+}
+
+QString rangeText(int startAddress, int length)
+{
+    return QStringLiteral("L%1..L%2").arg(startAddress).arg(startAddress + length - 1);
+}
+} // namespace
 
 CustomSysScheduler::CustomSysScheduler(QObject *parent)
     : QObject(parent),
       m_nam(new QNetworkAccessManager(this)),
-      m_endpoint(defaultEndpoint())
+      m_liveMesDayEndpoint(defaultLiveMesDayEndpoint())
 {
+    qRegisterMetaType<CustomSysScheduler::LiveMesDayReply>(
+        "CustomSysScheduler::LiveMesDayReply");
+    qRegisterMetaType<CustomSysScheduler::PlcBitReply>(
+        "CustomSysScheduler::PlcBitReply");
 }
 
-void CustomSysScheduler::setEndpoint(const QUrl &endpoint)
+QUrl CustomSysScheduler::defaultLiveMesDayEndpoint()
 {
-    m_endpoint = endpoint;
+    return QUrl(QString::fromLatin1(kLiveMesDayEndpoint));
 }
 
-QUrl CustomSysScheduler::defaultEndpoint()
+QUrl CustomSysScheduler::livePlcBitEndpointFor(const QUrl &liveMesDayEndpoint)
 {
-    return QUrl(QString::fromLatin1(kDefaultEndpoint));
+    QUrl endpoint = liveMesDayEndpoint;
+    endpoint.setPath(QString::fromLatin1(kPlcBitPath));
+    endpoint.setQuery(QString());
+    endpoint.setFragment(QString());
+    return endpoint;
 }
 
-void CustomSysScheduler::testConnectivity()
+bool CustomSysScheduler::setLiveMesDayEndpoint(const QUrl &endpoint,
+                                               QString *errorMessage)
 {
-    sendGet(Operation::Connectivity);
-}
-
-void CustomSysScheduler::fetchDayData()
-{
-    sendGet(Operation::FetchDayData);
-}
-
-void CustomSysScheduler::sendGet(Operation operation)
-{
-    const QString opText = operationText(operation);
-    if (!m_endpoint.isValid() || m_endpoint.scheme().isEmpty()
-        || m_endpoint.host().isEmpty()) {
-        const QString msg = QStringLiteral("接口地址无效：%1").arg(m_endpoint.toString());
-        emit requestFailed(opText, msg, QString());
-        emit logMessage(QStringLiteral("[客户系统] %1失败：%2").arg(opText, msg));
-        if (operation == Operation::Connectivity)
-            emit connectivityChecked(false, QStringLiteral("地址无效"), 0);
-        return;
+    QString validationError;
+    if (!validateEndpoint(endpoint, &validationError)) {
+        if (errorMessage)
+            *errorMessage = validationError;
+        return false;
     }
 
-    QNetworkRequest request(m_endpoint);
-    request.setHeader(QNetworkRequest::UserAgentHeader,
-                      QStringLiteral("wh-robot-visual/custom-system-test"));
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    request.setTransferTimeout(kRequestTimeoutMs);
-#endif
-
-    emit requestStarted(opText);
-    emit logMessage(QStringLiteral("[客户系统] %1：GET %2")
-                        .arg(opText, m_endpoint.toString()));
-
-    QNetworkReply *reply = m_nam->get(request);
-    connect(reply, &QNetworkReply::finished, this, [this, reply, operation]() {
-        handleReply(reply, operation);
-        reply->deleteLater();
-    });
+    m_liveMesDayEndpoint = endpoint;
+    if (errorMessage)
+        errorMessage->clear();
+    return true;
 }
 
-void CustomSysScheduler::handleReply(QNetworkReply *reply, Operation operation)
+bool CustomSysScheduler::setRequestTimeoutMs(int timeoutMs, QString *errorMessage)
 {
-    const QString opText = operationText(operation);
-    const QByteArray payload = reply->readAll();
-    const QString rawJson = QString::fromUtf8(payload);
-    const int httpStatus = reply->attribute(
-        QNetworkRequest::HttpStatusCodeAttribute).toInt();
-
-    if (reply->error() != QNetworkReply::NoError) {
-        const QString msg = QStringLiteral("HTTP 请求失败：%1").arg(reply->errorString());
-        emit requestFailed(opText, msg, rawJson);
-        emit logMessage(QStringLiteral("[客户系统] %1失败：%2，HTTP=%3")
-                            .arg(opText, msg).arg(httpStatus));
-        if (operation == Operation::Connectivity)
-            emit connectivityChecked(false, QStringLiteral("连接失败"), httpStatus);
-        return;
+    if (timeoutMs <= 0) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("请求超时必须为正数：%1 ms")
+                                .arg(timeoutMs);
+        }
+        return false;
     }
 
-    if (!isHttpOk(httpStatus)) {
-        const QString msg = QStringLiteral("HTTP 状态码异常：%1").arg(httpStatus);
-        emit requestFailed(opText, msg, rawJson);
-        emit logMessage(QStringLiteral("[客户系统] %1失败：%2").arg(opText, msg));
-        if (operation == Operation::Connectivity)
-            emit connectivityChecked(false, QStringLiteral("HTTP %1").arg(httpStatus), httpStatus);
-        return;
-    }
-
-    if (operation == Operation::Connectivity) {
-        emit connectivityChecked(true, QStringLiteral("可达 HTTP %1").arg(httpStatus), httpStatus);
-        emit logMessage(QStringLiteral("[客户系统] 连通性测试成功，HTTP=%1").arg(httpStatus));
-        return;
-    }
-
-    ParseResult parsed = parseDayReply(payload);
-    if (!parsed.ok) {
-        emit requestFailed(opText, parsed.errorMessage, rawJson);
-        emit logMessage(QStringLiteral("[客户系统] 数据解析失败：%1").arg(parsed.errorMessage));
-        return;
-    }
-
-    emit dayDataReady(parsed.record, rawJson);
-    emit logMessage(QStringLiteral("[客户系统] 读取成功：actualQty=%1，line=%2")
-                        .arg(parsed.record.actualQty)
-                        .arg(parsed.record.lineName.isEmpty()
-                                 ? parsed.record.lineId
-                                 : parsed.record.lineName));
+    m_requestTimeoutMs = timeoutMs;
+    if (errorMessage)
+        errorMessage->clear();
+    return true;
 }
 
-CustomSysScheduler::ParseResult CustomSysScheduler::parseDayReply(const QByteArray &payload)
+CustomSysScheduler::LiveMesDayReply CustomSysScheduler::parseMesDayReply(
+    const QByteArray &payload)
 {
-    ParseResult result;
+    LiveMesDayReply result;
     QJsonParseError parseError;
     const QJsonDocument doc = QJsonDocument::fromJson(payload, &parseError);
     if (parseError.error != QJsonParseError::NoError) {
-        result.errorMessage = QStringLiteral("JSON 解析失败：%1").arg(parseError.errorString());
+        result.errorMessage = QStringLiteral("MES JSON 解析失败：%1")
+                                  .arg(parseError.errorString());
         return result;
     }
 
     if (!doc.isArray()) {
-        result.errorMessage = QStringLiteral("返回不是 JSON 数组");
+        result.errorMessage = QStringLiteral("MES 返回不是 JSON 数组");
         return result;
     }
 
     const QJsonArray array = doc.array();
     if (array.isEmpty()) {
-        result.errorMessage = QStringLiteral("返回数组为空");
+        result.errorMessage = QStringLiteral("MES 返回数组为空");
         return result;
     }
 
     if (!array.first().isObject()) {
-        result.errorMessage = QStringLiteral("首条记录不是 JSON 对象");
+        result.errorMessage = QStringLiteral("MES 首条记录不是 JSON 对象");
         return result;
     }
 
-    const QJsonObject obj = array.first().toObject();
-    DayRecord record;
-    record.id = obj.value(QStringLiteral("id")).toInteger();
-    record.statDate = QDateTime::fromString(
-        obj.value(QStringLiteral("statDate")).toString(), Qt::ISODate);
-    record.lineId = obj.value(QStringLiteral("lineId")).toString();
-    record.lineName = obj.value(QStringLiteral("lineName")).toString();
-
+    qint64 actualQty = 0;
     QString fieldError;
-    if (!readIntField(obj, QStringLiteral("actualQty"), &record.actualQty,
-                      &fieldError, true)
-        || !readIntField(obj, QStringLiteral("planQty"), &record.planQty,
-                         &fieldError, false)
-        || !readIntField(obj, QStringLiteral("okQty"), &record.okQty,
-                         &fieldError, false)
-        || !readIntField(obj, QStringLiteral("ngQty"), &record.ngQty,
-                         &fieldError, false)) {
+    if (!readActualQty(array.first().toObject(), payload, &actualQty, &fieldError)) {
         result.errorMessage = fieldError;
         return result;
     }
 
     result.ok = true;
-    result.record = record;
+    result.actualQty = actualQty;
     return result;
+}
+
+CustomSysScheduler::PlcBitReply CustomSysScheduler::parsePlcBitReply(
+    const QByteArray &payload,
+    int startAddress,
+    int length)
+{
+    PlcBitReply result;
+    if (startAddress < 0 || length <= 0) {
+        result.errorMessage = QStringLiteral("PLC 地址范围无效：start=%1, length=%2")
+                                  .arg(startAddress)
+                                  .arg(length);
+        return result;
+    }
+
+    QJsonParseError parseError;
+    const QJsonDocument doc = QJsonDocument::fromJson(payload, &parseError);
+    if (parseError.error != QJsonParseError::NoError) {
+        result.errorMessage = QStringLiteral("PLC JSON 解析失败：%1")
+                                  .arg(parseError.errorString());
+        return result;
+    }
+
+    if (!doc.isObject()) {
+        result.errorMessage = QStringLiteral("PLC 响应根节点不是对象");
+        return result;
+    }
+
+    const QJsonObject obj = doc.object();
+    const QJsonValue successValue = obj.value(QStringLiteral("success"));
+    if (!successValue.isBool()) {
+        result.errorMessage = QStringLiteral("PLC success 字段不是 bool");
+        return result;
+    }
+
+    if (!successValue.toBool()) {
+        result.errorMessage = firstNonEmptyString(
+            obj,
+            {QStringLiteral("errorMessage"),
+             QStringLiteral("message"),
+             QStringLiteral("error")});
+        if (result.errorMessage.isEmpty())
+            result.errorMessage = QStringLiteral("PLC 响应 success=false");
+        return result;
+    }
+
+    const QJsonValue timestampValue = obj.value(QStringLiteral("timestamp"));
+    if (!timestampValue.isString() || timestampValue.toString().trimmed().isEmpty()) {
+        result.errorMessage = QStringLiteral("PLC timestamp 字段缺失或不是字符串");
+        return result;
+    }
+    result.timestamp = timestampValue.toString();
+
+    const QJsonValue dataValue = obj.value(QStringLiteral("data"));
+    if (!dataValue.isArray()) {
+        result.errorMessage = QStringLiteral("PLC data 字段不是数组");
+        return result;
+    }
+
+    const int endAddress = startAddress + length - 1;
+    QSet<int> seen;
+    const QJsonArray array = dataValue.toArray();
+    for (int i = 0; i < array.size(); ++i) {
+        if (!array.at(i).isObject()) {
+            result.errorMessage = QStringLiteral("PLC data[%1] 不是对象").arg(i);
+            return result;
+        }
+
+        const QJsonObject item = array.at(i).toObject();
+        const QJsonValue addressValue = item.value(QStringLiteral("address"));
+        if (!addressValue.isString()) {
+            result.errorMessage = QStringLiteral("PLC data[%1] address 缺失或不是字符串").arg(i);
+            return result;
+        }
+
+        int address = 0;
+        if (!parseAddress(addressValue.toString(), &address)) {
+            result.errorMessage = QStringLiteral("PLC data[%1] address 格式无效：%2")
+                                      .arg(i)
+                                      .arg(addressValue.toString());
+            return result;
+        }
+
+        if (address < startAddress || address > endAddress) {
+            result.errorMessage = QStringLiteral("PLC 地址越界：L%1 不在 %2")
+                                      .arg(address)
+                                      .arg(rangeText(startAddress, length));
+            return result;
+        }
+
+        if (seen.contains(address)) {
+            result.errorMessage = QStringLiteral("PLC 地址重复：L%1").arg(address);
+            return result;
+        }
+        seen.insert(address);
+
+        const QJsonValue bitValue = item.value(QStringLiteral("value"));
+        if (!bitValue.isBool()) {
+            result.errorMessage = QStringLiteral("PLC 地址 L%1 的 value 不是 bool")
+                                      .arg(address);
+            return result;
+        }
+
+        result.values.insert(address, bitValue.toBool());
+    }
+
+    for (int address = startAddress; address <= endAddress; ++address) {
+        if (!result.values.contains(address)) {
+            result.values.clear();
+            result.errorMessage = QStringLiteral("PLC 响应缺少必需地址：L%1")
+                                      .arg(address);
+            return result;
+        }
+    }
+
+    result.ok = true;
+    return result;
+}
+
+void CustomSysScheduler::fetchMesDayData(quint64 roundId)
+{
+    RequestContext context;
+    context.operation = Operation::FetchMesDayData;
+    context.roundId = roundId;
+    context.url = m_liveMesDayEndpoint;
+    sendGet(context);
+}
+
+void CustomSysScheduler::fetchPlcBits(quint64 roundId, int startAddress, int length)
+{
+    if (startAddress < 0 || length <= 0) {
+        PlcBitReply reply;
+        reply.errorMessage = QStringLiteral("PLC 地址范围无效：start=%1, length=%2")
+                                 .arg(startAddress)
+                                 .arg(length);
+        emit plcReplyReady(roundId, startAddress, reply);
+        emit logMessage(QStringLiteral("[缺料协议] 读取 PLC 位失败：%1")
+                            .arg(reply.errorMessage));
+        return;
+    }
+
+    QUrl url = livePlcBitEndpointFor(m_liveMesDayEndpoint);
+    QUrlQuery query;
+    query.addQueryItem(QStringLiteral("StartAddress"), QString::number(startAddress));
+    query.addQueryItem(QStringLiteral("length"), QString::number(length));
+    url.setQuery(query);
+
+    RequestContext context;
+    context.operation = Operation::FetchPlcBits;
+    context.roundId = roundId;
+    context.startAddress = startAddress;
+    context.length = length;
+    context.url = url;
+    sendGet(context);
+}
+
+void CustomSysScheduler::sendGet(const RequestContext &context)
+{
+    QString validationError;
+    if (!validateEndpoint(context.url, &validationError)) {
+        if (context.operation == Operation::FetchMesDayData) {
+            LiveMesDayReply reply;
+            reply.errorMessage = validationError;
+            emit mesReplyReady(context.roundId, reply);
+        } else {
+            PlcBitReply reply;
+            reply.errorMessage = validationError;
+            emit plcReplyReady(context.roundId, context.startAddress, reply);
+        }
+        emit logMessage(QStringLiteral("[缺料协议] %1失败：%2")
+                            .arg(operationText(context.operation), validationError));
+        return;
+    }
+
+    QNetworkRequest request(context.url);
+    request.setHeader(QNetworkRequest::UserAgentHeader,
+                      QStringLiteral("wh-robot-visual/live-shortage-protocol"));
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(m_requestTimeoutMs);
+#endif
+
+    emit logMessage(QStringLiteral("[缺料协议] %1：GET %2")
+                        .arg(operationText(context.operation), context.url.toString()));
+
+    QNetworkReply *reply = m_nam->get(request);
+    connect(reply, &QNetworkReply::finished, this, [this, reply, context] {
+        handleReply(reply, context);
+        reply->deleteLater();
+    });
+}
+
+void CustomSysScheduler::handleReply(QNetworkReply *reply,
+                                     const RequestContext &context)
+{
+    const QByteArray payload = reply->readAll();
+    const int httpStatus = reply->attribute(
+        QNetworkRequest::HttpStatusCodeAttribute).toInt();
+
+    auto httpFailure = [this, &context, httpStatus](const QString &reason) {
+        const QString msg = QStringLiteral("%1，HTTP=%2").arg(reason).arg(httpStatus);
+        if (context.operation == Operation::FetchMesDayData) {
+            LiveMesDayReply parsed;
+            parsed.errorMessage = msg;
+            emit mesReplyReady(context.roundId, parsed);
+        } else {
+            PlcBitReply parsed;
+            parsed.errorMessage = msg;
+            emit plcReplyReady(context.roundId, context.startAddress, parsed);
+        }
+        emit logMessage(QStringLiteral("[缺料协议] %1失败：%2")
+                            .arg(operationText(context.operation), msg));
+    };
+
+    if (reply->error() != QNetworkReply::NoError) {
+        httpFailure(QStringLiteral("HTTP 请求失败：%1").arg(reply->errorString()));
+        return;
+    }
+
+    if (!isHttpOk(httpStatus)) {
+        httpFailure(QStringLiteral("HTTP 状态码异常"));
+        return;
+    }
+
+    if (context.operation == Operation::FetchMesDayData) {
+        LiveMesDayReply parsed = parseMesDayReply(payload);
+        emit mesReplyReady(context.roundId, parsed);
+        emit logMessage(parsed.ok
+            ? QStringLiteral("[缺料协议] MES 读取成功：round=%1，actualQty=%2")
+                  .arg(context.roundId)
+                  .arg(parsed.actualQty)
+            : QStringLiteral("[缺料协议] MES 解析失败：round=%1，%2")
+                  .arg(context.roundId)
+                  .arg(parsed.errorMessage));
+        return;
+    }
+
+    PlcBitReply parsed = parsePlcBitReply(payload,
+                                          context.startAddress,
+                                          context.length);
+    emit plcReplyReady(context.roundId, context.startAddress, parsed);
+    emit logMessage(parsed.ok
+        ? QStringLiteral("[缺料协议] PLC 位读取成功：round=%1，start=L%2，count=%3")
+              .arg(context.roundId)
+              .arg(context.startAddress)
+              .arg(parsed.values.size())
+        : QStringLiteral("[缺料协议] PLC 位解析失败：round=%1，start=L%2，%3")
+              .arg(context.roundId)
+              .arg(context.startAddress)
+              .arg(parsed.errorMessage));
 }
 
 QString CustomSysScheduler::operationText(Operation operation)
 {
     switch (operation) {
-    case Operation::Connectivity:
-        return QStringLiteral("连通性测试");
-    case Operation::FetchDayData:
-        return QStringLiteral("读取日统计");
+    case Operation::FetchMesDayData:
+        return QStringLiteral("读取 MES 日统计");
+    case Operation::FetchPlcBits:
+        return QStringLiteral("读取 PLC 位");
     }
-    return QStringLiteral("客户系统请求");
+    return QStringLiteral("缺料协议请求");
 }
 
-bool CustomSysScheduler::readIntField(const QJsonObject &obj,
-                                      const QString &key,
-                                      int *value,
-                                      QString *errorMessage,
-                                      bool required)
+bool CustomSysScheduler::validateEndpoint(const QUrl &endpoint,
+                                          QString *errorMessage)
 {
-    const QJsonValue jsonValue = obj.value(key);
-    if (jsonValue.isUndefined()) {
-        if (required && errorMessage)
-            *errorMessage = QStringLiteral("缺少 %1 字段").arg(key);
-        return !required;
-    }
-
-    if (!jsonValue.isDouble()) {
+    if (!endpoint.isValid() || endpoint.host().isEmpty()) {
         if (errorMessage)
-            *errorMessage = QStringLiteral("%1 字段不是数字").arg(key);
+            *errorMessage = QStringLiteral("接口地址无效：%1").arg(endpoint.toString());
         return false;
     }
 
-    if (value)
-        *value = jsonValue.toInt();
+    const QString scheme = endpoint.scheme().toLower();
+    if (scheme != QStringLiteral("http") && scheme != QStringLiteral("https")) {
+        if (errorMessage) {
+            *errorMessage = QStringLiteral("接口地址只支持 HTTP/HTTPS：%1")
+                                .arg(endpoint.toString());
+        }
+        return false;
+    }
+
+    if (endpoint.path().isEmpty() || endpoint.path() == QStringLiteral("/")) {
+        if (errorMessage)
+            *errorMessage = QStringLiteral("接口地址缺少完整 path：%1").arg(endpoint.toString());
+        return false;
+    }
+
+    if (errorMessage)
+        errorMessage->clear();
     return true;
 }
