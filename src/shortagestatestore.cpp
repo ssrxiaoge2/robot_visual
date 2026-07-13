@@ -71,22 +71,27 @@ bool requireBool(const QJsonObject &object, const QString &field, bool *out, QSt
     return true;
 }
 
-bool requireInt(const QJsonObject &object, const QString &field, int *out, QString *errorZh)
+bool parseJsonInt(const QJsonValue &value, int *out)
 {
-    const QJsonValue value = object.value(field);
-    if (!value.isDouble()) {
-        *errorZh = QStringLiteral("运行状态字段 %1 缺失或格式非法").arg(field);
+    if (!value.isDouble())
         return false;
-    }
     const double number = value.toDouble();
     if (!qIsFinite(number)
         || number < std::numeric_limits<int>::min()
         || number > std::numeric_limits<int>::max()
         || number != int(number)) {
-        *errorZh = QStringLiteral("运行状态字段 %1 缺失或格式非法").arg(field);
         return false;
     }
     *out = int(number);
+    return true;
+}
+
+bool requireInt(const QJsonObject &object, const QString &field, int *out, QString *errorZh)
+{
+    if (!parseJsonInt(object.value(field), out)) {
+        *errorZh = QStringLiteral("运行状态字段 %1 缺失或格式非法").arg(field);
+        return false;
+    }
     return true;
 }
 
@@ -256,9 +261,37 @@ QString dateToString(const QDateTime &value)
         : QString();
 }
 
-QDateTime dateFromString(const QString &value)
+bool parseOptionalUtcDateTime(const QString &value,
+                              const QString &field,
+                              QDateTime *out,
+                              QString *errorZh)
 {
-    return value.isEmpty() ? QDateTime() : QDateTime::fromString(value, Qt::ISODateWithMs).toUTC();
+    if (value.isEmpty()) {
+        *out = QDateTime();
+        return true;
+    }
+
+    QDateTime parsed = QDateTime::fromString(value, Qt::ISODateWithMs);
+    if (!parsed.isValid())
+        parsed = QDateTime::fromString(value, Qt::ISODate);
+    if (!parsed.isValid()) {
+        *errorZh = QStringLiteral("时间字段 %1 格式非法").arg(field);
+        return false;
+    }
+    *out = parsed.toUTC();
+    return true;
+}
+
+bool parseRequiredUtcDateTime(const QString &value,
+                              const QString &field,
+                              QDateTime *out,
+                              QString *errorZh)
+{
+    if (value.isEmpty()) {
+        *errorZh = QStringLiteral("时间字段 %1 不能为空").arg(field);
+        return false;
+    }
+    return parseOptionalUtcDateTime(value, field, out, errorZh);
 }
 
 StatePaths pathsFor(const QString &baseDirectory, ShortageStateNamespace stateNamespace)
@@ -308,7 +341,12 @@ bool stationFromJson(const QJsonObject &object, ShortageStationRuntime *station,
         || !requireString(object, QStringLiteral("pauseReasonZh"), &station->pauseReasonZh, errorZh)) {
         return false;
     }
-    station->firstLowAtUtc = dateFromString(firstLowAtUtc);
+    if (!parseOptionalUtcDateTime(firstLowAtUtc,
+                                  QStringLiteral("firstLowAtUtc"),
+                                  &station->firstLowAtUtc,
+                                  errorZh)) {
+        return false;
+    }
     return true;
 }
 
@@ -362,6 +400,10 @@ bool orderFromJson(const QJsonObject &object, ReplenishmentOrder *order, QString
     }
     if (!requireInt(object, QStringLiteral("stationId"), &order->stationId, errorZh))
         return false;
+    if (order->stationId < 1 || order->stationId > 12) {
+        *errorZh = QStringLiteral("补料单工位编号%1超出1到12范围").arg(order->stationId);
+        return false;
+    }
     if (!originFromString(object.value(QStringLiteral("origin")).toString(), &order->origin)
         || !orderStateFromString(object.value(QStringLiteral("state")).toString(), &order->state)) {
         *errorZh = QStringLiteral("补料单枚举字段非法");
@@ -373,7 +415,12 @@ bool orderFromJson(const QJsonObject &object, ReplenishmentOrder *order, QString
         || !requireString(object, QStringLiteral("lastReasonZh"), &order->lastReasonZh, errorZh)) {
         return false;
     }
-    order->createdAtUtc = dateFromString(createdAtUtc);
+    if (!parseRequiredUtcDateTime(createdAtUtc,
+                                  QStringLiteral("createdAtUtc"),
+                                  &order->createdAtUtc,
+                                  errorZh)) {
+        return false;
+    }
     return true;
 }
 
@@ -457,7 +504,16 @@ bool stateFromJson(const QJsonObject &object, ShortageRuntimeState *state, QStri
     QString lastSavedAtUtc;
     if (!requireString(object, QStringLiteral("lastSavedAtUtc"), &lastSavedAtUtc, errorZh))
         return false;
-    parsed.lastSavedAtUtc = dateFromString(lastSavedAtUtc);
+    if (!parseRequiredUtcDateTime(lastSavedAtUtc,
+                                  QStringLiteral("lastSavedAtUtc"),
+                                  &parsed.lastSavedAtUtc,
+                                  errorZh)) {
+        return false;
+    }
+    if (parsed.activeStationId < 0 || parsed.activeStationId > 12) {
+        *errorZh = QStringLiteral("活动工位编号%1超出0到12范围").arg(parsed.activeStationId);
+        return false;
+    }
 
     QString product;
     QString pendingProduct;
@@ -515,12 +571,23 @@ bool stateFromJson(const QJsonObject &object, ShortageRuntimeState *state, QStri
     QJsonArray waitingStationIds;
     if (!requireArray(object, QStringLiteral("waitingStationIds"), &waitingStationIds, errorZh))
         return false;
+    QSet<int> waitingIds;
     for (const QJsonValue &value : waitingStationIds) {
-        if (!value.isDouble()) {
+        int waitingStationId = 0;
+        if (!parseJsonInt(value, &waitingStationId)) {
             *errorZh = QStringLiteral("等待工位字段格式非法");
             return false;
         }
-        parsed.waitingStationIds.append(value.toInt());
+        if (waitingStationId < 1 || waitingStationId > 12 || !stationIds.contains(waitingStationId)) {
+            *errorZh = QStringLiteral("等待工位编号%1不存在或超出1到12范围").arg(waitingStationId);
+            return false;
+        }
+        if (waitingIds.contains(waitingStationId)) {
+            *errorZh = QStringLiteral("等待工位编号%1重复").arg(waitingStationId);
+            return false;
+        }
+        waitingIds.insert(waitingStationId);
+        parsed.waitingStationIds.append(waitingStationId);
     }
 
     QJsonArray orders;
@@ -725,6 +792,20 @@ ReplayResult replayJournal(const QString &journalPath, const ShortageRuntimeStat
             return result;
         }
 
+        QString occurredAtUtc;
+        if (!requireString(object, QStringLiteral("occurredAtUtc"), &occurredAtUtc, &result.errorZh)) {
+            result.ok = false;
+            return result;
+        }
+        QDateTime occurredAt;
+        if (!parseRequiredUtcDateTime(occurredAtUtc,
+                                      QStringLiteral("occurredAtUtc"),
+                                      &occurredAt,
+                                      &result.errorZh)) {
+            result.ok = false;
+            return result;
+        }
+
         ShortageRuntimeState stateAfter;
         QString errorZh;
         if (!stateFromJson(object.value(QStringLiteral("stateAfter")).toObject(),
@@ -829,14 +910,15 @@ ShortageOperationResult ShortageStateStore::saveCritical(const ShortageRuntimeSt
                                                           const ShortageAuditEvent &event)
 {
     const StatePaths paths = pathsFor(baseDirectory_, stateNamespace_);
-    const ShortageOperationResult journal = appendJournal(paths.journalPath, state, event);
+    ShortageRuntimeState snapshot = state;
+    if (event.sequence != 0 && !event.eventType.isEmpty() && !snapshot.lastSavedAtUtc.isValid())
+        snapshot.lastSavedAtUtc = event.occurredAtUtc.toUTC();
+
+    const ShortageOperationResult journal = appendJournal(paths.journalPath, snapshot, event);
     if (!journal.ok)
         return journal;
     if (event.sequence == 0 || event.eventType.isEmpty())
         return journal;
-    ShortageRuntimeState snapshot = state;
-    if (!snapshot.lastSavedAtUtc.isValid())
-        snapshot.lastSavedAtUtc = event.occurredAtUtc.toUTC();
     return writeSnapshot(paths.mainPath, paths.backupPath, snapshot);
 }
 
@@ -845,17 +927,21 @@ ShortageOperationResult ShortageStateStore::savePeriodic(const ShortageRuntimeSt
                                                           const QDateTime &nowUtc)
 {
     const StatePaths paths = pathsFor(baseDirectory_, stateNamespace_);
-    const ShortageOperationResult journal = appendJournal(paths.journalPath, state, event);
+    ShortageRuntimeState snapshot = state;
+    const bool shouldWriteSnapshot =
+        !state.lastSavedAtUtc.isValid()
+        || state.lastSavedAtUtc.secsTo(nowUtc.toUTC()) >= 60
+        || !QFile::exists(paths.mainPath);
+    if (event.sequence != 0 && !event.eventType.isEmpty() && shouldWriteSnapshot)
+        snapshot.lastSavedAtUtc = nowUtc.toUTC();
+
+    const ShortageOperationResult journal = appendJournal(paths.journalPath, snapshot, event);
     if (!journal.ok)
         return journal;
     if (event.sequence == 0 || event.eventType.isEmpty())
         return journal;
 
-    if (!state.lastSavedAtUtc.isValid()
-        || state.lastSavedAtUtc.secsTo(nowUtc.toUTC()) >= 60
-        || !QFile::exists(paths.mainPath)) {
-        ShortageRuntimeState snapshot = state;
-        snapshot.lastSavedAtUtc = nowUtc.toUTC();
+    if (shouldWriteSnapshot) {
         return writeSnapshot(paths.mainPath, paths.backupPath, snapshot);
     }
     return {true, QStringLiteral("状态流水已写入，距离上次快照不足60秒")};

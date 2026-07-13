@@ -119,6 +119,12 @@ void overwriteSnapshotState(const QString &path, const QJsonObject &stateObject)
     overwrite(path, QJsonDocument(root).toJson(QJsonDocument::Compact));
 }
 
+void overwriteProductionSnapshotOnly(const QTemporaryDir &dir, const QJsonObject &stateObject)
+{
+    overwriteSnapshotState(productionMain(dir), stateObject);
+    QVERIFY(QFile::remove(productionJournal(dir)));
+}
+
 QDateTime utcFromSeconds(qint64 seconds)
 {
     return QDateTime::fromSecsSinceEpoch(seconds, QTimeZone::UTC);
@@ -355,7 +361,7 @@ void ShortageStateStoreTest::semanticSnapshotErrorsAreRejected()
     QJsonArray stations = stateObject.value(QStringLiteral("stations")).toArray();
     stations.removeLast();
     stateObject[QStringLiteral("stations")] = stations;
-    overwriteSnapshotState(productionMain(dir), stateObject);
+    overwriteProductionSnapshotOnly(dir, stateObject);
     ShortageStateLoadResult missingStation = store.load();
     QVERIFY(!missingStation.ok);
     QVERIFY(missingStation.requiresMaintenance);
@@ -368,7 +374,7 @@ void ShortageStateStoreTest::semanticSnapshotErrorsAreRejected()
     duplicateStation[QStringLiteral("stationId")] = 1;
     stations[1] = duplicateStation;
     stateObject[QStringLiteral("stations")] = stations;
-    overwriteSnapshotState(productionMain(dir), stateObject);
+    overwriteProductionSnapshotOnly(dir, stateObject);
     ShortageStateLoadResult duplicateStationLoad = store.load();
     QVERIFY(!duplicateStationLoad.ok);
     QVERIFY(duplicateStationLoad.requiresMaintenance);
@@ -381,7 +387,7 @@ void ShortageStateStoreTest::semanticSnapshotErrorsAreRejected()
     outOfRangeStation[QStringLiteral("stationId")] = 13;
     stations[11] = outOfRangeStation;
     stateObject[QStringLiteral("stations")] = stations;
-    overwriteSnapshotState(productionMain(dir), stateObject);
+    overwriteProductionSnapshotOnly(dir, stateObject);
     ShortageStateLoadResult outOfRangeStationLoad = store.load();
     QVERIFY(!outOfRangeStationLoad.ok);
     QVERIFY(outOfRangeStationLoad.requiresMaintenance);
@@ -390,7 +396,7 @@ void ShortageStateStoreTest::semanticSnapshotErrorsAreRejected()
     QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
     stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
     stateObject.remove(QStringLiteral("configurationRevision"));
-    overwriteSnapshotState(productionMain(dir), stateObject);
+    overwriteProductionSnapshotOnly(dir, stateObject);
     ShortageStateLoadResult missingScalar = store.load();
     QVERIFY(!missingScalar.ok);
     QVERIFY(missingScalar.requiresMaintenance);
@@ -399,11 +405,110 @@ void ShortageStateStoreTest::semanticSnapshotErrorsAreRejected()
     QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
     stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
     stateObject[QStringLiteral("activeStationId")] = QStringLiteral("3");
-    overwriteSnapshotState(productionMain(dir), stateObject);
+    overwriteProductionSnapshotOnly(dir, stateObject);
     ShortageStateLoadResult malformedScalar = store.load();
     QVERIFY(!malformedScalar.ok);
     QVERIFY(malformedScalar.requiresMaintenance);
     QVERIFY(malformedScalar.messageZh.contains(QStringLiteral("字段")));
+
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    stateObject[QStringLiteral("activeStationId")] = 13;
+    overwriteProductionSnapshotOnly(dir, stateObject);
+    ShortageStateLoadResult activeOutOfRange = store.load();
+    QVERIFY(!activeOutOfRange.ok);
+    QVERIFY(activeOutOfRange.requiresMaintenance);
+    QVERIFY(activeOutOfRange.messageZh.contains(QStringLiteral("活动工位")));
+
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    stateObject[QStringLiteral("waitingStationIds")] = QJsonArray{99};
+    overwriteProductionSnapshotOnly(dir, stateObject);
+    ShortageStateLoadResult waitingOutOfRange = store.load();
+    QVERIFY(!waitingOutOfRange.ok);
+    QVERIFY(waitingOutOfRange.requiresMaintenance);
+    QVERIFY(waitingOutOfRange.messageZh.contains(QStringLiteral("等待工位")));
+
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    stateObject[QStringLiteral("waitingStationIds")] = QJsonArray{3, 3};
+    overwriteProductionSnapshotOnly(dir, stateObject);
+    ShortageStateLoadResult duplicateWaiting = store.load();
+    QVERIFY(!duplicateWaiting.ok);
+    QVERIFY(duplicateWaiting.requiresMaintenance);
+    QVERIFY(duplicateWaiting.messageZh.contains(QStringLiteral("等待工位")));
+
+    ShortageRuntimeState orderState = state;
+    ReplenishmentOrder order;
+    order.orderNo = 1;
+    order.stationId = 3;
+    order.taskId = 0;
+    order.createdAtUtc = utcFromSeconds(2000);
+    orderState.orders = {order};
+    QVERIFY(store.saveCritical(orderState, auditEvent(1)).ok);
+    stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    QJsonArray orders = stateObject.value(QStringLiteral("orders")).toArray();
+    QJsonObject storedOrder = orders.at(0).toObject();
+    storedOrder[QStringLiteral("stationId")] = 99;
+    orders[0] = storedOrder;
+    stateObject[QStringLiteral("orders")] = orders;
+    overwriteProductionSnapshotOnly(dir, stateObject);
+    ShortageStateLoadResult orderStationOutOfRange = store.load();
+    QVERIFY(!orderStationOutOfRange.ok);
+    QVERIFY(orderStationOutOfRange.requiresMaintenance);
+    QVERIFY(orderStationOutOfRange.messageZh.contains(QStringLiteral("补料单")));
+
+    QVERIFY(store.saveCritical(orderState, auditEvent(1)).ok);
+    stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    stateObject[QStringLiteral("lastSavedAtUtc")] = QStringLiteral("not-a-date");
+    overwriteProductionSnapshotOnly(dir, stateObject);
+    ShortageStateLoadResult badRequiredTimestamp = store.load();
+    QVERIFY(!badRequiredTimestamp.ok);
+    QVERIFY(badRequiredTimestamp.requiresMaintenance);
+    QVERIFY(badRequiredTimestamp.messageZh.contains(QStringLiteral("时间")));
+
+    QVERIFY(store.saveCritical(orderState, auditEvent(1)).ok);
+    stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    orders = stateObject.value(QStringLiteral("orders")).toArray();
+    storedOrder = orders.at(0).toObject();
+    storedOrder[QStringLiteral("createdAtUtc")] = QStringLiteral("not-a-date");
+    orders[0] = storedOrder;
+    stateObject[QStringLiteral("orders")] = orders;
+    overwriteProductionSnapshotOnly(dir, stateObject);
+    ShortageStateLoadResult badOrderTimestamp = store.load();
+    QVERIFY(!badOrderTimestamp.ok);
+    QVERIFY(badOrderTimestamp.requiresMaintenance);
+    QVERIFY(badOrderTimestamp.messageZh.contains(QStringLiteral("时间")));
+
+    QVERIFY(store.saveCritical(state, auditEvent(1)).ok);
+    stateObject = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    stations = stateObject.value(QStringLiteral("stations")).toArray();
+    QJsonObject firstStation = stations.at(0).toObject();
+    firstStation[QStringLiteral("firstLowAtUtc")] = QStringLiteral("not-a-date");
+    stations[0] = firstStation;
+    stateObject[QStringLiteral("stations")] = stations;
+    overwriteProductionSnapshotOnly(dir, stateObject);
+    ShortageStateLoadResult badOptionalTimestamp = store.load();
+    QVERIFY(!badOptionalTimestamp.ok);
+    QVERIFY(badOptionalTimestamp.requiresMaintenance);
+    QVERIFY(badOptionalTimestamp.messageZh.contains(QStringLiteral("时间")));
+
+    ShortageRuntimeState replayState = sampleState(2);
+    QVERIFY(store.saveCritical(replayState, auditEvent(1)).ok);
+    QJsonObject replaySnapshot = snapshotRoot(productionMain(dir)).value(QStringLiteral("state")).toObject();
+    replaySnapshot[QStringLiteral("nextAuditSequence")] = QStringLiteral("1");
+    overwriteSnapshotState(productionMain(dir), replaySnapshot);
+    const QJsonObject journalEvent =
+        QJsonDocument::fromJson(readAll(productionJournal(dir)).trimmed()).object();
+    QJsonObject badJournalEvent = journalEvent;
+    badJournalEvent[QStringLiteral("occurredAtUtc")] = QStringLiteral("not-a-date");
+    overwrite(productionJournal(dir),
+              QJsonDocument(badJournalEvent).toJson(QJsonDocument::Compact) + '\n');
+    overwrite(productionBackup(dir), QByteArrayLiteral("{broken-backup"));
+    ShortageStateLoadResult badJournalTimestamp = store.load();
+    QVERIFY(!badJournalTimestamp.ok);
+    QVERIFY(badJournalTimestamp.requiresMaintenance);
+    QVERIFY(badJournalTimestamp.messageZh.contains(QStringLiteral("时间")));
 }
 
 void ShortageStateStoreTest::allCorruptSourcesLockAutomaticMode()
