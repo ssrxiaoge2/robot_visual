@@ -84,6 +84,23 @@ void ShortageSampleCoordinator::advanceFailureDurationForTest(int seconds)
     m_failureStartedAtUtc = m_failureStartedAtUtc.addSecs(-qMax(0, seconds));
 }
 
+void ShortageSampleCoordinator::activateConfirmedContextForTestOrCaller(ProductModel product,
+                                                                        ProductionMode mode)
+{
+    if (!m_hasPendingConfirmedContext
+        || product != m_pendingProduct
+        || mode != m_pendingMode) {
+        return;
+    }
+
+    m_hasStableContext = true;
+    m_stableProduct = product;
+    m_stableMode = mode;
+    m_hasPendingConfirmedContext = false;
+    m_hasCandidateContext = false;
+    m_candidateCount = 0;
+}
+
 void ShortageSampleCoordinator::start()
 {
     if (m_running)
@@ -270,6 +287,10 @@ void ShortageSampleCoordinator::rejectActiveRound(const QString &reason)
 void ShortageSampleCoordinator::rejectRecoveryNeedsReview(const QString &reason)
 {
     const quint64 roundId = m_round.roundId;
+    m_running = false;
+    m_round.active = false;
+    m_roundTimeoutTimer.stop();
+    m_nextRoundTimer.stop();
     emit sampleRejected(roundId, reason);
     m_state = ShortageCommunicationState::RecoveryNeedsReview;
     emit communicationStateChanged(m_state, reason);
@@ -327,6 +348,12 @@ void ShortageSampleCoordinator::handleCompletedRound(ProductModel product,
         return;
     }
 
+    if (m_hasPendingConfirmedContext
+        && product == m_pendingProduct
+        && mode == m_pendingMode) {
+        return;
+    }
+
     if (!m_hasCandidateContext
         || product != m_candidateProduct
         || mode != m_candidateMode) {
@@ -342,16 +369,23 @@ void ShortageSampleCoordinator::handleCompletedRound(ProductModel product,
         return;
 
     const bool initialContext = !m_hasStableContext;
-    m_hasStableContext = true;
-    m_stableProduct = product;
-    m_stableMode = mode;
     m_hasCandidateContext = false;
     m_candidateCount = 0;
     emit contextChangeConfirmed(product, mode);
 
-    // 初次稳定没有旧上下文需要排空，必须把样本交给上层建立基线。
-    if (initialContext)
+    if (initialContext) {
+        // 初次稳定没有旧上下文需要排空，必须把样本交给上层建立基线。
+        m_hasStableContext = true;
+        m_stableProduct = product;
+        m_stableMode = mode;
         emitStableSample(product, mode, m_interruptedSinceLastSample);
+        return;
+    }
+
+    // 换型只确认待切换上下文；旧任务排空前不得覆盖 stable context 或输出新上下文样本。
+    m_hasPendingConfirmedContext = true;
+    m_pendingProduct = product;
+    m_pendingMode = mode;
 }
 
 void ShortageSampleCoordinator::emitStableSample(ProductModel product,
@@ -461,5 +495,5 @@ int ShortageSampleCoordinator::boundedRoundTimeoutSeconds(int value, int interva
 
 int ShortageSampleCoordinator::boundedAlarmMinutes(int value)
 {
-    return qMax(1, value);
+    return qBound(1, value, 60);
 }

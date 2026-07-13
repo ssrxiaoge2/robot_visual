@@ -615,6 +615,27 @@ void ShortageSampleCoordinatorTest::alarmTurnsRedAtConfiguredDuration()
     coordinator.triggerRoundTimeoutForTest();
     QCOMPARE(qvariant_cast<ShortageCommunicationState>(stateSpy.last().at(0)),
              ShortageCommunicationState::Alarm);
+
+    FakeCustomSysScheduler upperBoundScheduler;
+    ShortageSampleCoordinator upperBoundCoordinator(&upperBoundScheduler);
+    parameters.communicationAlarmMinutes = 120;
+    upperBoundCoordinator.setParameters(parameters);
+    QSignalSpy upperBoundStateSpy(&upperBoundCoordinator,
+                                  &ShortageSampleCoordinator::communicationStateChanged);
+
+    upperBoundCoordinator.start();
+    upperBoundCoordinator.triggerRoundTimeoutForTest();
+    upperBoundCoordinator.advanceFailureDurationForTest(60 * 60 - 1);
+    upperBoundCoordinator.triggerNextRoundForTest();
+    upperBoundCoordinator.triggerRoundTimeoutForTest();
+    QCOMPARE(qvariant_cast<ShortageCommunicationState>(upperBoundStateSpy.last().at(0)),
+             ShortageCommunicationState::Interrupted);
+
+    upperBoundCoordinator.advanceFailureDurationForTest(1);
+    upperBoundCoordinator.triggerNextRoundForTest();
+    upperBoundCoordinator.triggerRoundTimeoutForTest();
+    QCOMPARE(qvariant_cast<ShortageCommunicationState>(upperBoundStateSpy.last().at(0)),
+             ShortageCommunicationState::Alarm);
 }
 
 void ShortageSampleCoordinatorTest::reconnectBelowBaselineRequiresMaintenance()
@@ -638,6 +659,10 @@ void ShortageSampleCoordinatorTest::reconnectBelowBaselineRequiresMaintenance()
     QCOMPARE(rejectedSpy.count(), 1);
     QCOMPARE(qvariant_cast<ShortageCommunicationState>(stateSpy.last().at(0)),
              ShortageCommunicationState::RecoveryNeedsReview);
+
+    const int requestCountAfterMaintenanceStop = scheduler.mesRequests.size();
+    coordinator.triggerNextRoundForTest();
+    QCOMPARE(scheduler.mesRequests.size(), requestCountAfterMaintenanceStop);
 }
 
 void ShortageSampleCoordinatorTest::httpAndJsonErrorsRejectWithoutPartialState()
@@ -737,7 +762,15 @@ void ShortageSampleCoordinatorTest::twoStableRoundsCreatePendingContext()
 
     coordinator.triggerNextRoundForTest();
     completeRound(scheduler, scheduler.mesRequests.last(), 103, ProductModel::Model92, ProductionMode::RightOnly);
+    QCOMPARE(stableSpy.count(), 0);
+
+    coordinator.activateConfirmedContextForTestOrCaller(ProductModel::Model92, ProductionMode::RightOnly);
+    coordinator.triggerNextRoundForTest();
+    completeRound(scheduler, scheduler.mesRequests.last(), 104, ProductModel::Model92, ProductionMode::RightOnly);
     QCOMPARE(stableSpy.count(), 1);
+    const auto activatedSample = qvariant_cast<ShortageSample>(stableSpy.first().at(0));
+    QCOMPARE(activatedSample.product, ProductModel::Model92);
+    QCOMPARE(activatedSample.mode, ProductionMode::RightOnly);
 }
 
 void ShortageSampleCoordinatorTest::allNineContextCombinationsAreRecognized()

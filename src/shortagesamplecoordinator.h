@@ -38,6 +38,8 @@ public:
     int activeRoundTimeoutSecondsForTest() const { return m_activeRoundTimeoutSeconds; }
     /// 测试钩子：返回当前轮启动时锁定的间隔秒数，确认下一轮使用新参数。
     int activeRoundIntervalSecondsForTest() const { return m_activeRoundIntervalSeconds; }
+    /// 上层确认旧任务已排空后显式激活待切换上下文；采样层不得自行调用。
+    void activateConfirmedContextForTestOrCaller(ProductModel product, ProductionMode mode);
 
 public slots:
     void start(); ///< 立即开始首轮，此后按 sampleIntervalSeconds 启动。
@@ -114,6 +116,9 @@ private:
     bool m_hasStableContext = false;           ///< 是否已有两轮稳定上下文。
     ProductModel m_stableProduct = ProductModel::Model88; ///< 当前已确认产品。
     ProductionMode m_stableMode = ProductionMode::LeftRight; ///< 当前已确认模式。
+    bool m_hasPendingConfirmedContext = false; ///< 新上下文已确认但等待上层排空旧任务。
+    ProductModel m_pendingProduct = ProductModel::Model88; ///< 待激活产品。
+    ProductionMode m_pendingMode = ProductionMode::LeftRight; ///< 待激活模式。
     bool m_hasSampleBaseline = false;          ///< 是否已有用于断线恢复比较的样本基线。
     ProductModel m_baselineProduct = ProductModel::Model88; ///< 基线所属产品。
     ProductionMode m_baselineMode = ProductionMode::LeftRight; ///< 基线所属模式。
