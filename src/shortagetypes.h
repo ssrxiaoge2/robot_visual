@@ -78,11 +78,11 @@ struct ShortageParameters {
     int preUnloadFailureLimit = 3;       ///< 同工位连续倒料前失败暂停阈值。
 };
 
-/// 可保存的完整配置；revision 每次正式保存成功后单调增加。
+/// 可保存的完整配置；ShortageConfigStore::save() 正式保存成功时持久化 revision + 1。
 struct ShortageConfiguration {
     QList<ShortageStationConfig> stations; ///< 36 条独立产品/工位记录。
     ShortageParameters parameters;         ///< 全产品共享的通信和保护参数。
-    quint64 revision = 1;                  ///< 状态恢复时校验的配置修订号。
+    quint64 revision = 1;                  ///< 当前内存修订号；保存接口不修改入参。
 };
 
 /// 所有无异常抛出的业务接口统一返回中文结果，失败时不得部分修改状态。

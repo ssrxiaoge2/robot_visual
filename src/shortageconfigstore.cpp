@@ -10,6 +10,8 @@
 #include <QSet>
 #include <QUrl>
 
+#include <limits>
+
 namespace {
 
 /// Sheet3 的 12 行基础数据，三个产品复用同一现场表并保存为独立 36 行。
@@ -98,34 +100,55 @@ QJsonObject stationToJson(const ShortageStationConfig &station)
         {QStringLiteral("sitePosition"), station.sitePosition},
         {QStringLiteral("partNumber"), station.partNumber},
         {QStringLiteral("enabled"), station.enabled},
-        {QStringLiteral("boxQuantity"), double(station.boxQuantity)},
-        {QStringLiteral("minimumStock"), double(station.minimumStock)},
-        {QStringLiteral("maximumStock"), double(station.maximumStock)},
-        {QStringLiteral("usageLeftRight"), double(station.usageLeftRight)},
-        {QStringLiteral("usageLeftOnly"), double(station.usageLeftOnly)},
-        {QStringLiteral("usageRightOnly"), double(station.usageRightOnly)},
+        {QStringLiteral("boxQuantity"), QString::number(station.boxQuantity)},
+        {QStringLiteral("minimumStock"), QString::number(station.minimumStock)},
+        {QStringLiteral("maximumStock"), QString::number(station.maximumStock)},
+        {QStringLiteral("usageLeftRight"), QString::number(station.usageLeftRight)},
+        {QStringLiteral("usageLeftOnly"), QString::number(station.usageLeftOnly)},
+        {QStringLiteral("usageRightOnly"), QString::number(station.usageRightOnly)},
     };
 }
 
-/// JSON 单行恢复为领域对象；类型错误保留默认值，由 validate 一次汇总。
-ShortageStationConfig stationFromJson(const QJsonObject &object)
+/// 从 JSON 字符串优先恢复 64 位整数；兼容旧的小整数 number 格式。
+qint64 qint64FromJsonValue(const QJsonObject &object, const QString &field)
 {
-    ShortageStationConfig station;
+    const QJsonValue value = object.value(field);
+    if (value.isString()) {
+        bool ok = false;
+        const qint64 parsed = value.toString().toLongLong(&ok);
+        if (ok)
+            return parsed;
+    }
+    return qint64(value.toDouble());
+}
+
+/// JSON 单行恢复为领域对象；未知产品会直接报错，避免静默落到 88。
+bool stationFromJson(const QJsonObject &object,
+                     int row,
+                     ShortageStationConfig *station,
+                     QString *errorZh)
+{
     ProductModel product = ProductModel::Model88;
-    if (productFromString(object.value(QStringLiteral("product")).toString(), &product))
-        station.product = product;
-    station.stationId = object.value(QStringLiteral("stationId")).toInt();
-    station.temporaryNo = object.value(QStringLiteral("temporaryNo")).toString();
-    station.sitePosition = object.value(QStringLiteral("sitePosition")).toString();
-    station.partNumber = object.value(QStringLiteral("partNumber")).toString();
-    station.enabled = object.value(QStringLiteral("enabled")).toBool(true);
-    station.boxQuantity = qint64(object.value(QStringLiteral("boxQuantity")).toDouble());
-    station.minimumStock = qint64(object.value(QStringLiteral("minimumStock")).toDouble());
-    station.maximumStock = qint64(object.value(QStringLiteral("maximumStock")).toDouble());
-    station.usageLeftRight = qint64(object.value(QStringLiteral("usageLeftRight")).toDouble());
-    station.usageLeftOnly = qint64(object.value(QStringLiteral("usageLeftOnly")).toDouble());
-    station.usageRightOnly = qint64(object.value(QStringLiteral("usageRightOnly")).toDouble());
-    return station;
+    const QString productText = object.value(QStringLiteral("product")).toString();
+    if (!productFromString(productText, &product)) {
+        *errorZh = QStringLiteral("行%1 字段产品 product 值%2：未知产品文本，拒绝默认为 88")
+                       .arg(row)
+                       .arg(productText);
+        return false;
+    }
+    station->product = product;
+    station->stationId = object.value(QStringLiteral("stationId")).toInt();
+    station->temporaryNo = object.value(QStringLiteral("temporaryNo")).toString();
+    station->sitePosition = object.value(QStringLiteral("sitePosition")).toString();
+    station->partNumber = object.value(QStringLiteral("partNumber")).toString();
+    station->enabled = object.value(QStringLiteral("enabled")).toBool(true);
+    station->boxQuantity = qint64FromJsonValue(object, QStringLiteral("boxQuantity"));
+    station->minimumStock = qint64FromJsonValue(object, QStringLiteral("minimumStock"));
+    station->maximumStock = qint64FromJsonValue(object, QStringLiteral("maximumStock"));
+    station->usageLeftRight = qint64FromJsonValue(object, QStringLiteral("usageLeftRight"));
+    station->usageLeftOnly = qint64FromJsonValue(object, QStringLiteral("usageLeftOnly"));
+    station->usageRightOnly = qint64FromJsonValue(object, QStringLiteral("usageRightOnly"));
+    return true;
 }
 
 /// 完整配置转 JSON 文档；revision 作为字符串保存，避免 64 位精度丢失。
@@ -183,8 +206,12 @@ bool configurationFromJson(const QByteArray &bytes,
         parameters.value(QStringLiteral("preUnloadFailureLimit")).toInt();
 
     const QJsonArray stations = root.value(QStringLiteral("stations")).toArray();
-    for (const QJsonValue &value : stations)
-        parsed.stations.append(stationFromJson(value.toObject()));
+    for (qsizetype i = 0; i < stations.size(); ++i) {
+        ShortageStationConfig station;
+        if (!stationFromJson(stations.at(i).toObject(), int(i + 1), &station, errorZh))
+            return false;
+        parsed.stations.append(station);
+    }
 
     const ShortageOperationResult validation = ShortageConfigStore::validate(parsed);
     if (!validation.ok) {
@@ -464,6 +491,8 @@ ShortageOperationResult ShortageConfigStore::save(const QString &filePath,
     const ShortageOperationResult validation = validate(configuration);
     if (!validation.ok)
         return validation;
+    if (configuration.revision == std::numeric_limits<quint64>::max())
+        return {false, QStringLiteral("revision 已达到最大值，无法继续单调递增")};
 
     const QString backupPath = backupPathFor(filePath);
     if (QFile::exists(filePath)) {
@@ -478,7 +507,9 @@ ShortageOperationResult ShortageConfigStore::save(const QString &filePath,
             return backupResult;
     }
 
-    return writeJsonAtomically(filePath, configuration, QStringLiteral("已原子保存缺料配置"));
+    ShortageConfiguration persisted = configuration;
+    ++persisted.revision;
+    return writeJsonAtomically(filePath, persisted, QStringLiteral("已原子保存缺料配置"));
 }
 
 ShortageOperationResult ShortageConfigStore::exportCopy(

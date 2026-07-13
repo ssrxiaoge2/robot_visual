@@ -19,7 +19,7 @@ public:
     /// 先加载主配置，主文件缺失/损坏/非法时再读同目录备份；两者都失败不覆盖传入内存值。
     static ShortageOperationResult load(const QString &filePath,
                                         ShortageConfiguration *configuration);
-    /// 先校验；将当前有效主文件原子写入备份后，再用 QSaveFile 原子替换主文件。
+    /// 先校验；将当前有效主文件原子写入备份后，再用 QSaveFile 原子保存 revision + 1。
     static ShortageOperationResult save(const QString &filePath,
                                         const ShortageConfiguration &configuration);
     /// 只导出副本，不改变正式配置路径和当前内存配置。

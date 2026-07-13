@@ -2,6 +2,7 @@
 
 #include <QDir>
 #include <QFile>
+#include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTemporaryDir>
@@ -100,6 +101,9 @@ private slots:
     void parameterBoundariesAreValidated();            // CF-03：所有边界和越界。
     void stationRowsRejectInvalidFields();             // CF-04：逐字段错误原因。
     void saveLoadAndBackupAreAtomic();                 // CF-05：保存、损坏、备份。
+    void saveLoadAndExportPreserveLargeQuantitiesExactly(); // CF-05：64 位数量精确持久化。
+    void savePersistsNextRevisionWithoutMutatingInput();     // CF-05：正式保存修订号单调递增。
+    void loadRejectsUnknownProductText();                    // CF-05：未知产品文本不得默认为 88。
     void busyGuardListsEveryBlockingCondition();       // CF-06：五类忙碌门禁。
     void allNineProductModeCombinationsResolveUsage(); // CH-05：3×3 用量选择。
 };
@@ -291,14 +295,112 @@ void ShortageConfigTest::saveLoadAndBackupAreAtomic()
     const ShortageOperationResult loadResult = ShortageConfigStore::load(configPath, &loaded);
     QVERIFY2(loadResult.ok, qPrintable(loadResult.messageZh));
     QVERIFY2(loadResult.messageZh.contains(QStringLiteral("来自备份")), qPrintable(loadResult.messageZh));
-    QCOMPARE(loaded.revision, quint64{7});
+    QCOMPARE(loaded.revision, quint64{8});
     QCOMPARE(loaded.stations[0].minimumStock, qint64{701});
 
     const QString exportPath = dir.filePath(QStringLiteral("export.json"));
     const ShortageOperationResult exportResult = ShortageConfigStore::exportCopy(exportPath, second);
     QVERIFY2(exportResult.ok, qPrintable(exportResult.messageZh));
     QVERIFY(QFile::exists(exportPath));
-    QCOMPARE(loaded.revision, quint64{7});
+    QCOMPARE(loaded.revision, quint64{8});
+}
+
+void ShortageConfigTest::saveLoadAndExportPreserveLargeQuantitiesExactly()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString configPath = dir.filePath(QStringLiteral("large-quantity.json"));
+    const QString exportPath = dir.filePath(QStringLiteral("large-quantity-export.json"));
+
+    const qint64 aboveDoubleExactRange = (qint64{1} << 53) + 123;
+    ShortageConfiguration configuration = ShortageConfigStore::sheet3Defaults();
+    configuration.stations[0].boxQuantity = aboveDoubleExactRange;
+    configuration.stations[0].minimumStock = aboveDoubleExactRange - 2;
+    configuration.stations[0].maximumStock = aboveDoubleExactRange + 2;
+    configuration.stations[0].usageLeftRight = aboveDoubleExactRange - 1;
+    configuration.stations[0].usageLeftOnly = aboveDoubleExactRange;
+    configuration.stations[0].usageRightOnly = aboveDoubleExactRange + 1;
+
+    const ShortageOperationResult saveResult = ShortageConfigStore::save(configPath, configuration);
+    QVERIFY2(saveResult.ok, qPrintable(saveResult.messageZh));
+
+    ShortageConfiguration loaded;
+    const ShortageOperationResult loadResult = ShortageConfigStore::load(configPath, &loaded);
+    QVERIFY2(loadResult.ok, qPrintable(loadResult.messageZh));
+    QCOMPARE(loaded.stations[0].boxQuantity, aboveDoubleExactRange);
+    QCOMPARE(loaded.stations[0].minimumStock, aboveDoubleExactRange - 2);
+    QCOMPARE(loaded.stations[0].maximumStock, aboveDoubleExactRange + 2);
+    QCOMPARE(loaded.stations[0].usageLeftRight, aboveDoubleExactRange - 1);
+    QCOMPARE(loaded.stations[0].usageLeftOnly, aboveDoubleExactRange);
+    QCOMPARE(loaded.stations[0].usageRightOnly, aboveDoubleExactRange + 1);
+
+    const ShortageOperationResult exportResult =
+        ShortageConfigStore::exportCopy(exportPath, configuration);
+    QVERIFY2(exportResult.ok, qPrintable(exportResult.messageZh));
+
+    ShortageConfiguration exported;
+    const ShortageOperationResult exportLoadResult =
+        ShortageConfigStore::load(exportPath, &exported);
+    QVERIFY2(exportLoadResult.ok, qPrintable(exportLoadResult.messageZh));
+    QCOMPARE(exported.stations[0].boxQuantity, aboveDoubleExactRange);
+    QCOMPARE(exported.stations[0].minimumStock, aboveDoubleExactRange - 2);
+    QCOMPARE(exported.stations[0].maximumStock, aboveDoubleExactRange + 2);
+    QCOMPARE(exported.stations[0].usageLeftRight, aboveDoubleExactRange - 1);
+    QCOMPARE(exported.stations[0].usageLeftOnly, aboveDoubleExactRange);
+    QCOMPARE(exported.stations[0].usageRightOnly, aboveDoubleExactRange + 1);
+}
+
+void ShortageConfigTest::savePersistsNextRevisionWithoutMutatingInput()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString configPath = dir.filePath(QStringLiteral("revision.json"));
+
+    ShortageConfiguration configuration = ShortageConfigStore::sheet3Defaults();
+    configuration.revision = 41;
+    const ShortageOperationResult saveResult = ShortageConfigStore::save(configPath, configuration);
+    QVERIFY2(saveResult.ok, qPrintable(saveResult.messageZh));
+    QCOMPARE(configuration.revision, quint64{41});
+
+    ShortageConfiguration loaded;
+    const ShortageOperationResult loadResult = ShortageConfigStore::load(configPath, &loaded);
+    QVERIFY2(loadResult.ok, qPrintable(loadResult.messageZh));
+    QCOMPARE(loaded.revision, quint64{42});
+}
+
+void ShortageConfigTest::loadRejectsUnknownProductText()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    const QString configPath = dir.filePath(QStringLiteral("unknown-product.json"));
+
+    ShortageConfiguration configuration = ShortageConfigStore::sheet3Defaults();
+    const ShortageOperationResult saveResult = ShortageConfigStore::exportCopy(configPath, configuration);
+    QVERIFY2(saveResult.ok, qPrintable(saveResult.messageZh));
+
+    QFile file(configPath);
+    QVERIFY(file.open(QIODevice::ReadOnly));
+    QJsonDocument document = QJsonDocument::fromJson(file.readAll());
+    file.close();
+    QJsonObject root = document.object();
+    QJsonArray stations = root.value(QStringLiteral("stations")).toArray();
+    QJsonObject firstStation = stations.at(0).toObject();
+    firstStation[QStringLiteral("product")] = QStringLiteral("bad-product");
+    stations[0] = firstStation;
+    root[QStringLiteral("stations")] = stations;
+    document.setObject(root);
+    QVERIFY(file.open(QIODevice::WriteOnly | QIODevice::Truncate));
+    QVERIFY(file.write(document.toJson(QJsonDocument::Indented)) > 0);
+    file.close();
+
+    ShortageConfiguration loaded = ShortageConfigStore::sheet3Defaults();
+    const ShortageOperationResult loadResult = ShortageConfigStore::load(configPath, &loaded);
+    QVERIFY(!loadResult.ok);
+    QVERIFY2(containsAll(loadResult.messageZh, {
+                 QStringLiteral("bad-product"),
+                 QStringLiteral("产品"),
+             }),
+             qPrintable(loadResult.messageZh));
 }
 
 void ShortageConfigTest::busyGuardListsEveryBlockingCondition()
