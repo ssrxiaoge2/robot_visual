@@ -278,6 +278,19 @@ void ShortageLedgerTest::resetCandidateDistinguishesResetFromGlitch()
     QCOMPARE(stagedReset.actualQty.baseline, qint64{1000});
     QCOMPARE(stockOf(stagedReset, 1), qint64{1000});
     QVERIFY(ledger.applyStableSample(&stagedReset, sample(0)).ok);
+    const ShortageRuntimeState beforeRepeatedCandidate = stagedReset;
+    LedgerApplyResult repeatedCandidate =
+        ledger.applyStableSample(&stagedReset, sample(0, ProductModel::Model88R,
+                                                      ProductionMode::LeftOnly));
+    QVERIFY2(repeatedCandidate.ok, qPrintable(repeatedCandidate.messageZh));
+    QVERIFY(!repeatedCandidate.changed);
+    QCOMPARE(stagedReset.hasStableContext, beforeRepeatedCandidate.hasStableContext);
+    QCOMPARE(stagedReset.product, beforeRepeatedCandidate.product);
+    QCOMPARE(stagedReset.mode, beforeRepeatedCandidate.mode);
+    QCOMPARE(stagedReset.actualQty.resetCandidate,
+             beforeRepeatedCandidate.actualQty.resetCandidate);
+    QCOMPARE(stagedReset.actualQty.baseline, beforeRepeatedCandidate.actualQty.baseline);
+    QCOMPARE(stockOf(stagedReset, 1), stockOf(beforeRepeatedCandidate, 1));
     QCOMPARE(stagedReset.actualQty.resetCandidate, qint64{0});
     QCOMPARE(stagedReset.actualQty.baseline, qint64{1000});
     QCOMPARE(stockOf(stagedReset, 1), qint64{1000});

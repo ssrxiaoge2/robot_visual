@@ -300,9 +300,7 @@ LedgerApplyResult ShortageLedger::applyStableSample(ShortageRuntimeState *state,
                                 .arg(current));
         }
         if (current == actual.resetCandidate) {
-            if (contextChanged)
-                *state = work;
-            return okResult(contextChanged,
+            return okResult(false,
                             QStringLiteral("清零候选重复：oldBaseline=%1，candidate=%2，处理动作=继续等待")
                                 .arg(oldBaseline)
                                 .arg(current));
