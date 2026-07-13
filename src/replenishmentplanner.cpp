@@ -142,6 +142,26 @@ bool sameOrders(const QList<ReplenishmentOrder> &left, const QList<Replenishment
     return true;
 }
 
+bool sameStations(const QList<ShortageStationRuntime> &left,
+                  const QList<ShortageStationRuntime> &right)
+{
+    if (left.size() != right.size())
+        return false;
+    for (qsizetype i = 0; i < left.size(); ++i) {
+        const ShortageStationRuntime &a = left[i];
+        const ShortageStationRuntime &b = right[i];
+        if (a.stationId != b.stationId
+            || a.stock != b.stock
+            || a.firstLowAtUtc != b.firstLowAtUtc
+            || a.consecutivePreUnloadFailures != b.consecutivePreUnloadFailures
+            || a.automaticPaused != b.automaticPaused
+            || a.pauseReasonZh != b.pauseReasonZh) {
+            return false;
+        }
+    }
+    return true;
+}
+
 } // namespace
 
 ReplenishmentPlanner::ReplenishmentPlanner(ShortageConfiguration configuration)
@@ -225,6 +245,7 @@ PlannerApplyResult ReplenishmentPlanner::reevaluate(ShortageRuntimeState *state,
 
     const bool changed = work.waitingStationIds != state->waitingStationIds
         || work.activeStationId != state->activeStationId
+        || !sameStations(work.stations, state->stations)
         || !sameOrders(work.orders, state->orders)
         || work.nextReplenishmentOrderNo != state->nextReplenishmentOrderNo;
     *state = work;

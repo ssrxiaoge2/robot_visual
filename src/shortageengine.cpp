@@ -86,6 +86,20 @@ ShortageOperationResult validatePlannerRestoreState(const ShortageConfiguration 
     for (const ShortageStationRuntime &station : state.stations)
         stationIds.insert(station.stationId);
 
+    const ShortageStationRuntime *activeStation = nullptr;
+    if (state.activeStationId != 0) {
+        for (const ShortageStationRuntime &station : state.stations) {
+            if (station.stationId == state.activeStationId) {
+                activeStation = &station;
+                break;
+            }
+        }
+        if (activeStation == nullptr) {
+            return {false, QStringLiteral("恢复状态校验失败：活动工位%1不在12工位状态内")
+                               .arg(state.activeStationId)};
+        }
+    }
+
     QSet<quint64> orderNos;
     quint64 maxOrderNo = 0;
     for (const ReplenishmentOrder &order : state.orders) {
@@ -150,10 +164,15 @@ ShortageOperationResult validatePlannerRestoreState(const ShortageConfiguration 
                 break;
             }
         }
-        if (stationConfig == nullptr || !stationConfig->enabled
-            || station->automaticPaused
-            || station->stock >= stationConfig->minimumStock) {
-            return {false, QStringLiteral("恢复状态校验失败：等待表工位%1不是可自动补料低位")
+        if (stationConfig == nullptr || !stationConfig->enabled || station->automaticPaused) {
+            return {false, QStringLiteral("恢复状态校验失败：等待表工位%1不是可自动补料工位")
+                               .arg(stationId)};
+        }
+        const bool activeContinuation = stationId == state.activeStationId
+            && station->stock < stationConfig->maximumStock;
+        const bool currentlyLow = station->stock < stationConfig->minimumStock;
+        if (!currentlyLow && !activeContinuation) {
+            return {false, QStringLiteral("恢复状态校验失败：等待表工位%1既非低位也非有效活动工位")
                                .arg(stationId)};
         }
         if (previousFirstLow.isValid()
@@ -164,6 +183,51 @@ ShortageOperationResult validatePlannerRestoreState(const ShortageConfiguration 
         }
         previousFirstLow = station->firstLowAtUtc;
         previousStationId = stationId;
+    }
+
+    if (activeStation != nullptr) {
+        const ShortageStationConfig *stationConfig = nullptr;
+        for (const ShortageStationConfig &candidate : configuration.stations) {
+            if (candidate.product == state.product && candidate.stationId == state.activeStationId) {
+                stationConfig = &candidate;
+                break;
+            }
+        }
+        if (state.criticalLock
+            || stationConfig == nullptr
+            || !stationConfig->enabled
+            || activeStation->automaticPaused
+            || activeStation->stock >= stationConfig->maximumStock
+            || !waitingSeen.contains(state.activeStationId)
+            || !activeStation->firstLowAtUtc.isValid()) {
+            return {false, QStringLiteral("恢复状态校验失败：活动工位%1与等待/低位/暂停/最高位语义不一致")
+                               .arg(state.activeStationId)};
+        }
+    } else if (!state.criticalLock && !state.waitingStationIds.isEmpty()) {
+        return {false, QStringLiteral("恢复状态校验失败：存在等待工位但活动工位为0")};
+    }
+
+    for (const ShortageStationRuntime &station : state.stations) {
+        const ShortageStationConfig *stationConfig = nullptr;
+        for (const ShortageStationConfig &candidate : configuration.stations) {
+            if (candidate.product == state.product && candidate.stationId == station.stationId) {
+                stationConfig = &candidate;
+                break;
+            }
+        }
+        if (stationConfig == nullptr)
+            return {false, QStringLiteral("恢复状态校验失败：stationId=%1 缺少当前产品配置").arg(station.stationId)};
+        const bool requiresReplenishment = stationConfig->enabled
+            && !station.automaticPaused
+            && station.stock < stationConfig->minimumStock;
+        if (requiresReplenishment && !waitingSeen.contains(station.stationId)) {
+            return {false, QStringLiteral("恢复状态校验失败：低位工位%1缺少等待表记录")
+                               .arg(station.stationId)};
+        }
+        if (!waitingSeen.contains(station.stationId) && station.firstLowAtUtc.isValid()) {
+            return {false, QStringLiteral("恢复状态校验失败：非等待工位%1保留了首次低位时间")
+                               .arg(station.stationId)};
+        }
     }
 
     return {true, QStringLiteral("恢复计划状态校验通过：补料单和等待顺序一致")};
@@ -206,6 +270,22 @@ ShortageEngineResult persistCritical(ShortageStateStore *store,
         return result;
     }
     return engineOk(true, messageZh);
+}
+
+ShortageEngineResult persistCriticalPlannerFailure(ShortageStateStore *store,
+                                                   ShortageRuntimeState *state,
+                                                   const QString &eventType,
+                                                   const PlannerApplyResult &planner,
+                                                   const QDateTime &nowUtc)
+{
+    installCriticalLock(state, planner.messageZh);
+    const ShortageEngineResult persisted =
+        persistCritical(store, state, eventType, planner.messageZh, nowUtc);
+    if (!persisted.ok)
+        return persisted;
+    ShortageEngineResult result = engineFail(planner.messageZh, true);
+    result.changed = true;
+    return result;
 }
 
 ShortageEngineResult persistPeriodic(ShortageStateStore *store,
@@ -456,8 +536,11 @@ ShortageEngineResult ShortageEngine::recordTaskStarted(const TaskFact &fact)
     ShortageRuntimeState work = m_state;
     const PlannerApplyResult planner = m_planner.markTaskStarted(&work, fact);
     if (!planner.ok) {
-        if (planner.criticalLock)
-            installCriticalLock(&m_state, planner.messageZh);
+        if (planner.criticalLock) {
+            return persistCriticalPlannerFailure(m_stateStore, &m_state,
+                                                 QStringLiteral("task_fact_rejected"),
+                                                 planner, fact.occurredAtUtc);
+        }
         return fromPlanner(planner);
     }
     m_state = work;
@@ -470,8 +553,11 @@ ShortageEngineResult ShortageEngine::recordMaterialUnloaded(const TaskFact &fact
     ShortageRuntimeState work = m_state;
     const PlannerApplyResult validated = m_planner.validateUnloadFact(work, fact);
     if (!validated.ok) {
-        if (validated.criticalLock)
-            installCriticalLock(&m_state, validated.messageZh);
+        if (validated.criticalLock) {
+            return persistCriticalPlannerFailure(m_stateStore, &m_state,
+                                                 QStringLiteral("task_fact_rejected"),
+                                                 validated, fact.occurredAtUtc);
+        }
         return fromPlanner(validated);
     }
     const LedgerApplyResult ledger =
@@ -518,8 +604,11 @@ ShortageEngineResult ShortageEngine::recordTaskTerminal(const TaskFact &fact)
     const PlannerApplyResult planner =
         m_planner.markTerminal(&work, fact, m_configuration.parameters.preUnloadFailureLimit);
     if (!planner.ok) {
-        if (planner.criticalLock)
-            installCriticalLock(&m_state, planner.messageZh);
+        if (planner.criticalLock) {
+            return persistCriticalPlannerFailure(m_stateStore, &m_state,
+                                                 QStringLiteral("task_fact_rejected"),
+                                                 planner, fact.occurredAtUtc);
+        }
         return fromPlanner(planner);
     }
     m_state = work;

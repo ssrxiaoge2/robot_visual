@@ -155,7 +155,9 @@ private slots:
     void acceptedDispatchPersistsUnsafeRestoreLock();    // PS-15/PL-06：重启后不允许普通恢复已入队任务。
     void pendingContextWaitsForOldTasksThenDeducts();    // PS-11：旧任务排空前只保存待切换产量。
     void restoredStateInstallsOnlyAfterFullValidation(); // PS-15：恢复值只能经 Engine 安装。
+    void restoreRejectsInvalidActiveAndWaitingSemantics();// PS-15：活动工位和等待表必须双向一致。
     void unsafeRestoreLocksWithoutReplacingEngineState();// PS-15：不安全恢复不发布部分状态。
+    void invalidTaskFactsPersistCriticalLock();          // TK-05：严重任务事实必须落盘锁定审计。
 };
 
 void ReplenishmentPlannerTest::belowMinimumTriggersButEqualityDoesNot()
@@ -454,6 +456,37 @@ void ReplenishmentPlannerTest::restoredStateInstallsOnlyAfterFullValidation()
     QCOMPARE(engine.nextDispatchRequest()->replenishmentOrderNo, quint64{22});
 }
 
+void ReplenishmentPlannerTest::restoreRejectsInvalidActiveAndWaitingSemantics()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+
+    ShortageRuntimeState invalidActive = initializedState(50);
+    invalidActive.activeStationId = 99;
+    ShortageStateLoadResult load;
+    load.ok = true;
+    load.stateFound = true;
+    load.source = ShortageRestoreSource::Main;
+    load.state = invalidActive;
+
+    ShortageEngine activeEngine(testConfiguration(), &store);
+    const ShortageEngineResult activeResult = activeEngine.installRestoredState(load, utc(20));
+    QVERIFY(!activeResult.ok);
+    QVERIFY(activeResult.criticalLock);
+
+    ShortageRuntimeState missingLowWaiter = initializedState(50);
+    station(&missingLowWaiter, 3)->stock = 5;
+    station(&missingLowWaiter, 3)->firstLowAtUtc = utc(10);
+    missingLowWaiter.waitingStationIds.clear();
+    load.state = missingLowWaiter;
+
+    ShortageEngine waitingEngine(testConfiguration(), &store);
+    const ShortageEngineResult waitingResult = waitingEngine.installRestoredState(load, utc(21));
+    QVERIFY(!waitingResult.ok);
+    QVERIFY(waitingResult.criticalLock);
+}
+
 void ReplenishmentPlannerTest::unsafeRestoreLocksWithoutReplacingEngineState()
 {
     QTemporaryDir dir;
@@ -477,6 +510,33 @@ void ReplenishmentPlannerTest::unsafeRestoreLocksWithoutReplacingEngineState()
     QCOMPARE(engine.state().configurationRevision, before.configurationRevision);
     QCOMPARE(station(engine.state(), 1)->stock, station(before, 1)->stock);
     QVERIFY(!engine.nextDispatchRequest().has_value());
+}
+
+void ReplenishmentPlannerTest::invalidTaskFactsPersistCriticalLock()
+{
+    QTemporaryDir dir;
+    QVERIFY(dir.isValid());
+    ShortageStateStore store(dir.path(), ShortageStateNamespace::Production);
+    ShortageEngine engine(testConfiguration(), &store);
+    QVERIFY(engine.initializeZero(true, utc(1)).ok);
+    QVERIFY(engine.requestManualBox(5, true, utc(2)).ok);
+    const ShortageDispatchRequest request = engine.nextDispatchRequest().value();
+    QVERIFY(engine.recordDispatchResult(request.replenishmentOrderNo, true, 5001, QString()).ok);
+    const ShortageRuntimeState before = engine.state();
+
+    const ShortageEngineResult result =
+        engine.recordTaskTerminal(fact(TaskFactKind::Failed, request.replenishmentOrderNo,
+                                       9999, 5, 30));
+
+    QVERIFY(!result.ok);
+    QVERIFY(result.criticalLock);
+    const ShortageStateLoadResult loaded = store.load();
+    QVERIFY2(loaded.ok, qPrintable(loaded.messageZh));
+    QVERIFY(loaded.state.criticalLock);
+    QVERIFY(!loaded.state.criticalReasonZh.isEmpty());
+    QCOMPARE(orderByNo(loaded.state, request.replenishmentOrderNo)->state,
+             ReplenishmentOrderState::Queued);
+    QCOMPARE(station(loaded.state, 5)->stock, station(before, 5)->stock);
 }
 
 QTEST_MAIN(ReplenishmentPlannerTest)

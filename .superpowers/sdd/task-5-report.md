@@ -40,3 +40,20 @@
 
 - `recordDispatchResult()` 接口没有事件时间参数，目前持久化审计时间使用 `QDateTime::currentDateTimeUtc()`；后续接入 LineManager 时可考虑传入调度接受时间以便全链路时间一致。
 - 生产协调器接入时仍需在调用 `applyMaintenanceCorrection()` 前复核全部门禁；本任务仅提供 Engine 侧事务入口。
+
+## Review Fix 2026-07-14
+
+- 修复 PS-15 恢复安装校验：`activeStationId` 现在必须为 0 或存在于 12 工位状态中，并与等待表、暂停、低位/最高位和严重锁定语义一致；等待表校验改为双向校验，低位且未暂停、启用自动补料的工位必须在等待表中，等待表条目也必须对应有效工位与 `firstLowAtUtc`。
+- 修复 TK-05 严重任务事实处理：任务开始、倒料、终态的未知/错 taskId/错工位等关键事实在安装内存 `criticalLock` 后，会通过 `saveCritical()` 持久化锁定状态和审计，且不修改补料单或库存事实。
+- 修复 Planner `changed` 判定：`reevaluate()` 现在把工位运行元数据纳入变化比较，包含 `firstLowAtUtc` 等 planner-only 元数据。
+- 新增回归测试：
+  - `restoreRejectsInvalidActiveAndWaitingSemantics()` 覆盖非法活动工位和低位工位缺失等待表记录。
+  - `invalidTaskFactsPersistCriticalLock()` 覆盖非法任务终态事实落盘严重锁定且不改变补料单/库存。
+
+## Review Fix Verification 2026-07-14
+
+- RED：新增回归测试后，focused test 失败在 `restoreRejectsInvalidActiveAndWaitingSemantics()`（非法活动工位被接受）和 `invalidTaskFactsPersistCriticalLock()`（落盘状态未包含 `criticalLock`）。
+- `cmake --build build-shortage --target replenishment_planner_tests -j2`：通过。
+- `ctest --test-dir build-shortage -R '^replenishment_planner_tests$' --output-on-failure`：1/1 通过。
+- `ctest --test-dir build-shortage --output-on-failure`：11/12 通过；非本任务范围的 `shortage_sample_coordinator_tests` 持续失败于 `protocolReplyKeepsRoundIdAndAddressRange()` 的 `plcSpy.wait(2000)`。
+- `ctest --test-dir build-shortage -R '^shortage_sample_coordinator_tests$' --output-on-failure`：复现同一失败，确认不是本次 focused planner 测试失败。
