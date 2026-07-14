@@ -1,4 +1,5 @@
 #include "shortageconfigdialog.h"
+#include "shortagevalidationdialog.h"
 
 #include <QButtonGroup>
 #include <QCheckBox>
@@ -8,6 +9,7 @@
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
+#include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -233,6 +235,10 @@ void ShortageConfigDialog::buildUi()
     m_mainTabs->setObjectName(QStringLiteral("shortageMainTabs"));
     m_mainTabs->addTab(buildConfigurationPage(), QStringLiteral("宽屏配置"));
     m_mainTabs->addTab(buildTestPage(), QStringLiteral("完整逻辑测试"));
+    if (kShowShortageValidationTab) {
+        // 验证业务位于独立 Dialog；第三 Tab 只保留可后续隐藏的入口。
+        m_mainTabs->addTab(buildValidationEntryPage(), QStringLiteral("验证向导"));
+    }
     root->addWidget(m_mainTabs);
 
     auto *buttons = new QDialogButtonBox(QDialogButtonBox::Close, this);
@@ -435,6 +441,58 @@ QWidget *ShortageConfigDialog::buildTestPage()
     refreshTestSourceControls();
 
     return page;
+}
+
+QWidget *ShortageConfigDialog::buildValidationEntryPage()
+{
+    auto *page = new QWidget(this);
+    auto *layout = new QVBoxLayout(page);
+
+    auto *summary = new QLabel(
+        QStringLiteral("验证业务固定在独立缺料验证控制台内执行；本页只提供可隐藏入口，不承载验证步骤、日志或现场证据控件。"),
+        page);
+    summary->setWordWrap(true);
+    summary->setStyleSheet(QStringLiteral("color:#ffd166; font-weight:600;"));
+    layout->addWidget(summary);
+
+    auto *scope = new QLabel(
+        QStringLiteral("关闭或重复打开验证控制台不会启动/停止采样，也不会修改 StandaloneTest 状态。"),
+        page);
+    scope->setWordWrap(true);
+    layout->addWidget(scope);
+
+    auto *buttonRow = new QHBoxLayout;
+    auto *openButton = new QPushButton(QStringLiteral("打开验证控制台"), page);
+    openButton->setObjectName(QStringLiteral("openShortageValidationDialogButton"));
+    buttonRow->addWidget(openButton);
+    buttonRow->addStretch();
+    layout->addLayout(buttonRow);
+    layout->addStretch();
+
+    // 第三 Tab 的唯一信号连接点：只打开或恢复独立验证窗口，不执行业务动作。
+    connect(openButton, &QPushButton::clicked, this, &ShortageConfigDialog::openValidationDialog);
+    return page;
+}
+
+void ShortageConfigDialog::openValidationDialog()
+{
+    if (m_shortageValidationDialog != nullptr) {
+        // 已存在窗口由 QPointer 自动跟踪；重复点击只恢复、显示并置顶，不创建第二个会话。
+        if (m_shortageValidationDialog->isMinimized())
+            m_shortageValidationDialog->showNormal();
+        m_shortageValidationDialog->show();
+        m_shortageValidationDialog->raise();
+        m_shortageValidationDialog->activateWindow();
+        return;
+    }
+
+    auto *dialog = new ShortageValidationDialog(m_testController, this);
+    // Qt 父子关系负责窗口生命周期，WA_DeleteOnClose 关闭后让 QPointer 自动归零。
+    m_shortageValidationDialog = dialog;
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 QTableWidget *ShortageConfigDialog::createStationTable(ProductModel product,

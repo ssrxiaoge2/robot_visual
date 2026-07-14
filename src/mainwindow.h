@@ -26,6 +26,7 @@ class HandEyeDialog;
 class HuayanScheduler;
 class PalletParamDialog;
 class PalletScheduler;
+class ShortageConfigDialog;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -158,6 +159,8 @@ private:
     QRadioButton *m_shortageLiveRadio   = nullptr;
     QPushButton  *m_shortageConfigButton = nullptr;
     QPushButton  *m_shortageRecoveryButton = nullptr;
+    /// 自动失效的缺料配置测试窗口指针；重复点击入口只恢复和置顶现有窗口。
+    QPointer<ShortageConfigDialog> m_shortageConfigDialog;
     QList<QPushButton *> m_stationButtons; ///< 12 个模拟缺料入口，property 保存 stationId。
     ShortageUiSnapshot m_shortageSnapshot; ///< 最近一次正式缺料只读快照，UI 不持有账本可写引用。
     bool          m_hasShortageSnapshot = false;

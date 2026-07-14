@@ -8,6 +8,9 @@
 #include <QString>
 #include <QStringList>
 
+/// 现场验证阶段显示第三个 Tab；全部现场验收完成后只改为 false，不删除测试核心或既有页面。
+inline constexpr bool kShowShortageValidationTab = true;
+
 class QLabel;
 class QListWidget;
 class QPushButton;

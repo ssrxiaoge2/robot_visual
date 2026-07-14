@@ -1904,6 +1904,16 @@ void MainWindow::onShortageSnapshotChanged(ShortageUiSnapshot snapshot)
 
 void MainWindow::onOpenShortageConfigDialog()
 {
+    if (m_shortageConfigDialog != nullptr) {
+        // 修改前重复点击会创建多个窗口；现在恢复唯一窗口，不改变采样或测试账本。
+        if (m_shortageConfigDialog->isMinimized())
+            m_shortageConfigDialog->showNormal();
+        m_shortageConfigDialog->show();
+        m_shortageConfigDialog->raise();
+        m_shortageConfigDialog->activateWindow();
+        return;
+    }
+
     // 配置与完整逻辑测试改为宽屏弹窗；不恢复已废弃的旧通信诊断区域。
     auto *dialog = new ShortageConfigDialog(ShortageConfigStore::sheet3Defaults(),
                                             [] {
@@ -1912,8 +1922,12 @@ void MainWindow::onOpenShortageConfigDialog()
                                             m_devMgr->shortageTestController(),
                                             m_shortageSnapshot,
                                             this);
+    // Qt 父子关系与 WA_DeleteOnClose 共同管理实际窗口生命周期，QPointer 只保存可自动失效的入口状态。
+    m_shortageConfigDialog = dialog;
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 void MainWindow::onOpenShortageRecoveryDialog()

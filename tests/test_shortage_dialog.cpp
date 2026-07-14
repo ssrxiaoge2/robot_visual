@@ -8,7 +8,9 @@
 #include <QDir>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
+#include <QPlainTextEdit>
 #include <QPushButton>
 #include <QRadioButton>
 #include <QSignalSpy>
@@ -73,6 +75,17 @@ void closeNextMessageBox()
     });
 }
 
+QList<QWidget *> visibleValidationDialogs()
+{
+    QList<QWidget *> dialogs;
+    for (QWidget *widget : QApplication::topLevelWidgets()) {
+        if (QString::fromLatin1(widget->metaObject()->className()) == QStringLiteral("ShortageValidationDialog")
+            && widget->isVisible())
+            dialogs.append(widget);
+    }
+    return dialogs;
+}
+
 } // namespace
 
 class ShortageDialogTest final : public QObject
@@ -92,6 +105,9 @@ private slots:
     void snapshotRefreshesStationAndOrderViews();            ///< 首样本补料必须立即可见。
     void testPageProvidesAllDesignedOperations();             ///< 状态、任务和异常动作完整。
     void actionButtonsFollowControllerAvailability();         ///< 禁用只做提示，控制器仍二次校验。
+    void validationTabOnlyContainsIndependentDialogEntry();   ///< 第三 Tab 不混入验证业务控件。
+    void repeatedValidationOpenReusesSingleDialog();          ///< 重复入口只恢复现有验证窗口。
+    void hiddenValidationEntryLeavesFirstTwoTabsUntouched();  ///< 隐藏开关不影响既有两页。
     void saveExposesLastValidatedConfigurationOnly();
     void constructorDoesNotExposeInvalidConfigurationAsValidated();
     void saveValidationFocusesInvalidParameterControl();
@@ -374,6 +390,78 @@ void ShortageDialogTest::actionButtonsFollowControllerAvailability()
     controller.simulateMaterialUnloaded();
     QVERIFY(failAfterUnload->isEnabled());
     QVERIFY(resend->isEnabled());
+}
+
+void ShortageDialogTest::validationTabOnlyContainsIndependentDialogEntry()
+{
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(), [] {
+        return ShortageEditConditions {};
+    });
+
+    auto *mainTabs = requiredChild<QTabWidget>(&dialog, "shortageMainTabs");
+    QCOMPARE(mainTabs->count(), 3);
+    QCOMPARE(mainTabs->tabText(2), QStringLiteral("验证向导"));
+
+    QWidget *entryPage = mainTabs->widget(2);
+    auto *openButton = requiredChild<QPushButton>(entryPage, "openShortageValidationDialogButton");
+    QCOMPARE(openButton->text(), QStringLiteral("打开验证控制台"));
+    QVERIFY(entryPage->findChild<QListWidget *>(QString(), Qt::FindChildrenRecursively) == nullptr);
+    QVERIFY(entryPage->findChild<QPlainTextEdit *>(QString(), Qt::FindChildrenRecursively) == nullptr);
+}
+
+void ShortageDialogTest::repeatedValidationOpenReusesSingleDialog()
+{
+    QTemporaryDir testStateDir;
+    QVERIFY(testStateDir.isValid());
+    ShortageTestController controller(ShortageConfigStore::sheet3Defaults(),
+                                      testStateDir.path(),
+                                      nullptr,
+                                      [] {
+                                          return ShortageOperationResult {
+                                              true, QStringLiteral("允许测试采样")};
+                                      });
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(),
+                                [] {
+                                    return ShortageEditConditions {};
+                                },
+                                &controller,
+                                controller.currentSnapshot());
+    dialog.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+
+    auto *openButton = dialog.findChild<QPushButton *>(QStringLiteral("openShortageValidationDialogButton"));
+    QVERIFY2(openButton != nullptr, "验证向导必须提供打开验证控制台按钮");
+    openButton->click();
+    QTRY_COMPARE(visibleValidationDialogs().size(), 1);
+    QWidget *firstDialog = visibleValidationDialogs().constFirst();
+    QVERIFY(!firstDialog->isModal());
+    QVERIFY(firstDialog->windowFlags().testFlag(Qt::WindowMinimizeButtonHint));
+    QVERIFY(firstDialog->windowFlags().testFlag(Qt::WindowMaximizeButtonHint));
+    QVERIFY(firstDialog->windowFlags().testFlag(Qt::WindowCloseButtonHint));
+
+    firstDialog->showMinimized();
+    QVERIFY(firstDialog->isMinimized());
+    openButton->click();
+    QTRY_COMPARE(visibleValidationDialogs().size(), 1);
+    QCOMPARE(visibleValidationDialogs().constFirst(), firstDialog);
+    QTRY_VERIFY(!firstDialog->isMinimized());
+}
+
+void ShortageDialogTest::hiddenValidationEntryLeavesFirstTwoTabsUntouched()
+{
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(), [] {
+        return ShortageEditConditions {};
+    });
+
+    auto *mainTabs = requiredChild<QTabWidget>(&dialog, "shortageMainTabs");
+    QVERIFY(mainTabs->count() >= 2);
+    QCOMPARE(mainTabs->tabText(0), QStringLiteral("宽屏配置"));
+    QCOMPARE(mainTabs->tabText(1), QStringLiteral("完整逻辑测试"));
+    QVERIFY(requiredChild<QTabWidget>(&dialog, "shortageProductTabs") != nullptr);
+    QVERIFY(requiredChild<QPushButton>(&dialog, "testInitZeroButton") != nullptr);
+
+    QVERIFY(dialog.findChild<QLineEdit *>(QStringLiteral("liveMesDayEndpointEdit")) != nullptr);
+    QVERIFY(dialog.findChild<QPushButton *>(QStringLiteral("manualSampleSubmitButton")) != nullptr);
 }
 
 void ShortageDialogTest::saveExposesLastValidatedConfigurationOnly()

@@ -168,6 +168,7 @@ add_shortage_cpp_test(shortage_dialog_tests
     ../src/shortagetestcontroller.cpp
     ../src/shortageconfigstore.cpp
     ../src/shortageconfigdialog.cpp
+    ../src/shortagevalidationdialog.cpp
     ../src/shortagerecoverydialog.cpp
 )
 target_link_libraries(shortage_dialog_tests PRIVATE Qt6::Widgets)

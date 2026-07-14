@@ -33,6 +33,7 @@ private slots:
     void activeAutomaticPlanDisablesManualButtons();
     void configAndRecoveryOpenSeparateDialogs();
     void configDialogReceivesProductionTestControllerFromMainWindow();
+    void shortageDialogsReuseUniqueNonModalWindows();
 };
 
 void LiveShortageUiTest::mockAndLiveRadiosAreExclusiveAndMockIsDefault()
@@ -121,6 +122,19 @@ void LiveShortageUiTest::configDialogReceivesProductionTestControllerFromMainWin
     requireContains(cpp, QStringLiteral("m_devMgr->shortageTestController()"));
     QVERIFY2(!cpp.contains(QStringLiteral("ShortageConfigDialog(ShortageConfigStore::sheet3Defaults(),\n                                            [] {\n                                                return ShortageEditConditions {};\n                                            },\n                                            nullptr")),
              "MainWindow 打开配置弹窗时不得把测试控制器传 nullptr");
+}
+
+void LiveShortageUiTest::shortageDialogsReuseUniqueNonModalWindows()
+{
+    const QString header = sourceText(QStringLiteral("src/mainwindow.h"));
+    const QString cpp = sourceText(QStringLiteral("src/mainwindow.cpp"));
+
+    requireContains(header, QStringLiteral("QPointer<ShortageConfigDialog> m_shortageConfigDialog"));
+    requireContains(cpp, QStringLiteral("m_shortageConfigDialog->showNormal()"));
+    requireContains(cpp, QStringLiteral("m_shortageConfigDialog->raise()"));
+    requireContains(cpp, QStringLiteral("m_shortageConfigDialog->activateWindow()"));
+    QVERIFY2(cpp.contains(QStringLiteral("ShortageConfigDialog")),
+             "主窗口必须保留缺料配置测试入口");
 }
 
 QTEST_MAIN(LiveShortageUiTest)

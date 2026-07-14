@@ -7,6 +7,7 @@
 #include <QDialog>
 #include <QList>
 #include <QMap>
+#include <QPointer>
 #include <functional>
 
 class QButtonGroup;
@@ -21,6 +22,7 @@ class QTabWidget;
 class QTableWidget;
 class QTextEdit;
 class QVBoxLayout;
+class ShortageValidationDialog;
 
 /// 宽屏缺料配置与独立全逻辑测试弹窗；只持有配置副本、测试控制器和只读快照，不访问生产 Engine。
 class ShortageConfigDialog final : public QDialog
@@ -48,6 +50,10 @@ private:
     void buildUi();
     QWidget *buildConfigurationPage();
     QWidget *buildTestPage();
+    /// 创建只含边界说明和“打开验证控制台”按钮的第三 Tab，不承载验证业务。
+    QWidget *buildValidationEntryPage();
+    /// 打开唯一非模态验证窗口；最小化时恢复，重复点击不创建第二个会话。
+    void openValidationDialog();
     QTableWidget *createStationTable(ProductModel product, const QString &objectName);
     void populateStationTable(QTableWidget *table, ProductModel product);
     void createParameterEditors(QVBoxLayout *layout);
@@ -95,6 +101,8 @@ private:
     QLabel *m_testPlanSummaryLabel = nullptr;    ///< Dialog 拥有；显示基线、活动工位和等待顺序。
     QLabel *m_testOrderSummaryLabel = nullptr;   ///< Dialog 拥有；显示当前测试补料单状态。
     QMap<QString, QPushButton *> m_testActionButtons; ///< objectName 到按钮，仅用于门禁刷新。
+    /// 自动失效的非拥有 Qt 窗口指针；实际对象由父子关系和 WA_DeleteOnClose 管理。
+    QPointer<ShortageValidationDialog> m_shortageValidationDialog;
 };
 
 #endif // SHORTAGECONFIGDIALOG_H
