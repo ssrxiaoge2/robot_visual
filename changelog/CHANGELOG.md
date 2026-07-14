@@ -5,6 +5,43 @@
 
 ---
 
+## 2026-07-13 | v0.2.5 | 真实缺料账本、完整逻辑测试与最终验收清单
+
+### 新增
+- 新增正式缺料账本与补料计划：基于 MES `actualQty` 扣减库存，倒料事实完成后入账一箱，低于最低位触发并补至达到或超过最高位。
+- 固化 Sheet3 的 36 条产品/工位配置，并提供真实缺料 MES 地址、采样间隔、超时、通信报警和倒料前失败阈值配置。
+- 新增“缺料配置与完整逻辑测试”宽屏弹窗，测试控制器使用独立状态命名空间，可验证配置、采样、库存、任务事件、持久化和恢复，不写主 FIFO、不控制硬件。
+- 主流程接入模拟/真实二选一来源，默认模拟；真实缺料只向现有 FIFO 队尾追加任务，不重排已有任务。
+
+### 变更
+- 删除旧“客户系统通信测试”现行入口，`customSysScheduler.{h,cpp}` 原地改为 `.228` 真实 MES/PLC 唯一通信层；禁止恢复 `.229`、`DayRecord`、测试连接/读取数据诊断 API 和旧 UI。
+- 正式恢复路径要求先经 `ShortageEngine::installRestoredState()` 完整校验和一次性安装，安装后仍等待人工确认，不自动 Start。
+- 主界面新增真实缺料摘要、FIFO 页签、人工补料/异常恢复入口；当前工位表最低/最高列暂显示 `-`，配置弹窗和人工确认弹窗提供准确上下限。
+
+### 验证
+- Linux Qt 6.8.3 Debug 干净配置、构建与全量 CTest 作为 Task 12 门禁。
+- 新增自动编号追踪表、源码边界扫描、`git diff --check` 和现场 Step 6～13 分阶段验收清单。
+
+### 文件
+- `src/shortage*.{h,cpp}`
+- `src/liveshortagecoordinator.{h,cpp}`
+- `src/customSysScheduler.{h,cpp}`
+- `src/devicemanager.{h,cpp}`
+- `src/mainwindow.{h,cpp}`
+- `src/linemanager.{h,cpp}`
+- `src/taskexecutor.{h,cpp}`
+- `src/taskqueue.h`
+- `CMakeLists.txt`
+- `tests/test_shortage_*.cpp`
+- `tests/test_live_shortage_*.cpp`
+- `tests/CMakeLists.txt`
+- `README.md`
+- `docs/shortage-signal-analysis/`
+- `docs/superpowers/plans/2026-07-13-live-shortage-ledger.md`
+- `docs/superpowers/specs/2026-07-13-live-shortage-ledger-design.md`
+
+---
+
 ## 2026-07-08 | v0.2.4 | 工位12取料站点对齐、抓取余量修正与 AGV 步骤超时调整
 
 ### 变更

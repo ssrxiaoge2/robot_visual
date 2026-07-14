@@ -59,7 +59,7 @@ wh-robot-visual/
 │   ├── nscanscheduler.{h,cpp}      # N-ScanHub 网络扫码 SDK 同步封装
 │   ├── palletscheduler.{h,cpp}     # 空箱码垛点位规划与已放数量缓存
 │   ├── palletparamdialog.{h,cpp}   # 码垛参数配置窗口
-│   ├── customSysScheduler.{h,cpp}  # 客户系统 REST API 连通性和日统计读取
+│   ├── customSysScheduler.{h,cpp}  # 真实缺料唯一 MES/PLC 协议层（旧客户系统通信测试已废弃）
 │   ├── camerawindow.{h,cpp}        # 相机实时预览对话框
 │   ├── handeyedialog.{h,cpp}       # 手眼矩阵加载向导
 │   ├── deviceindicator.{h,cpp}     # LED 状态指示灯控件
@@ -119,16 +119,29 @@ python3 main_angle_depth_samseg_depth_http.py   # Flask 在 8080 端口监听
 1. 填写机械臂 / AGV / 视觉各设备 IP，点击「应用配置」建立连接
 2. 用各设备旁「测试」按钮验证 TCP 可达性
 3. 点击「Start」或顶部「▶ 开始运行」启动 `LineManager`，系统进入“等待缺料”
-4. 在「调度监控」中点击「工位1」到「工位12」模拟缺料，任务按 FIFO 顺序执行
-5. 点击「Stop」执行急停语义：取消 AGV、停止机械臂、清空 Pending 队列并进入 Error
-6. 现场处理完成后点击「Reset Error」恢复到 Idle，再重新 Start
-7. AGV 调试面板可单独派单 / 取消 / 暂停 / 继续，便于联调
+4. 在「调度监控」中选择“模拟缺料”或“真实缺料”；两种来源严格二选一，默认模拟缺料
+5. 模拟模式下点击「工位1」到「工位12」手工入队；真实模式下由缺料账本达到触发条件后只向 FIFO 队尾追加任务
+6. 点击「Stop」执行急停语义：取消 AGV、停止机械臂、清空 Pending 队列并进入 Error
+7. 现场处理完成后点击「Reset Error」恢复到 Idle，再重新 Start
+8. AGV 调试面板可单独派单 / 取消 / 暂停 / 继续，便于联调
 
 ---
 
 ## 12 工位缺料流程
 
 `LineManager` 是当前整线入口。它只负责队列、启停、回 LM1 和 Error 边界；单个工位的动作由 `TaskExecutor` 串行执行。系统启动后没有任务时保持“等待缺料”，收到缺料事件后创建一个任务，多个工位同时缺料时按 FIFO 依次执行。
+
+### 真实缺料账本与完整逻辑测试
+
+旧“客户系统通信测试”面板、`.229` 地址、测试连接/读取数据按钮和 `DayRecord` 诊断 API 已废弃，不再作为现行功能；现场不得按历史方案重新接回。当前 `customSysScheduler.{h,cpp}` 仅保留文件名，职责已改为真实缺料唯一 MES/PLC 协议层，默认 MES 日数据地址为 `http://192.168.115.228:5084/api/MesData/day`，PLC 请求从同一 scheme/host/port 派生。
+
+真实缺料模式以 `ShortageEngine` 维护 12 工位正式账本：MES `actualQty` 增量扣库存，机械臂完成倒料事实后只给对应工位加一箱；低于最低安全位触发，达到或超过最高安全位停止。现有 `TaskQueue` 仍只队尾追加、队首取出，真实缺料不会插队或重排既有 FIFO。
+
+配置入口集中在“缺料配置与完整逻辑测试...”弹窗：上半部分维护 Sheet3 固化的 36 条产品/工位配置、真实 MES 地址、采样间隔、超时和保护参数；测试页通过 `ShortageTestController` 使用独立测试状态目录，能执行手工采样、真实采样和任务事件注入，但不会写正式账本、不会进入主 FIFO、不会控制硬件。
+
+正式状态文件保存在运行目录下 `shortage-state/production`，完整逻辑测试使用 `shortage-state/standalone-test`，两者相互隔离。状态恢复必须先经 `ShortageEngine::installRestoredState()` 完整校验和一次性安装；恢复后仍等待人工确认，不会自动 Start。若主状态、备份和流水均不可安全恢复，界面只提示联系维护人员，由维护人员通过“异常恢复...”入口按单工位、原因和二次确认修正。
+
+主界面“工位、库存、最低/最高、状态”表目前库存和状态来自 `ShortageUiSnapshot`；最低/最高列在当前实现中仍显示 `-`，现场对账时以配置弹窗中的 36 条配置和人工确认弹窗中的最低/最高摘要为准，后续如需主界面逐行展示上下限再单独实施。
 
 ```
 缺料入队       工位按钮 / 后续客户系统事件 → TaskQueue FIFO
