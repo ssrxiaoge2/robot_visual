@@ -5,6 +5,31 @@
 
 ---
 
+## 2026-07-14 | v0.2.6 | 缺料完整逻辑测试修复与独立验证控制台
+
+### 修复
+- 修复缺料手工源缺少 actualQty、选择手工源仍启动真实采样、首次补料单不可见和测试状态不刷新的问题。
+- 缺料测试窗口和验证控制台支持最小化、最大化及唯一窗口复用。
+
+### 新增
+- 新增独立缺料验证控制台，提供 VT-01～VT-15 中文步骤和通过条件；入口可在现场验收后隐藏。
+
+### 验证
+- Linux Qt 6.8.3 Debug 干净配置、构建和全量 CTest 18/18 通过。
+- 完成缺料窗口边界扫描、验证控制台隔离扫描和 `git diff --check`。
+
+### 文件
+- `src/shortagetestcontroller.{h,cpp}`
+- `src/shortageconfigdialog.{h,cpp}`
+- `src/shortagevalidationdialog.{h,cpp}`
+- `src/mainwindow.{h,cpp}`
+- `tests/test_shortage_*.cpp`
+- `tests/test_live_shortage_*.cpp`
+- `README.md`
+- `docs/superpowers/specs/2026-07-14-shortage-test-bugfix.md`
+
+---
+
 ## 2026-07-13 | v0.2.5 | 真实缺料账本、完整逻辑测试与最终验收清单
 
 ### 新增

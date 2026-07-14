@@ -306,6 +306,9 @@ void LiveShortageCoordinatorTest::sharedStableSampleIsProcessedByTestOnlyWhenPro
         &sampleCoordinator,
         [] { return ShortageOperationResult{true, QStringLiteral("允许测试采样")}; });
     testController.initializeZeroAfterConfirmation();
+    // 修改前测试控制器默认可直接启动现场采样；现场问题修复后默认手工源，
+    // 共享采样互斥场景必须显式切到现场源，才代表真实测试窗口的操作顺序。
+    testController.selectInputSource(ShortageTestInputSource::Field);
     testController.startFieldSampling();
     QVERIFY(testController.fieldSamplingActive());
 
