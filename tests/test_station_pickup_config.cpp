@@ -37,7 +37,7 @@ int main()
     requireTrue(s12->afterGripMode == AfterGripMode::CaptureFunc, "工位12夹紧后必须保持复用拍照函数回安全位");
     const StationTaskConfig *s3 = stationConfig(3);
     requireTrue(s3 != nullptr, "工位3配置必须存在");
-    requireTrue(s3->stowAfterUnloadFunc == QStringLiteral("Func_yun_xing_zhong_s3"),
+    requireTrue(s3->stowAfterUnloadFunc == QStringLiteral("Func_daoliao3_huianquanwei"),
                 "工位3倒料后收姿态必须使用带过渡点的新函数");
 
     const StationTaskConfig *s1 = stationConfig(1);
