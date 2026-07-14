@@ -11,6 +11,8 @@
 #include <QTextEdit>
 #include <QVBoxLayout>
 
+#include <algorithm>
+
 namespace {
 
 ShortageValidationStep step(const QString &instructionZh,
@@ -50,6 +52,98 @@ QString yesNo(bool value)
     return value ? QStringLiteral("是") : QStringLiteral("否");
 }
 
+const ShortageStationRuntime *stationById(const ShortageRuntimeState &state, int stationId)
+{
+    for (const ShortageStationRuntime &station : state.stations) {
+        if (station.stationId == stationId)
+            return &station;
+    }
+    return nullptr;
+}
+
+const ReplenishmentOrder *orderByNo(const ShortageRuntimeState &state, quint64 orderNo)
+{
+    for (const ReplenishmentOrder &order : state.orders) {
+        if (order.orderNo == orderNo)
+            return &order;
+    }
+    return nullptr;
+}
+
+bool hasTwelveStations(const ShortageRuntimeState &state)
+{
+    if (state.stations.size() != 12)
+        return false;
+    for (int stationId = 1; stationId <= 12; ++stationId) {
+        if (stationById(state, stationId) == nullptr)
+            return false;
+    }
+    return true;
+}
+
+bool allStationStocksEqual(const ShortageRuntimeState &state, qint64 expectedStock)
+{
+    if (!hasTwelveStations(state))
+        return false;
+    for (const ShortageStationRuntime &station : state.stations) {
+        if (station.stock != expectedStock)
+            return false;
+    }
+    return true;
+}
+
+bool waitingStationsAreOneToTwelve(const ShortageRuntimeState &state)
+{
+    if (state.waitingStationIds.size() != 12)
+        return false;
+    for (int index = 0; index < state.waitingStationIds.size(); ++index) {
+        if (state.waitingStationIds.at(index) != index + 1)
+            return false;
+    }
+    return true;
+}
+
+bool hasSingleAwaitingStationOneOrder(const ShortageRuntimeState &state)
+{
+    return state.orders.size() == 1
+        && state.orders.first().stationId == 1
+        && state.orders.first().state == ReplenishmentOrderState::AwaitingDispatch
+        && state.orders.first().taskId == 0;
+}
+
+bool stockIncreasedOnlyForStation(const ShortageRuntimeState &before,
+                                  const ShortageRuntimeState &after,
+                                  int stationId)
+{
+    if (!hasTwelveStations(before) || !hasTwelveStations(after))
+        return false;
+    bool targetIncreased = false;
+    for (const ShortageStationRuntime &afterStation : after.stations) {
+        const ShortageStationRuntime *beforeStation = stationById(before, afterStation.stationId);
+        if (beforeStation == nullptr)
+            return false;
+        if (afterStation.stationId == stationId) {
+            targetIncreased = afterStation.stock > beforeStation->stock;
+        } else if (afterStation.stock != beforeStation->stock) {
+            return false;
+        }
+    }
+    return targetIncreased;
+}
+
+bool stockUnchangedForAllStations(const ShortageRuntimeState &before,
+                                  const ShortageRuntimeState &after)
+{
+    if (!hasTwelveStations(before) || !hasTwelveStations(after))
+        return false;
+    for (const ShortageStationRuntime &afterStation : after.stations) {
+        const ShortageStationRuntime *beforeStation = stationById(before, afterStation.stationId);
+        if (beforeStation == nullptr || afterStation.stock != beforeStation->stock)
+            return false;
+    }
+    return true;
+}
+
 } // namespace
 
 ShortageValidationDialog::ShortageValidationDialog(ShortageTestController *testController,
@@ -70,33 +164,40 @@ ShortageValidationDialog::ShortageValidationDialog(ShortageTestController *testC
         // snapshotChanged 是验证窗口接收测试状态证据的唯一连接点；只读刷新，不回写控制器。
         connect(m_testController, &ShortageTestController::snapshotChanged, this,
                 [this](const ShortageUiSnapshot &snapshot) {
+                    m_latestSnapshot = snapshot;
                     refreshSnapshotEvidence(snapshot);
                 });
         // actionAvailabilityChanged 是验证窗口感知按钮能力变化的唯一连接点；当前向导只记录证据。
         connect(m_testController, &ShortageTestController::actionAvailabilityChanged, this,
                 [this](const ShortageTestActionAvailability &availability) {
-                    appendValidationLog(QStringLiteral(
+                    const QString messageZh = QStringLiteral(
                         "动作门禁刷新：手工=%1，现场启动=%2，停止=%3，接受=%4，拒收=%5，倒料=%6，重发=%7")
-                                            .arg(yesNo(availability.canSubmitManualSample))
-                                            .arg(yesNo(availability.canStartFieldSampling))
-                                            .arg(yesNo(availability.canStopFieldSampling))
-                                            .arg(yesNo(availability.canAcceptDispatch))
-                                            .arg(yesNo(availability.canRejectDispatch))
-                                            .arg(yesNo(availability.canRecordUnload))
-                                            .arg(yesNo(availability.canResendUnload)));
+                                                  .arg(yesNo(availability.canSubmitManualSample))
+                                                  .arg(yesNo(availability.canStartFieldSampling))
+                                                  .arg(yesNo(availability.canStopFieldSampling))
+                                                  .arg(yesNo(availability.canAcceptDispatch))
+                                                  .arg(yesNo(availability.canRejectDispatch))
+                                                  .arg(yesNo(availability.canRecordUnload))
+                                                  .arg(yesNo(availability.canResendUnload));
+                    m_currentCaseControllerLogs.append(messageZh);
+                    appendValidationLog(messageZh);
                 });
         // eventLogged 是测试控制器中文业务日志进入验证控制台的唯一连接点。
         connect(m_testController, &ShortageTestController::eventLogged, this,
                 [this](const QString &messageZh) {
+                    m_currentCaseControllerLogs.append(messageZh);
                     appendValidationLog(QStringLiteral("控制器日志：%1").arg(messageZh));
                 });
         // operationRejected 是测试控制器拒绝原因进入验证控制台的唯一连接点。
         connect(m_testController, &ShortageTestController::operationRejected, this,
                 [this](const QString &reasonZh) {
+                    m_currentCaseRejections.append(reasonZh);
                     appendValidationLog(QStringLiteral("控制器拒绝：%1").arg(reasonZh));
                 });
-        refreshSnapshotEvidence(m_testController->currentSnapshot());
+        m_latestSnapshot = m_testController->currentSnapshot();
+        refreshSnapshotEvidence(m_latestSnapshot);
     } else {
+        m_latestSnapshot = {};
         refreshSnapshotEvidence({});
     }
 
@@ -174,6 +275,9 @@ void ShortageValidationDialog::selectCase(int row)
         m_currentCaseIndex = -1;
         m_currentStepIndex = 0;
         m_status = ShortageValidationStatus::NotStarted;
+        m_currentCaseSnapshots.clear();
+        m_currentCaseControllerLogs.clear();
+        m_currentCaseRejections.clear();
         refreshCaseDetails();
         refreshStatusLabel();
         return;
@@ -182,6 +286,9 @@ void ShortageValidationDialog::selectCase(int row)
     m_currentCaseIndex = row;
     m_currentStepIndex = 0;
     m_status = ShortageValidationStatus::NotStarted;
+    m_currentCaseSnapshots.clear();
+    m_currentCaseControllerLogs.clear();
+    m_currentCaseRejections.clear();
     refreshCaseDetails();
     refreshStatusLabel();
     appendValidationLog(QStringLiteral("已选择验证项：%1 %2")
@@ -199,17 +306,17 @@ void ShortageValidationDialog::executeNextStep()
         return;
     }
 
-    const int displayStep = m_currentStepIndex + 1;
-    const ShortageValidationStep &step = item.steps.at(m_currentStepIndex);
-    m_status = ShortageValidationStatus::InProgress;
-    refreshStatusLabel();
-
-    if (m_testController == nullptr && step.action != ShortageValidationAction::ShowInstruction) {
+    if (m_testController == nullptr) {
         appendValidationLog(QStringLiteral("验证步骤未执行：测试控制器不可用"));
         m_status = ShortageValidationStatus::FailedAutomatically;
         refreshStatusLabel();
         return;
     }
+
+    const int displayStep = m_currentStepIndex + 1;
+    const ShortageValidationStep &step = item.steps.at(m_currentStepIndex);
+    m_status = ShortageValidationStatus::InProgress;
+    refreshStatusLabel();
 
     switch (step.action) {
     case ShortageValidationAction::ShowInstruction:
@@ -267,8 +374,8 @@ void ShortageValidationDialog::executeNextStep()
         break;
     }
 
-    const ShortageUiSnapshot snapshot =
-        m_testController != nullptr ? m_testController->currentSnapshot() : ShortageUiSnapshot {};
+    const ShortageUiSnapshot snapshot = m_latestSnapshot;
+    m_currentCaseSnapshots.append(snapshot);
     refreshSnapshotEvidence(snapshot);
     appendValidationLog(QStringLiteral(
                             "步骤完成：输入=%1，预期=%2，实际=%3")
@@ -279,7 +386,14 @@ void ShortageValidationDialog::executeNextStep()
     ++m_currentStepIndex;
     if (m_currentStepIndex >= item.steps.size()) {
         if (item.requiresManualEvidence) {
-            m_status = ShortageValidationStatus::WaitingManualEvidence;
+            QString evidenceZh;
+            if (!evaluateManualLocalCriteria(item.id, &evidenceZh)) {
+                m_status = ShortageValidationStatus::FailedAutomatically;
+            } else {
+                if (!evidenceZh.isEmpty())
+                    appendValidationLog(evidenceZh);
+                m_status = ShortageValidationStatus::WaitingManualEvidence;
+            }
         } else {
             evaluateCurrentCase(snapshot);
         }
@@ -304,40 +418,181 @@ void ShortageValidationDialog::evaluateCurrentCase(const ShortageUiSnapshot &sna
     const QString id = m_cases.at(m_currentCaseIndex).id;
     const ShortageRuntimeState &state = snapshot.runtime;
     bool passed = false;
+    QString evidenceZh;
 
     if (id == QStringLiteral("VT-04")) {
-        passed = state.initialized && state.activeStationId == 1 && state.orders.size() == 1
-                 && state.orders.first().stationId == 1
-                 && state.orders.first().state == ReplenishmentOrderState::AwaitingDispatch;
+        passed = state.initialized
+                 && state.operatorConfirmedRestore
+                 && state.hasStableContext
+                 && state.actualQty.hasBaseline
+                 && state.actualQty.baseline == 100
+                 && allStationStocksEqual(state, 0)
+                 && waitingStationsAreOneToTwelve(state)
+                 && state.activeStationId == 1
+                 && hasSingleAwaitingStationOneOrder(state)
+                 && !state.criticalLock;
+        evidenceZh = passed
+                     ? QStringLiteral("VT-04 自动判定通过：12工位均为0，活动工位=1，唯一待派单=工位1，基线=100。")
+                     : QStringLiteral("VT-04 自动判定失败：未同时满足12工位为0、基线100、等待顺序、活动工位1和唯一待派单。");
     } else if (id == QStringLiteral("VT-06")) {
+        const bool hasBeforeSample = m_currentCaseSnapshots.size() >= 5;
+        bool stocksDeducted = false;
+        if (hasBeforeSample) {
+            const ShortageRuntimeState &beforeDelta = m_currentCaseSnapshots.at(3).runtime;
+            stocksDeducted = hasTwelveStations(beforeDelta) && hasTwelveStations(state);
+            bool anyChanged = false;
+            for (const ShortageStationRuntime &station : state.stations) {
+                const ShortageStationRuntime *before = stationById(beforeDelta, station.stationId);
+                if (before == nullptr || station.stock > before->stock) {
+                    stocksDeducted = false;
+                    break;
+                }
+                if (station.stock < before->stock)
+                    anyChanged = true;
+            }
+            stocksDeducted = stocksDeducted && anyChanged;
+        }
         passed = state.initialized && snapshot.hasLastProductionDelta
-                 && snapshot.lastProductionDelta == 5 && state.actualQty.baseline == 105;
+                 && snapshot.lastProductionDelta == 5
+                 && state.actualQty.hasBaseline
+                 && state.actualQty.baseline == 105
+                 && stocksDeducted
+                 && !state.criticalLock;
+        evidenceZh = passed
+                     ? QStringLiteral("VT-06 自动判定通过：基线=105，最近增量=5，12工位库存相对旧库存完成扣减。")
+                     : QStringLiteral("VT-06 自动判定失败：缺少基线105、最近增量5或库存扣减证据。");
     } else if (id == QStringLiteral("VT-07")) {
-        passed = !state.orders.isEmpty() && state.orders.first().state == ReplenishmentOrderState::Running
-                 && state.orders.first().taskId >= 900000000000ULL;
-    } else if (id == QStringLiteral("VT-08")) {
-        passed = !state.orders.isEmpty()
-                 && state.orders.first().state == ReplenishmentOrderState::Succeeded
-                 && state.orders.first().unloadAccounted;
-    } else if (id == QStringLiteral("VT-09")) {
-        for (const ShortageStationRuntime &station : state.stations) {
-            if (station.stationId == state.activeStationId || station.automaticPaused) {
-                passed = station.automaticPaused;
-                break;
+        const bool hasSnapshots = m_currentCaseSnapshots.size() >= 6;
+        if (hasSnapshots) {
+            const ShortageRuntimeState &beforeReject = m_currentCaseSnapshots.at(3).runtime;
+            const ShortageRuntimeState &afterReject = m_currentCaseSnapshots.at(4).runtime;
+            const ShortageRuntimeState &afterAccept = m_currentCaseSnapshots.at(5).runtime;
+            if (beforeReject.orders.size() == 1) {
+                const quint64 orderNo = beforeReject.orders.first().orderNo;
+                const ReplenishmentOrder *rejectedOrder = orderByNo(afterReject, orderNo);
+                const ReplenishmentOrder *acceptedOrder = orderByNo(afterAccept, orderNo);
+                passed = rejectedOrder != nullptr
+                         && acceptedOrder != nullptr
+                         && afterReject.orders.size() == 1
+                         && rejectedOrder->state == ReplenishmentOrderState::AwaitingDispatch
+                         && !rejectedOrder->lastReasonZh.isEmpty()
+                         && afterAccept.orders.size() == 1
+                         && acceptedOrder->state == ReplenishmentOrderState::Running
+                         && acceptedOrder->taskId >= 900000000000ULL
+                         && !afterAccept.criticalLock;
             }
         }
+        evidenceZh = passed
+                     ? QStringLiteral("VT-07 自动判定通过：拒收后原单号保持且不生成重复单，接受后绑定测试taskId并进入运行中。")
+                     : QStringLiteral("VT-07 自动判定失败：拒收原单、重复单或运行中taskId证据不完整。");
+    } else if (id == QStringLiteral("VT-08")) {
+        const bool hasSnapshots = m_currentCaseSnapshots.size() >= 7;
+        if (hasSnapshots) {
+            const ShortageRuntimeState &beforeUnload = m_currentCaseSnapshots.at(4).runtime;
+            const ShortageRuntimeState &afterUnload = m_currentCaseSnapshots.at(5).runtime;
+            const ShortageRuntimeState &afterSuccess = m_currentCaseSnapshots.at(6).runtime;
+            passed = stockIncreasedOnlyForStation(beforeUnload, afterUnload, 1)
+                     && stockUnchangedForAllStations(afterUnload, afterSuccess)
+                     && afterSuccess.orders.size() == 1
+                     && afterSuccess.orders.first().stationId == 1
+                     && afterSuccess.orders.first().state == ReplenishmentOrderState::Succeeded
+                     && afterSuccess.orders.first().unloadAccounted
+                     && !afterSuccess.criticalLock;
+        }
+        evidenceZh = passed
+                     ? QStringLiteral("VT-08 自动判定通过：倒料完成准确一箱入账，任务终态不重复加箱。")
+                     : QStringLiteral("VT-08 自动判定失败：缺少一箱入账、终态不重复加箱或成功终态证据。");
+    } else if (id == QStringLiteral("VT-09")) {
+        const bool hasSnapshots = m_currentCaseSnapshots.size() >= 8;
+        if (hasSnapshots) {
+            const ShortageRuntimeState &beforeFailures = m_currentCaseSnapshots.at(3).runtime;
+            const ShortageStationRuntime *beforeStation = stationById(beforeFailures, 1);
+            const ShortageStationRuntime *targetStation = stationById(state, 1);
+            bool othersContinue = !state.waitingStationIds.isEmpty() || state.activeStationId != 0;
+            passed = beforeStation != nullptr
+                     && targetStation != nullptr
+                     && targetStation->stock == beforeStation->stock
+                     && targetStation->automaticPaused
+                     && targetStation->consecutivePreUnloadFailures >= 2
+                     && !targetStation->pauseReasonZh.isEmpty()
+                     && othersContinue
+                     && !state.criticalLock;
+        }
+        evidenceZh = passed
+                     ? QStringLiteral("VT-09 自动判定通过：倒料前失败不增加库存，失败次数=2，暂停目标工位且其他工位继续计划。")
+                     : QStringLiteral("VT-09 自动判定失败：未证明失败不加库存、达到阈值暂停目标工位和其他工位继续计划。");
     } else if (id == QStringLiteral("VT-10")) {
-        passed = !state.orders.isEmpty()
-                 && state.orders.first().state == ReplenishmentOrderState::FailedAfterUnload
-                 && state.orders.first().unloadAccounted;
+        const bool hasSnapshots = m_currentCaseSnapshots.size() >= 7;
+        if (hasSnapshots) {
+            const ShortageRuntimeState &afterUnload = m_currentCaseSnapshots.at(5).runtime;
+            const ShortageRuntimeState &afterFailure = m_currentCaseSnapshots.at(6).runtime;
+            const ShortageStationRuntime *targetStation = stationById(afterFailure, 1);
+            passed = stockUnchangedForAllStations(afterUnload, afterFailure)
+                     && targetStation != nullptr
+                     && targetStation->consecutivePreUnloadFailures == 0
+                     && afterFailure.orders.size() == 1
+                     && afterFailure.orders.first().state == ReplenishmentOrderState::FailedAfterUnload
+                     && afterFailure.orders.first().unloadAccounted
+                     && !afterFailure.criticalLock;
+        }
+        evidenceZh = passed
+                     ? QStringLiteral("VT-10 自动判定通过：倒料后失败终态已记录，已倒料库存不回滚，失败计数不增加。")
+                     : QStringLiteral("VT-10 自动判定失败：缺少倒料后失败、库存不回滚或失败计数不增加证据。");
     } else if (id == QStringLiteral("VT-11")) {
-        passed = state.criticalLock && !state.criticalReasonZh.isEmpty();
+        const bool hasSnapshots = m_currentCaseSnapshots.size() >= 7;
+        if (hasSnapshots) {
+            const ShortageRuntimeState &afterUnload = m_currentCaseSnapshots.at(5).runtime;
+            passed = stockUnchangedForAllStations(afterUnload, state)
+                     && state.criticalLock
+                     && !state.criticalReasonZh.isEmpty()
+                     && !state.orders.isEmpty()
+                     && state.orders.first().unloadAccounted;
+        }
+        evidenceZh = passed
+                     ? QStringLiteral("VT-11 自动判定通过：库存不第二次增加，系统进入严重锁定并停止新自动意图。")
+                     : QStringLiteral("VT-11 自动判定失败：缺少库存幂等或严重锁定证据。");
     } else {
-        passed = !state.criticalLock;
+        passed = false;
+        evidenceZh = QStringLiteral("%1 自动判定失败：本验证项没有已定义的本地自动判定规则。")
+                         .arg(id);
     }
 
     m_status = passed ? ShortageValidationStatus::PassedAutomatically
                       : ShortageValidationStatus::FailedAutomatically;
+    appendValidationLog(evidenceZh);
+}
+
+bool ShortageValidationDialog::evaluateManualLocalCriteria(const QString &caseId,
+                                                           QString *evidenceZh) const
+{
+    if (caseId != QStringLiteral("VT-15"))
+        return true;
+
+    const bool sawFieldSampling =
+        std::any_of(m_currentCaseSnapshots.cbegin(), m_currentCaseSnapshots.cend(),
+                    [](const ShortageUiSnapshot &snapshot) {
+                        return snapshot.inputSource == ShortageInputSource::Live
+                            && snapshot.communication == ShortageCommunicationState::Sampling;
+                    });
+    const bool sawManualDisabledWhileRunning =
+        std::any_of(m_currentCaseControllerLogs.cbegin(), m_currentCaseControllerLogs.cend(),
+                    [](const QString &messageZh) {
+                        return messageZh.contains(QStringLiteral("手工=否"))
+                            && messageZh.contains(QStringLiteral("停止=是"));
+                    });
+    const ShortageUiSnapshot finalSnapshot =
+        m_currentCaseSnapshots.isEmpty() ? ShortageUiSnapshot {} : m_currentCaseSnapshots.last();
+    const bool stoppedAfterSwitch =
+        finalSnapshot.inputSource == ShortageInputSource::Mock
+        && finalSnapshot.communication == ShortageCommunicationState::Stopped;
+
+    const bool passed = sawFieldSampling && sawManualDisabledWhileRunning && stoppedAfterSwitch;
+    if (evidenceZh != nullptr) {
+        *evidenceZh = passed
+            ? QStringLiteral("VT-15 本地门禁判定通过：现场采样运行中手工动作门禁禁用，停止后可切回手工源；直接调用拒绝原因仍需人工复核。")
+            : QStringLiteral("VT-15 本地门禁判定失败：缺少现场采样运行、手工动作禁用或停止后切回手工源证据。");
+    }
+    return passed;
 }
 
 void ShortageValidationDialog::confirmManualEvidence()

@@ -6,6 +6,7 @@
 #include <QDialog>
 #include <QList>
 #include <QString>
+#include <QStringList>
 
 class QLabel;
 class QListWidget;
@@ -80,6 +81,8 @@ private:
     void selectCase(int row);                    ///< 重置当前步骤显示，不自动执行业务动作。
     void executeNextStep();                      ///< 只分发 ShortageValidationAction 到控制器公开接口。
     void evaluateCurrentCase(const ShortageUiSnapshot &snapshot); ///< 依据只读证据判定可自动项目。
+    bool evaluateManualLocalCriteria(const QString &caseId,
+                                     QString *evidenceZh) const; ///< 人工项先核对本地可证明门禁。
     void confirmManualEvidence();                ///< 只允许 WaitingManualEvidence 转人工通过。
     void appendValidationLog(const QString &messageZh); ///< 追加带时间、编号和步骤的中文证据。
     /// 创建固定 VT-01～VT-15 定义；只生成编排数据，不读取或修改测试状态。
@@ -96,6 +99,10 @@ private:
 
     ShortageTestController *m_testController = nullptr; ///< 非拥有；为空时只允许浏览步骤。
     QList<ShortageValidationCase> m_cases;              ///< Dialog 拥有的固定验证定义。
+    ShortageUiSnapshot m_latestSnapshot;                ///< 最近一次控制器信号快照，保留增量证据。
+    QList<ShortageUiSnapshot> m_currentCaseSnapshots;   ///< 当前项逐步快照，用于自动判定前后对比。
+    QStringList m_currentCaseControllerLogs;            ///< 当前项控制器中文日志，用于本地证据核对。
+    QStringList m_currentCaseRejections;                ///< 当前项控制器拒绝原因，用于误操作门禁核对。
     int m_currentCaseIndex = -1;                        ///< 当前验证项下标，-1 表示未选择。
     int m_currentStepIndex = 0;                         ///< 下一条待执行步骤下标。
     ShortageValidationStatus m_status = ShortageValidationStatus::NotStarted; ///< 当前项结论。

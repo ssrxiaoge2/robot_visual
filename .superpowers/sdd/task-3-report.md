@@ -28,3 +28,41 @@ TDD 记录
 
 注意事项
 - 真实通信、窗口人工切换和现场设备未动作仍需人工确认；自动测试只证明本地可判定结果和向导边界。
+
+修正评审发现：自动判定和空控制器门禁
+
+修正内容
+- 移除自动判定的兜底“未严重锁定即通过”逻辑；VT-04、VT-06、VT-07、VT-08、VT-09、VT-10、VT-11 均按逐步快照执行本地可证明条件检查，并在验证日志中输出中文通过/失败证据。
+- 自动判定保留最近一次 `snapshotChanged` 携带的增量证据，避免用无增量的普通快照误判 VT-06。
+- VT-15 在进入人工确认前先核对本地门禁证据：现场采样运行、手工动作禁用、停止后可切回手工源；直接调用拒绝原因仍作为人工复核证据，不报告纯自动通过。
+- 控制器为空时，任何“执行下一步”都记录“验证步骤未执行：测试控制器不可用”，不推进步骤、不进入等待人工确认，也不能形成误导性人工通过。
+- 测试补充覆盖固定自动判定证据日志、空控制器拒绝执行、VT-15 本地门禁后仍等待人工确认。
+
+修正验证命令输出
+
+`cmake --build build-shortage --target shortage_validation_dialog_tests --parallel`
+
+```text
+[  0%] Built target shortage_validation_dialog_tests_autogen_timestamp_deps
+[ 12%] Built target shortage_validation_dialog_tests_autogen
+[100%] Built target shortage_validation_dialog_tests
+```
+
+`QT_QPA_PLATFORM=offscreen ctest --test-dir build-shortage -R '^shortage_validation_dialog_tests$' --output-on-failure`
+
+```text
+Internal ctest changing into directory: /home/dh/project/robot/robot_visual20260625_0630_xianchangceshi/robot_visual20260625/robot_visual/build-shortage
+Test project /home/dh/project/robot/robot_visual20260625_0630_xianchangceshi/robot_visual20260625/robot_visual/build-shortage
+    Start 12: shortage_validation_dialog_tests
+1/1 Test #12: shortage_validation_dialog_tests ...   Passed    1.03 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   1.04 sec
+```
+
+`git diff --check`
+
+```text
+无输出。
+```

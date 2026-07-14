@@ -13,6 +13,8 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <memory>
+
 namespace {
 
 ShortageConfiguration validationTestConfiguration()
@@ -83,6 +85,26 @@ QList<ShortageValidationAction> actionsOf(const ShortageValidationCase &item)
     return actions;
 }
 
+void executeAllSteps(ShortageValidationDialog *dialog, int row)
+{
+    auto *caseList = requiredChild<QListWidget>(dialog, "validationCaseList");
+    auto *nextButton = requiredChild<QPushButton>(dialog, "validationNextStepButton");
+    const QList<ShortageValidationCase> cases = dialog->validationCases();
+    caseList->setCurrentRow(row);
+    for (int stepIndex = 0; stepIndex < cases.at(row).steps.size(); ++stepIndex)
+        nextButton->click();
+}
+
+ShortageTestController *newController(const QString &directory, QObject *parent)
+{
+    return new ShortageTestController(validationTestConfiguration(), directory, nullptr,
+                                      [] {
+                                          return ShortageOperationResult {
+                                              true, QStringLiteral("允许验证采样")};
+                                      },
+                                      parent);
+}
+
 } // namespace
 
 class ShortageValidationDialogTest final : public QObject
@@ -95,6 +117,8 @@ private slots:
     void eachCaseHasStepsAndPassCriteria();                  ///< 每项均有操作和通过标准。
     void nextStepUsesOnlyTestControllerPublicActions();      ///< 向导不直接修改 Engine。
     void automaticCaseShowsActualSnapshotEvidence();         ///< 可判定项目显示预期、实际和结果。
+    void automaticCasesLogFixedCriteriaEvidence();           ///< 自动项必须记录对应固定标准的本地证据。
+    void nullControllerRejectsValidationProgression();       ///< 控制器为空时只能浏览，不能走验证结论。
     void fieldEvidenceWaitsForManualConfirmation();          ///< 实机项不能被本地测试冒充通过。
     void sourceFilesContainNoProductionOrHardwareDependency();///< 新 Dialog 与正式/FIFO/硬件隔离。
 };
@@ -325,6 +349,77 @@ void ShortageValidationDialogTest::automaticCaseShowsActualSnapshotEvidence()
     QVERIFY(log->toPlainText().contains(QStringLiteral("VT-04")));
 }
 
+void ShortageValidationDialogTest::automaticCasesLogFixedCriteriaEvidence()
+{
+    const QList<QPair<int, QStringList>> expectedEvidence {
+        {3, {QStringLiteral("VT-04 自动判定通过"),
+             QStringLiteral("12工位均为0"),
+             QStringLiteral("唯一待派单")}},
+        {5, {QStringLiteral("VT-06 自动判定通过"),
+             QStringLiteral("基线=105"),
+             QStringLiteral("最近增量=5")}},
+        {6, {QStringLiteral("VT-07 自动判定通过"),
+             QStringLiteral("拒收后原单号保持"),
+             QStringLiteral("运行中")}},
+        {7, {QStringLiteral("VT-08 自动判定通过"),
+             QStringLiteral("准确一箱"),
+             QStringLiteral("终态不重复加箱")}},
+        {8, {QStringLiteral("VT-09 自动判定通过"),
+             QStringLiteral("暂停目标工位"),
+             QStringLiteral("失败次数=2")}},
+        {9, {QStringLiteral("VT-10 自动判定通过"),
+             QStringLiteral("倒料后失败"),
+             QStringLiteral("失败计数不增加")}},
+        {10, {QStringLiteral("VT-11 自动判定通过"),
+              QStringLiteral("库存不第二次增加"),
+              QStringLiteral("严重锁定")}},
+    };
+
+    for (const auto &item : expectedEvidence) {
+        QTemporaryDir directory;
+        QVERIFY(directory.isValid());
+        auto controller = std::unique_ptr<ShortageTestController>(
+            newController(directory.path(), nullptr));
+        ShortageValidationDialog dialog(controller.get());
+        auto *status = requiredChild<QLabel>(&dialog, "validationStatusLabel");
+        auto *log = requiredChild<QPlainTextEdit>(&dialog, "validationLogEdit");
+
+        executeAllSteps(&dialog, item.first);
+
+        QVERIFY2(status->text().contains(QStringLiteral("自动通过")),
+                 qPrintable(QStringLiteral("VT-%1 应自动通过，实际状态：%2")
+                                 .arg(item.first + 1, 2, 10, QLatin1Char('0'))
+                                 .arg(status->text())));
+        for (const QString &evidence : item.second) {
+            QVERIFY2(log->toPlainText().contains(evidence),
+                     qPrintable(QStringLiteral("缺少自动判定证据：%1，日志：%2")
+                                     .arg(evidence, log->toPlainText())));
+        }
+    }
+}
+
+void ShortageValidationDialogTest::nullControllerRejectsValidationProgression()
+{
+    ShortageValidationDialog dialog(nullptr);
+    auto *caseList = requiredChild<QListWidget>(&dialog, "validationCaseList");
+    auto *nextButton = requiredChild<QPushButton>(&dialog, "validationNextStepButton");
+    auto *confirmButton = requiredChild<QPushButton>(&dialog, "validationManualConfirmButton");
+    auto *status = requiredChild<QLabel>(&dialog, "validationStatusLabel");
+    auto *log = requiredChild<QPlainTextEdit>(&dialog, "validationLogEdit");
+
+    caseList->setCurrentRow(0);
+    nextButton->click();
+    QVERIFY(log->toPlainText().contains(QStringLiteral("验证步骤未执行：测试控制器不可用")));
+    QVERIFY(status->text().contains(QStringLiteral("自动失败")));
+    QVERIFY(!confirmButton->isEnabled());
+
+    caseList->setCurrentRow(3);
+    nextButton->click();
+    QVERIFY(log->toPlainText().contains(QStringLiteral("验证步骤未执行：测试控制器不可用")));
+    QVERIFY(status->text().contains(QStringLiteral("自动失败")));
+    QVERIFY(!confirmButton->isEnabled());
+}
+
 void ShortageValidationDialogTest::fieldEvidenceWaitsForManualConfirmation()
 {
     QTemporaryDir directory;
@@ -348,6 +443,16 @@ void ShortageValidationDialogTest::fieldEvidenceWaitsForManualConfirmation()
     QVERIFY(confirmButton->isEnabled());
     confirmButton->click();
     QVERIFY(status->text().contains(QStringLiteral("人工确认通过")));
+
+    caseList->setCurrentRow(14);
+    for (int step = 0; step < dialog.validationCases().at(14).steps.size(); ++step)
+        nextButton->click();
+
+    auto *log = requiredChild<QPlainTextEdit>(&dialog, "validationLogEdit");
+    QVERIFY(status->text().contains(QStringLiteral("等待人工确认")));
+    QVERIFY(confirmButton->isEnabled());
+    QVERIFY(log->toPlainText().contains(QStringLiteral("VT-15 本地门禁判定通过")));
+    QVERIFY(log->toPlainText().contains(QStringLiteral("手工=否")));
 }
 
 void ShortageValidationDialogTest::sourceFilesContainNoProductionOrHardwareDependency()
