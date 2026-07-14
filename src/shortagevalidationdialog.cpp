@@ -168,6 +168,39 @@ qint64 usageForMode(const ShortageStationConfig &station, ProductionMode mode)
     return 0;
 }
 
+int normalizedPreUnloadFailureLimit(int preUnloadFailureLimit)
+{
+    return std::clamp(preUnloadFailureLimit, 1, 20);
+}
+
+QList<ShortageValidationStep> vt09Steps(int preUnloadFailureLimit)
+{
+    const int failureLimit = normalizedPreUnloadFailureLimit(preUnloadFailureLimit);
+    QList<ShortageValidationStep> steps {
+        step(QStringLiteral("清空、0 建账并提交首样本。"), QStringLiteral("形成待派单。"),
+             ShortageValidationAction::ClearTestState),
+        step(QStringLiteral("确认从 0 建账。"), QStringLiteral("库存为 0。"),
+             ShortageValidationAction::InitializeZero),
+        step(QStringLiteral("切换为手工源。"), QStringLiteral("使用公开手工测试入口。"),
+             ShortageValidationAction::SelectManualSource),
+        step(QStringLiteral("提交首样本。"), QStringLiteral("生成待派单。"),
+             ShortageValidationAction::ApplyManualSample,
+             ProductModel::Model88, ProductionMode::LeftRight, 100),
+    };
+    for (int attempt = 1; attempt <= failureLimit; ++attempt) {
+        steps.append(step(QStringLiteral("第 %1 次接受补料单。").arg(attempt),
+                          attempt == 1 ? QStringLiteral("任务运行。")
+                                       : QStringLiteral("重试原工位。"),
+                          ShortageValidationAction::DispatchAccepted));
+        steps.append(step(QStringLiteral("第 %1 次倒料前失败。").arg(attempt),
+                          attempt == failureLimit
+                              ? QStringLiteral("达到配置阈值后暂停目标工位。")
+                              : QStringLiteral("不增加库存并继续重试。"),
+                          ShortageValidationAction::FailureBeforeUnload));
+    }
+    return steps;
+}
+
 bool configuredProductionDeductionMatches(const ShortageRuntimeState &before,
                                           const ShortageRuntimeState &after,
                                           const ShortageConfiguration &configuration,
@@ -230,10 +263,11 @@ ShortageValidationDialog::ShortageValidationDialog(ShortageTestController *testC
                                                    QWidget *parent)
     : QDialog(parent),
       m_testController(testController),
-      m_cases(createValidationCases()),
       m_validationConfiguration(testController != nullptr
                                     ? testController->engineForTest().configuration()
-                                    : ShortageConfiguration {})
+                                    : ShortageConfiguration {}),
+      m_cases(createValidationCases(
+          normalizedPreUnloadFailureLimit(m_validationConfiguration.parameters.preUnloadFailureLimit)))
 {
     setWindowTitle(QStringLiteral("独立缺料验证控制台"));
     setWindowFlags(Qt::Window | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint
@@ -600,7 +634,9 @@ void ShortageValidationDialog::evaluateCurrentCase(const ShortageUiSnapshot &sna
                      && afterFirstStation->stock == beforeStation->stock
                      && targetStation->stock == beforeStation->stock
                      && targetStation->automaticPaused
-                     && targetStation->consecutivePreUnloadFailures >= 2
+                     && targetStation->consecutivePreUnloadFailures
+                            >= normalizedPreUnloadFailureLimit(
+                                m_validationConfiguration.parameters.preUnloadFailureLimit)
                      && !targetStation->pauseReasonZh.isEmpty()
                      && othersContinue
                      && !state.criticalLock;
@@ -830,7 +866,7 @@ void ShortageValidationDialog::appendValidationLog(const QString &messageZh)
                                         messageZh));
 }
 
-QList<ShortageValidationCase> ShortageValidationDialog::createValidationCases()
+QList<ShortageValidationCase> ShortageValidationDialog::createValidationCases(int preUnloadFailureLimit)
 {
     const QString criteria01 = QStringLiteral("两个窗口均可最小化、最大化和恢复；主窗口始终可以激活；重复点击只激活唯一窗口，不出现多个相同窗口；窗口操作不改变测试状态。");
     const QString criteria02 = QStringLiteral("正式状态文件哈希和主 FIFO 数量不变；AGV、机械臂和扫码硬件命令计数不增加；测试状态只写入 `test-*` 文件。");
@@ -965,25 +1001,8 @@ QList<ShortageValidationCase> ShortageValidationDialog::createValidationCases()
                            step(QStringLiteral("模拟任务成功。"), QStringLiteral("终态不重复加箱。"),
                                 ShortageValidationAction::TaskSucceeded),
                        }, criteria08, true),
-        validationCase(QStringLiteral("VT-09"), QStringLiteral("倒料前失败保护"), {
-                           step(QStringLiteral("清空、0 建账并提交首样本。"), QStringLiteral("形成待派单。"),
-                                ShortageValidationAction::ClearTestState),
-                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("库存为 0。"),
-                                ShortageValidationAction::InitializeZero),
-                           step(QStringLiteral("切换为手工源。"), QStringLiteral("使用公开手工测试入口。"),
-                                ShortageValidationAction::SelectManualSource),
-                           step(QStringLiteral("提交首样本。"), QStringLiteral("生成待派单。"),
-                                ShortageValidationAction::ApplyManualSample,
-                                ProductModel::Model88, ProductionMode::LeftRight, 100),
-                           step(QStringLiteral("第 1 次接受补料单。"), QStringLiteral("任务运行。"),
-                                ShortageValidationAction::DispatchAccepted),
-                           step(QStringLiteral("第 1 次倒料前失败。"), QStringLiteral("不增加库存。"),
-                                ShortageValidationAction::FailureBeforeUnload),
-                           step(QStringLiteral("第 2 次接受补料单。"), QStringLiteral("重试原工位。"),
-                                ShortageValidationAction::DispatchAccepted),
-                           step(QStringLiteral("第 2 次倒料前失败。"), QStringLiteral("达到阈值后暂停目标工位。"),
-                                ShortageValidationAction::FailureBeforeUnload),
-                       }, criteria09, false),
+        validationCase(QStringLiteral("VT-09"), QStringLiteral("倒料前失败保护"),
+                       vt09Steps(preUnloadFailureLimit), criteria09, false),
         validationCase(QStringLiteral("VT-10"), QStringLiteral("倒料后失败"), {
                            step(QStringLiteral("清空、0 建账并提交首样本。"), QStringLiteral("形成待派单。"),
                                 ShortageValidationAction::ClearTestState),

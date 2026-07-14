@@ -13,6 +13,7 @@
 #include <QTemporaryDir>
 #include <QTest>
 
+#include <algorithm>
 #include <memory>
 
 namespace {
@@ -45,6 +46,13 @@ ShortageConfiguration validationTestConfiguration()
             configuration.stations.append(station);
         }
     }
+    return configuration;
+}
+
+ShortageConfiguration validationTestConfigurationWithPreUnloadFailureLimit(int failureLimit)
+{
+    ShortageConfiguration configuration = validationTestConfiguration();
+    configuration.parameters.preUnloadFailureLimit = failureLimit;
     return configuration;
 }
 
@@ -85,6 +93,21 @@ QList<ShortageValidationAction> actionsOf(const ShortageValidationCase &item)
     return actions;
 }
 
+QList<ShortageValidationAction> vt09ExpectedActions(int preUnloadFailureLimit)
+{
+    QList<ShortageValidationAction> actions {
+        ShortageValidationAction::ClearTestState,
+        ShortageValidationAction::InitializeZero,
+        ShortageValidationAction::SelectManualSource,
+        ShortageValidationAction::ApplyManualSample,
+    };
+    for (int attempt = 0; attempt < preUnloadFailureLimit; ++attempt) {
+        actions.append(ShortageValidationAction::DispatchAccepted);
+        actions.append(ShortageValidationAction::FailureBeforeUnload);
+    }
+    return actions;
+}
+
 void executeAllSteps(ShortageValidationDialog *dialog, int row)
 {
     auto *caseList = requiredChild<QListWidget>(dialog, "validationCaseList");
@@ -105,6 +128,18 @@ ShortageTestController *newController(const QString &directory, QObject *parent)
                                       parent);
 }
 
+ShortageTestController *newController(const ShortageConfiguration &configuration,
+                                      const QString &directory,
+                                      QObject *parent)
+{
+    return new ShortageTestController(configuration, directory, nullptr,
+                                      [] {
+                                          return ShortageOperationResult {
+                                              true, QStringLiteral("允许验证采样")};
+                                      },
+                                      parent);
+}
+
 } // namespace
 
 class ShortageValidationDialogTest final : public QObject
@@ -118,6 +153,7 @@ private slots:
     void nextStepUsesOnlyTestControllerPublicActions();      ///< 向导不直接修改 Engine。
     void automaticCaseShowsActualSnapshotEvidence();         ///< 可判定项目显示预期、实际和结果。
     void automaticCasesLogFixedCriteriaEvidence();           ///< 自动项必须记录对应固定标准的本地证据。
+    void vt09UsesConfiguredPreUnloadFailureLimit();          ///< VT-09 按配置阈值循环失败次数。
     void vt08RequiresManualEvidenceForUnprovenContinuitySwitch(); ///< VT-08 未覆盖释放切换时不得纯自动通过。
     void nullControllerRejectsValidationProgression();       ///< 控制器为空时只能浏览，不能走验证结论。
     void fieldEvidenceWaitsForManualConfirmation();          ///< 实机项不能被本地测试冒充通过。
@@ -257,13 +293,8 @@ void ShortageValidationDialogTest::eachCaseHasStepsAndPassCriteria()
                  ShortageValidationAction::MaterialUnloaded,
                  ShortageValidationAction::TaskSucceeded,
              }));
-    QCOMPARE(actionsOf(cases.at(8)), establishVt04
-             + QList<ShortageValidationAction>({
-                 ShortageValidationAction::DispatchAccepted,
-                 ShortageValidationAction::FailureBeforeUnload,
-                 ShortageValidationAction::DispatchAccepted,
-                 ShortageValidationAction::FailureBeforeUnload,
-             }));
+    QCOMPARE(actionsOf(cases.at(8)),
+             vt09ExpectedActions(ShortageParameters().preUnloadFailureLimit));
     QCOMPARE(actionsOf(cases.at(9)), establishVt04
              + QList<ShortageValidationAction>({
                  ShortageValidationAction::DispatchAccepted,
@@ -403,6 +434,35 @@ void ShortageValidationDialogTest::automaticCasesLogFixedCriteriaEvidence()
                                      .arg(evidence, log->toPlainText())));
         }
     }
+}
+
+void ShortageValidationDialogTest::vt09UsesConfiguredPreUnloadFailureLimit()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const ShortageConfiguration configuration =
+        validationTestConfigurationWithPreUnloadFailureLimit(3);
+    auto controller = std::unique_ptr<ShortageTestController>(
+        newController(configuration, directory.path(), nullptr));
+    ShortageValidationDialog dialog(controller.get());
+    auto *status = requiredChild<QLabel>(&dialog, "validationStatusLabel");
+    auto *log = requiredChild<QPlainTextEdit>(&dialog, "validationLogEdit");
+
+    const QList<ShortageValidationAction> vt09Actions = actionsOf(dialog.validationCases().at(8));
+    QCOMPARE(std::count(vt09Actions.cbegin(), vt09Actions.cend(),
+                        ShortageValidationAction::DispatchAccepted),
+             configuration.parameters.preUnloadFailureLimit);
+    QCOMPARE(std::count(vt09Actions.cbegin(), vt09Actions.cend(),
+                        ShortageValidationAction::FailureBeforeUnload),
+             configuration.parameters.preUnloadFailureLimit);
+
+    executeAllSteps(&dialog, 8);
+
+    QVERIFY2(status->text().contains(QStringLiteral("自动通过")),
+             qPrintable(QStringLiteral("VT-09 应按配置阈值自动通过，实际状态：%1")
+                             .arg(status->text())));
+    QVERIFY(log->toPlainText().contains(QStringLiteral("失败次数=3")));
+    QVERIFY(!log->toPlainText().contains(QStringLiteral("失败次数=2")));
 }
 
 void ShortageValidationDialogTest::vt08RequiresManualEvidenceForUnprovenContinuitySwitch()

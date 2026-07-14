@@ -86,7 +86,7 @@ private:
     void confirmManualEvidence();                ///< 只允许 WaitingManualEvidence 转人工通过。
     void appendValidationLog(const QString &messageZh); ///< 追加带时间、编号和步骤的中文证据。
     /// 创建固定 VT-01～VT-15 定义；只生成编排数据，不读取或修改测试状态。
-    static QList<ShortageValidationCase> createValidationCases();
+    static QList<ShortageValidationCase> createValidationCases(int preUnloadFailureLimit);
 
     void refreshCaseDetails();                   ///< 刷新当前验证项、步骤和通过标准文本。
     void refreshStatusLabel();                   ///< 按当前状态刷新中文结论和人工按钮门禁。
@@ -98,8 +98,8 @@ private:
     static QString actionText(ShortageValidationAction action);   ///< 验证动作转中文显示。
 
     ShortageTestController *m_testController = nullptr; ///< 非拥有；为空时只允许浏览步骤。
-    QList<ShortageValidationCase> m_cases;              ///< Dialog 拥有的固定验证定义。
     ShortageConfiguration m_validationConfiguration;    ///< 从测试控制器复制的只读配置，用于自动判定配置用量。
+    QList<ShortageValidationCase> m_cases;              ///< Dialog 拥有的固定验证定义。
     ShortageUiSnapshot m_latestSnapshot;                ///< 最近一次控制器信号快照，保留增量证据。
     QList<ShortageUiSnapshot> m_currentCaseSnapshots;   ///< 当前项逐步快照，用于自动判定前后对比。
     QStringList m_currentCaseControllerLogs;            ///< 当前项控制器中文日志，用于本地证据核对。

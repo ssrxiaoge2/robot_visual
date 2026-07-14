@@ -111,3 +111,43 @@ Total Test time (real) =   1.07 sec
 
 仍需人工边界
 - VT-08 的“达到最高位后释放活动工位并切换下一等待工位”当前固定步骤没有把目标工位补到最高位，也没有触发释放和切换动作；本次按复审要求保留为人工证据边界，不作为纯自动通过条件。
+
+最终复审修正：VT-09 按配置倒料前失败阈值执行
+
+修正内容
+- VT-09 步骤改为根据测试控制器配置副本中的 `preUnloadFailureLimit` 生成 `DispatchAccepted` / `FailureBeforeUnload` 循环，不再固定两次。
+- VT-09 自动判定改为比较配置阈值，不再使用硬编码 `>= 2`。
+- 新增非 2 阈值回归测试：配置 `preUnloadFailureLimit=3` 时，VT-09 必须生成 3 次接受和 3 次倒料前失败，并在执行后记录 `失败次数=3` 且自动通过。
+
+TDD 记录
+- RED：新增 `vt09UsesConfiguredPreUnloadFailureLimit()` 后，旧实现失败；实际 `DispatchAccepted` 次数为 2，期望配置阈值 3。
+- GREEN：VT-09 生成和自动判定均改为读取配置阈值后，指定测试通过。
+
+最终复审修正验证命令输出
+
+`cmake --build build-shortage --target shortage_validation_dialog_tests --parallel`
+
+```text
+[  0%] Built target shortage_validation_dialog_tests_autogen_timestamp_deps
+[ 12%] Built target shortage_validation_dialog_tests_autogen
+[100%] Built target shortage_validation_dialog_tests
+```
+
+`QT_QPA_PLATFORM=offscreen ctest --test-dir build-shortage -R '^shortage_validation_dialog_tests$' --output-on-failure`
+
+```text
+Internal ctest changing into directory: /home/dh/project/robot/robot_visual20260625_0630_xianchangceshi/robot_visual20260625/robot_visual/build-shortage
+Test project /home/dh/project/robot/robot_visual20260625_0630_xianchangceshi/robot_visual20260625/robot_visual/build-shortage
+    Start 12: shortage_validation_dialog_tests
+1/1 Test #12: shortage_validation_dialog_tests ...   Passed    1.25 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   1.25 sec
+```
+
+`git diff --check`
+
+```text
+无输出。
+```
