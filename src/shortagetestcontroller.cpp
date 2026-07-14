@@ -29,6 +29,48 @@ ShortageStateNamespace ShortageTestController::stateNamespaceForTest() const
     return ShortageStateNamespace::StandaloneTest;
 }
 
+ShortageUiSnapshot ShortageTestController::currentSnapshot() const
+{
+    return buildSnapshot();
+}
+
+ShortageTestActionAvailability ShortageTestController::actionAvailability() const
+{
+    ShortageTestActionAvailability availability;
+    availability.canSubmitManualSample =
+        m_inputSource == ShortageTestInputSource::Manual && !m_fieldSamplingActive;
+    availability.canStartFieldSampling =
+        m_inputSource == ShortageTestInputSource::Field && !m_fieldSamplingActive;
+    availability.canStopFieldSampling = m_fieldSamplingActive;
+    availability.canResendUnload = m_lastUnloadFact.has_value();
+
+    // 动作能力修改前由按钮流程隐式决定；现场问题是两个测试窗口会出现状态分歧；
+    // 修改后只遍历 Engine 权威补料单状态，且不影响 Engine 自身的二次业务校验。
+    const ShortageRuntimeState &state = m_engine->state();
+    for (const ReplenishmentOrder &order : state.orders) {
+        if (order.state == ReplenishmentOrderState::AwaitingDispatch) {
+            availability.canAcceptDispatch = true;
+            availability.canRejectDispatch = true;
+        }
+
+        const bool isCurrentTask =
+            order.orderNo == m_currentOrderNo && order.taskId == m_currentTaskId
+            && m_currentOrderNo != 0 && m_currentTaskId != 0;
+        if (!isCurrentTask)
+            continue;
+
+        if (order.state == ReplenishmentOrderState::Running) {
+            availability.canFailBeforeUnload = true;
+            availability.canRecordUnload = true;
+            availability.canSucceed = true;
+        } else if (order.state == ReplenishmentOrderState::Unloaded) {
+            availability.canFailAfterUnload = true;
+            availability.canSucceed = true;
+        }
+    }
+    return availability;
+}
+
 void ShortageTestController::initializeZeroAfterConfirmation()
 {
     applyEngineResult(m_engine->initializeZero(true, QDateTime::currentDateTimeUtc()));
@@ -38,6 +80,13 @@ void ShortageTestController::applyManualSample(ProductModel product,
                                                ProductionMode mode,
                                                qint64 actualQty)
 {
+    if (m_inputSource != ShortageTestInputSource::Manual || m_fieldSamplingActive) {
+        // 修改前手工样本可在现场采样运行时直接进 Engine；现场问题是手工 actualQty
+        // 与真实 MES/PLC 稳定样本会混入同一测试账本；修改后拒绝且不调用 Engine，
+        // 不影响 Manual 源且采样停止时的既有手工测试链路。
+        rejectOperation(QStringLiteral("手工样本已拒绝：当前不是手工源或现场采样仍在运行"));
+        return;
+    }
     ShortageSample sample;
     sample.roundId = m_nextManualRoundId++;
     sample.product = product;
@@ -52,6 +101,12 @@ void ShortageTestController::applyManualSample(ProductModel product,
 
 void ShortageTestController::startFieldSampling()
 {
+    if (m_inputSource != ShortageTestInputSource::Field) {
+        // 修改前手工源也能启动现场协调器；现场问题是打开独立测试可能误访问真实
+        // MES/PLC；修改后仅 Field 源允许启动，不影响 Field 源下原有 guard 校验。
+        rejectOperation(QStringLiteral("测试采样启动失败：请先切换到现场源"));
+        return;
+    }
     const ShortageOperationResult allowed =
         m_fieldSamplingStartGuard ? m_fieldSamplingStartGuard()
                                   : ShortageOperationResult{true, QStringLiteral("允许测试采样")};
@@ -64,6 +119,34 @@ void ShortageTestController::startFieldSampling()
         m_sampleCoordinator->start();
     emit eventLogged(QStringLiteral("测试采样已启动：仅 fieldSamplingActive=true 时接收样本"));
     emitSnapshot();
+}
+
+void ShortageTestController::selectInputSource(ShortageTestInputSource source)
+{
+    if (source == m_inputSource)
+        return;
+
+    // 修改前现场采样可能继续运行；切换到手工源必须先停采样，避免手工与真实样本混入同一测试账本。
+    if (source == ShortageTestInputSource::Manual && m_fieldSamplingActive)
+        stop();
+    m_inputSource = source;
+    emit eventLogged(source == ShortageTestInputSource::Manual
+                         ? QStringLiteral("测试输入源已切换为手工源：不会访问真实 MES/PLC")
+                         : QStringLiteral("测试输入源已切换为现场源：尚未启动采样"));
+    emitSnapshot();
+}
+
+void ShortageTestController::simulateRestart()
+{
+    // 修改前测试只能由外部重新构造对象验证恢复；现场问题是窗口内重启验证容易误碰
+    // production-* 文件；修改后仅重建 StandaloneTest Engine 并走原恢复校验，不删除文件。
+    stop();
+    m_currentOrderNo = 0;
+    m_currentTaskId = 0;
+    m_currentStationId = 0;
+    m_lastUnloadFact.reset();
+    rebuildEngine();
+    reloadTestState();
 }
 
 void ShortageTestController::stop()
@@ -202,6 +285,7 @@ void ShortageTestController::connectCoordinator()
 {
     if (m_sampleCoordinator == nullptr)
         return;
+    // stableSampleReady 是现场样本进入独立测试 Engine 的唯一连接点；构造期连接一次。
     connect(m_sampleCoordinator, &ShortageSampleCoordinator::stableSampleReady, this,
             [this](ShortageSample sample) {
                 if (!m_fieldSamplingActive) {
@@ -213,6 +297,7 @@ void ShortageTestController::connectCoordinator()
                 m_lastActualQty = sample.actualQty;
                 applyEngineResult(m_engine->applyStableSample(sample));
             });
+    // contextChangeConfirmed 是现场换型确认进入独立测试 Engine 的唯一连接点；不连接正式账本。
     connect(m_sampleCoordinator, &ShortageSampleCoordinator::contextChangeConfirmed, this,
             [this](ProductModel, ProductionMode) {
                 if (!m_fieldSamplingActive) {
@@ -242,6 +327,13 @@ void ShortageTestController::rejectOperation(const QString &reasonZh)
 
 void ShortageTestController::emitSnapshot(const ShortageEngineResult &result)
 {
+    const ShortageUiSnapshot snapshot = buildSnapshot(result);
+    emit snapshotChanged(snapshot);
+    emit actionAvailabilityChanged(actionAvailability());
+}
+
+ShortageUiSnapshot ShortageTestController::buildSnapshot(const ShortageEngineResult &result) const
+{
     ShortageUiSnapshot snapshot;
     snapshot.inputSource = m_fieldSamplingActive ? ShortageInputSource::Live
                                                  : ShortageInputSource::Mock;
@@ -252,7 +344,7 @@ void ShortageTestController::emitSnapshot(const ShortageEngineResult &result)
     snapshot.lastProductionDelta = result.productionDelta;
     snapshot.summaryLine1Zh = summaryLine1();
     snapshot.summaryLine2Zh = summaryLine2();
-    emit snapshotChanged(snapshot);
+    return snapshot;
 }
 
 void ShortageTestController::recordTerminal(TaskFactKind kind, const QString &reasonZh)

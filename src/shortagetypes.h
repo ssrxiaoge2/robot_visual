@@ -259,6 +259,26 @@ struct ShortageUiSnapshot {
     QString summaryLine2Zh;                    ///< 活动工位/等待数/账本报警。
 };
 
+/// 独立完整逻辑测试的数据来源；与正式主界面的 Mock/Live 开关分离，避免手工源误启真实采样。
+enum class ShortageTestInputSource {
+    Manual, ///< 手工输入产品、模式和非负 qint64 actualQty，不访问真实 MES/PLC。
+    Field   ///< 复用唯一现场采样协调器，只把稳定样本送入 StandaloneTest Engine。
+};
+
+/// 测试控制器根据权威运行状态计算的动作门禁；UI 只能展示，业务接口仍执行二次校验。
+struct ShortageTestActionAvailability {
+    bool canSubmitManualSample = true;   ///< 手工源且现场采样停止时允许提交样本。
+    bool canStartFieldSampling = false;  ///< 现场源且采样停止时允许启动。
+    bool canStopFieldSampling = false;   ///< 现场采样运行时允许停止。
+    bool canAcceptDispatch = false;      ///< 存在 AwaitingDispatch 补料单时允许模拟接受。
+    bool canRejectDispatch = false;      ///< 存在 AwaitingDispatch 补料单时允许模拟拒收。
+    bool canFailBeforeUnload = false;    ///< 当前测试任务处于 Running 且尚未倒料时允许失败。
+    bool canRecordUnload = false;        ///< 当前测试任务处于 Running 且尚未倒料时允许倒料。
+    bool canFailAfterUnload = false;     ///< 当前测试任务已倒料但未终态时允许倒料后失败。
+    bool canSucceed = false;             ///< 当前测试任务 Running 或 Unloaded 时允许成功终态。
+    bool canResendUnload = false;        ///< 已保存最近倒料事实时允许验证重复倒料锁定。
+};
+
 /// Planner 操作结果；ok=false 时传入状态副本不得再发布为正式状态。
 struct PlannerApplyResult {
     bool ok = false;          ///< 计划状态是否完整更新。
@@ -269,5 +289,7 @@ struct PlannerApplyResult {
 
 Q_DECLARE_METATYPE(ShortageMaintenanceCorrection)
 Q_DECLARE_METATYPE(ShortageUiSnapshot)
+Q_DECLARE_METATYPE(ShortageTestInputSource)
+Q_DECLARE_METATYPE(ShortageTestActionAvailability)
 
 #endif // SHORTAGETYPES_H
