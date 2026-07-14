@@ -602,15 +602,26 @@ void ShortageValidationDialog::evaluateCurrentCase(const ShortageUiSnapshot &sna
         passed = false;
         evidenceZh = QStringLiteral("VT-08 自动判定失败：连续补料和最高位释放切换需要现场/额外步骤证据，本项不报告纯自动通过。");
     } else if (id == QStringLiteral("VT-09")) {
-        const bool hasSnapshots = m_currentCaseSnapshots.size() >= 8;
+        const int setupSnapshotCount = 4;
+        const int snapshotsPerFailureAttempt = 2;
+        const int failureLimit = normalizedPreUnloadFailureLimit(
+            m_validationConfiguration.parameters.preUnloadFailureLimit);
+        const int requiredSnapshotCount = setupSnapshotCount
+                                          + failureLimit * snapshotsPerFailureAttempt;
+        const int beforeFailuresIndex = setupSnapshotCount - 1;
+        const int afterFirstFailureIndex = setupSnapshotCount
+                                           + snapshotsPerFailureAttempt - 1;
+        const bool hasSnapshots = m_currentCaseSnapshots.size() >= requiredSnapshotCount;
         qint64 originalStock = 0;
         qint64 firstFailureStock = 0;
         qint64 finalStock = 0;
         int failureCount = 0;
         QString actionZh;
         if (hasSnapshots) {
-            const ShortageRuntimeState &beforeFailures = m_currentCaseSnapshots.at(3).runtime;
-            const ShortageRuntimeState &afterFirstFailure = m_currentCaseSnapshots.at(5).runtime;
+            const ShortageRuntimeState &beforeFailures =
+                m_currentCaseSnapshots.at(beforeFailuresIndex).runtime;
+            const ShortageRuntimeState &afterFirstFailure =
+                m_currentCaseSnapshots.at(afterFirstFailureIndex).runtime;
             const ShortageStationRuntime *beforeStation = stationById(beforeFailures, 1);
             const ShortageStationRuntime *afterFirstStation = stationById(afterFirstFailure, 1);
             const ShortageStationRuntime *targetStation = stationById(state, 1);
@@ -634,9 +645,7 @@ void ShortageValidationDialog::evaluateCurrentCase(const ShortageUiSnapshot &sna
                      && afterFirstStation->stock == beforeStation->stock
                      && targetStation->stock == beforeStation->stock
                      && targetStation->automaticPaused
-                     && targetStation->consecutivePreUnloadFailures
-                            >= normalizedPreUnloadFailureLimit(
-                                m_validationConfiguration.parameters.preUnloadFailureLimit)
+                     && targetStation->consecutivePreUnloadFailures >= failureLimit
                      && !targetStation->pauseReasonZh.isEmpty()
                      && othersContinue
                      && !state.criticalLock;

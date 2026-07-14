@@ -154,6 +154,7 @@ private slots:
     void automaticCaseShowsActualSnapshotEvidence();         ///< 可判定项目显示预期、实际和结果。
     void automaticCasesLogFixedCriteriaEvidence();           ///< 自动项必须记录对应固定标准的本地证据。
     void vt09UsesConfiguredPreUnloadFailureLimit();          ///< VT-09 按配置阈值循环失败次数。
+    void vt09PassesWithSinglePreUnloadFailureLimit();        ///< VT-09 支持配置阈值为 1 的最小边界。
     void vt08RequiresManualEvidenceForUnprovenContinuitySwitch(); ///< VT-08 未覆盖释放切换时不得纯自动通过。
     void nullControllerRejectsValidationProgression();       ///< 控制器为空时只能浏览，不能走验证结论。
     void fieldEvidenceWaitsForManualConfirmation();          ///< 实机项不能被本地测试冒充通过。
@@ -462,6 +463,35 @@ void ShortageValidationDialogTest::vt09UsesConfiguredPreUnloadFailureLimit()
              qPrintable(QStringLiteral("VT-09 应按配置阈值自动通过，实际状态：%1")
                              .arg(status->text())));
     QVERIFY(log->toPlainText().contains(QStringLiteral("失败次数=3")));
+    QVERIFY(!log->toPlainText().contains(QStringLiteral("失败次数=2")));
+}
+
+void ShortageValidationDialogTest::vt09PassesWithSinglePreUnloadFailureLimit()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    const ShortageConfiguration configuration =
+        validationTestConfigurationWithPreUnloadFailureLimit(1);
+    auto controller = std::unique_ptr<ShortageTestController>(
+        newController(configuration, directory.path(), nullptr));
+    ShortageValidationDialog dialog(controller.get());
+    auto *status = requiredChild<QLabel>(&dialog, "validationStatusLabel");
+    auto *log = requiredChild<QPlainTextEdit>(&dialog, "validationLogEdit");
+
+    const QList<ShortageValidationAction> vt09Actions = actionsOf(dialog.validationCases().at(8));
+    QCOMPARE(std::count(vt09Actions.cbegin(), vt09Actions.cend(),
+                        ShortageValidationAction::DispatchAccepted),
+             configuration.parameters.preUnloadFailureLimit);
+    QCOMPARE(std::count(vt09Actions.cbegin(), vt09Actions.cend(),
+                        ShortageValidationAction::FailureBeforeUnload),
+             configuration.parameters.preUnloadFailureLimit);
+
+    executeAllSteps(&dialog, 8);
+
+    QVERIFY2(status->text().contains(QStringLiteral("自动通过")),
+             qPrintable(QStringLiteral("VT-09 单次失败阈值应自动通过，实际状态：%1")
+                             .arg(status->text())));
+    QVERIFY(log->toPlainText().contains(QStringLiteral("失败次数=1")));
     QVERIFY(!log->toPlainText().contains(QStringLiteral("失败次数=2")));
 }
 

@@ -67,6 +67,46 @@ Total Test time (real) =   1.04 sec
 无输出。
 ```
 
+最终边界修正：VT-09 支持单次倒料前失败阈值
+
+修正内容
+- VT-09 自动判定的快照数量要求改为 `4 + preUnloadFailureLimit × 2`：4 个建账/首样本设置快照，加上每次“接受补料单/倒料前失败”两步快照，不再隐含至少 2 个失败循环。
+- VT-09 用配置阈值派生 `beforeFailures` 和 `afterFirstFailure` 证据索引，保留首次失败不加库存、最终库存不变、目标工位暂停、其他工位继续计划等判定条件。
+- 新增最小边界回归测试：配置 `preUnloadFailureLimit=1` 时，VT-09 只生成 1 次接受和 1 次倒料前失败，执行后必须自动通过并记录 `失败次数=1`；原 `preUnloadFailureLimit=3` 回归测试继续保留。
+
+TDD 记录
+- RED：新增 `vt09PassesWithSinglePreUnloadFailureLimit()` 后，旧实现失败；实际状态为“状态：自动失败”，原因是自动判定仍要求至少 8 个快照。
+- GREEN：快照数量和索引按配置阈值派生后，`preUnloadFailureLimit=1` 与 `preUnloadFailureLimit=3` 指定测试均通过。
+
+最终边界修正验证命令输出
+
+`cmake --build build-shortage --target shortage_validation_dialog_tests --parallel`
+
+```text
+[  0%] Built target shortage_validation_dialog_tests_autogen_timestamp_deps
+[ 12%] Built target shortage_validation_dialog_tests_autogen
+[100%] Built target shortage_validation_dialog_tests
+```
+
+`QT_QPA_PLATFORM=offscreen ctest --test-dir build-shortage -R '^shortage_validation_dialog_tests$' --output-on-failure`
+
+```text
+Internal ctest changing into directory: /home/dh/project/robot/robot_visual20260625_0630_xianchangceshi/robot_visual20260625/robot_visual/build-shortage
+Test project /home/dh/project/robot/robot_visual20260625_0630_xianchangceshi/robot_visual20260625/robot_visual/build-shortage
+    Start 12: shortage_validation_dialog_tests
+1/1 Test #12: shortage_validation_dialog_tests ...   Passed    1.48 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   1.48 sec
+```
+
+`git diff --check`
+
+```text
+无输出。
+```
+
 复审修正：强化自动判定精确证据
 
 修正内容
