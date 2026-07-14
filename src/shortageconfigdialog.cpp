@@ -2,6 +2,7 @@
 
 #include <QButtonGroup>
 #include <QCheckBox>
+#include <QComboBox>
 #include <QDialogButtonBox>
 #include <QFormLayout>
 #include <QGridLayout>
@@ -12,6 +13,7 @@
 #include <QMessageBox>
 #include <QPushButton>
 #include <QRegularExpression>
+#include <QRegularExpressionValidator>
 #include <QRadioButton>
 #include <QSpinBox>
 #include <QTabWidget>
@@ -39,6 +41,26 @@ QList<ProductModel> products()
     return {ProductModel::Model88, ProductModel::Model88R, ProductModel::Model92};
 }
 
+/// 返回测试页手工样本允许选择的全部生产模式；只用于 UI 下拉框，不改变业务枚举定义。
+QList<ProductionMode> productionModes()
+{
+    return {ProductionMode::LeftRight, ProductionMode::LeftOnly, ProductionMode::RightOnly};
+}
+
+/// 将生产模式映射为现场沿用的显示短码；未知分支仅作为防御性中文兜底。
+QString modeName(ProductionMode mode)
+{
+    switch (mode) {
+    case ProductionMode::LeftRight:
+        return QStringLiteral("L/R");
+    case ProductionMode::LeftOnly:
+        return QStringLiteral("L/L");
+    case ProductionMode::RightOnly:
+        return QStringLiteral("R/H");
+    }
+    return QStringLiteral("未知模式");
+}
+
 QTableWidgetItem *readOnlyItem(const QString &text)
 {
     auto *item = new QTableWidgetItem(text);
@@ -61,6 +83,62 @@ QString tableText(const QTableWidget *table, int row, int column)
 int productTabIndex(ProductModel product)
 {
     return products().indexOf(product);
+}
+
+/// 根据当前生产模式读取配置表用量；仅用于测试页只读展示，不写回 Engine。
+qint64 usageForMode(const ShortageStationConfig &station, ProductionMode mode)
+{
+    switch (mode) {
+    case ProductionMode::LeftRight:
+        return station.usageLeftRight;
+    case ProductionMode::LeftOnly:
+        return station.usageLeftOnly;
+    case ProductionMode::RightOnly:
+        return station.usageRightOnly;
+    }
+    return 0;
+}
+
+/// 将补料单状态完整映射为中文界面文案；不使用整数强转暴露枚举值。
+QString replenishmentOrderStateText(ReplenishmentOrderState state)
+{
+    switch (state) {
+    case ReplenishmentOrderState::AwaitingDispatch:
+        return QStringLiteral("等待派单");
+    case ReplenishmentOrderState::Queued:
+        return QStringLiteral("已入队");
+    case ReplenishmentOrderState::Running:
+        return QStringLiteral("运行中");
+    case ReplenishmentOrderState::Unloaded:
+        return QStringLiteral("已倒料");
+    case ReplenishmentOrderState::Succeeded:
+        return QStringLiteral("已成功");
+    case ReplenishmentOrderState::FailedBeforeUnload:
+        return QStringLiteral("倒料前失败");
+    case ReplenishmentOrderState::FailedAfterUnload:
+        return QStringLiteral("倒料后失败");
+    case ReplenishmentOrderState::Canceled:
+        return QStringLiteral("已取消");
+    }
+    return QStringLiteral("未知状态");
+}
+
+/// 判断补料单是否仍应作为“当前测试补料单”展示；终态只留在事件日志和历史状态。
+bool isNonTerminalOrder(ReplenishmentOrderState state)
+{
+    switch (state) {
+    case ReplenishmentOrderState::AwaitingDispatch:
+    case ReplenishmentOrderState::Queued:
+    case ReplenishmentOrderState::Running:
+    case ReplenishmentOrderState::Unloaded:
+        return true;
+    case ReplenishmentOrderState::Succeeded:
+    case ReplenishmentOrderState::FailedBeforeUnload:
+    case ReplenishmentOrderState::FailedAfterUnload:
+    case ReplenishmentOrderState::Canceled:
+        return false;
+    }
+    return false;
 }
 
 bool productFromName(const QString &name, ProductModel *product)
@@ -113,6 +191,12 @@ ShortageConfigDialog::ShortageConfigDialog(ShortageConfiguration configuration,
       m_testController(testController),
       m_snapshot(std::move(snapshot))
 {
+    // 修改前 QDialog 默认标题栏缺少最小化/最大化；增加窗口按钮只改变窗口管理，不影响测试状态。
+    setWindowFlag(Qt::Window, true);
+    setWindowFlags(windowFlags()
+                   | Qt::WindowMinimizeButtonHint
+                   | Qt::WindowMaximizeButtonHint
+                   | Qt::WindowCloseButtonHint);
     buildUi();
 }
 
@@ -198,38 +282,88 @@ QWidget *ShortageConfigDialog::buildTestPage()
     auto *group = new QButtonGroup(sourceBox);
     group->setObjectName(QStringLiteral("testSourceButtonGroup"));
     group->setExclusive(true);
-    auto *manual = new QRadioButton(QStringLiteral("手工源"), sourceBox);
-    manual->setObjectName(QStringLiteral("manualSourceRadio"));
-    auto *field = new QRadioButton(QStringLiteral("现场源"), sourceBox);
-    field->setObjectName(QStringLiteral("fieldSourceRadio"));
-    manual->setChecked(true);
-    group->addButton(manual, 0);
-    group->addButton(field, 1);
-    sourceLayout->addWidget(manual);
-    sourceLayout->addWidget(field);
+    m_manualSourceRadio = new QRadioButton(QStringLiteral("手工源"), sourceBox);
+    m_manualSourceRadio->setObjectName(QStringLiteral("manualSourceRadio"));
+    m_fieldSourceRadio = new QRadioButton(QStringLiteral("现场源"), sourceBox);
+    m_fieldSourceRadio->setObjectName(QStringLiteral("fieldSourceRadio"));
+    m_manualSourceRadio->setChecked(true);
+    group->addButton(m_manualSourceRadio, 0);
+    group->addButton(m_fieldSourceRadio, 1);
+    sourceLayout->addWidget(m_manualSourceRadio);
+    sourceLayout->addWidget(m_fieldSourceRadio);
     sourceLayout->addStretch();
     layout->addWidget(sourceBox);
 
+    auto *manualBox = new QGroupBox(QStringLiteral("手工样本"), page);
+    auto *manualLayout = new QFormLayout(manualBox);
+    m_manualProductCombo = new QComboBox(manualBox);
+    m_manualProductCombo->setObjectName(QStringLiteral("manualProductCombo"));
+    for (ProductModel product : products())
+        m_manualProductCombo->addItem(productName(product), QVariant::fromValue(product));
+    manualLayout->addRow(QStringLiteral("产品"), m_manualProductCombo);
+
+    m_manualModeCombo = new QComboBox(manualBox);
+    m_manualModeCombo->setObjectName(QStringLiteral("manualModeCombo"));
+    for (ProductionMode mode : productionModes())
+        m_manualModeCombo->addItem(modeName(mode), QVariant::fromValue(mode));
+    manualLayout->addRow(QStringLiteral("模式"), m_manualModeCombo);
+
+    m_manualActualQtyEdit = new QLineEdit(QStringLiteral("0"), manualBox);
+    m_manualActualQtyEdit->setObjectName(QStringLiteral("manualActualQtyEdit"));
+    // 手工 actualQty 修改前没有完整输入；现场问题是无法复现真实 qint64 产量边界；
+    // 修改后正则只接受非负 qint64 十进制范围，不影响控制器对业务状态的二次校验。
+    m_manualActualQtyEdit->setValidator(new QRegularExpressionValidator(
+        QRegularExpression(QStringLiteral(
+            "^(0|[1-9][0-9]{0,17}|[1-8][0-9]{18}|9[0-1][0-9]{17}|92[0-1][0-9]{16}|922[0-2][0-9]{15}|9223[0-2][0-9]{14}|92233[0-6][0-9]{13}|922337[0-1][0-9]{12}|92233720[0-2][0-9]{10}|922337203[0-5][0-9]{9}|9223372036[0-7][0-9]{8}|92233720368[0-4][0-9]{7}|922337203685[0-3][0-9]{6}|9223372036854[0-6][0-9]{5}|92233720368547[0-6][0-9]{4}|922337203685477[0-4][0-9]{3}|9223372036854775[0-7][0-9]{2}|922337203685477580[0-7])$")),
+        m_manualActualQtyEdit));
+    manualLayout->addRow(QStringLiteral("actualQty"), m_manualActualQtyEdit);
+
+    m_manualSampleSubmitButton = new QPushButton(QStringLiteral("提交手工样本"), manualBox);
+    m_manualSampleSubmitButton->setObjectName(QStringLiteral("manualSampleSubmitButton"));
+    connect(m_manualSampleSubmitButton, &QPushButton::clicked, this,
+            &ShortageConfigDialog::submitManualSample);
+    manualLayout->addRow(QString(), m_manualSampleSubmitButton);
+    layout->addWidget(manualBox);
+
+    connect(m_manualSourceRadio, &QRadioButton::clicked, this, [this] {
+        // 修改前单选框只改变外观；现在先通知控制器停止现场采样，再刷新输入门禁。
+        if (m_testController != nullptr)
+            m_testController->selectInputSource(ShortageTestInputSource::Manual);
+        refreshTestSourceControls();
+    });
+    connect(m_fieldSourceRadio, &QRadioButton::clicked, this, [this] {
+        // 选择现场源不自动启动 MES/PLC，仍需操作员明确点击“启动现场采样”。
+        if (m_testController != nullptr)
+            m_testController->selectInputSource(ShortageTestInputSource::Field);
+        refreshTestSourceControls();
+    });
+
     auto *content = new QHBoxLayout;
-    auto *leftTable = new QTableWidget(12, 3, page);
-    leftTable->setObjectName(QStringLiteral("testStationRuntimeTable"));
-    leftTable->setHorizontalHeaderLabels({QStringLiteral("工位"), QStringLiteral("库存"),
-                                          QStringLiteral("暂停")});
-    leftTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
-    leftTable->verticalHeader()->setVisible(false);
+    m_testRuntimeTable = new QTableWidget(12, 7, page);
+    m_testRuntimeTable->setObjectName(QStringLiteral("testStationRuntimeTable"));
+    m_testRuntimeTable->setHorizontalHeaderLabels({QStringLiteral("工位"), QStringLiteral("库存"),
+                                                   QStringLiteral("最低"), QStringLiteral("最高"),
+                                                   QStringLiteral("当前用量"), QStringLiteral("状态"),
+                                                   QStringLiteral("连续失败")});
+    m_testRuntimeTable->horizontalHeader()->setSectionResizeMode(QHeaderView::Stretch);
+    m_testRuntimeTable->verticalHeader()->setVisible(false);
     for (int row = 0; row < 12; ++row) {
-        leftTable->setItem(row, 0, readOnlyItem(QString::number(row + 1)));
-        leftTable->setItem(row, 1, readOnlyItem(QStringLiteral("0")));
-        leftTable->setItem(row, 2, readOnlyItem(QStringLiteral("-")));
+        for (int column = 0; column < 7; ++column)
+            m_testRuntimeTable->setItem(row, column, readOnlyItem(QString()));
+        m_testRuntimeTable->item(row, 0)->setText(QString::number(row + 1));
     }
-    content->addWidget(leftTable, 1);
+    content->addWidget(m_testRuntimeTable, 1);
 
     auto *right = new QVBoxLayout;
-    auto *summary = new QLabel(
-        QStringLiteral("%1\n%2").arg(m_snapshot.summaryLine1Zh, m_snapshot.summaryLine2Zh), page);
-    summary->setObjectName(QStringLiteral("testPlanSummaryLabel"));
-    summary->setWordWrap(true);
-    right->addWidget(summary);
+    m_testPlanSummaryLabel = new QLabel(page);
+    m_testPlanSummaryLabel->setObjectName(QStringLiteral("testPlanSummaryLabel"));
+    m_testPlanSummaryLabel->setWordWrap(true);
+    right->addWidget(m_testPlanSummaryLabel);
+
+    m_testOrderSummaryLabel = new QLabel(page);
+    m_testOrderSummaryLabel->setObjectName(QStringLiteral("testOrderSummaryLabel"));
+    m_testOrderSummaryLabel->setWordWrap(true);
+    right->addWidget(m_testOrderSummaryLabel);
 
     auto *actions = new QGridLayout;
     createTestActionButton(actions, QStringLiteral("现场清零建账"), QStringLiteral("testInitZeroButton"),
@@ -248,6 +382,32 @@ QWidget *ShortageConfigDialog::buildTestPage()
                            3, 0, &ShortageTestController::simulateMaterialUnloaded);
     createTestActionButton(actions, QStringLiteral("任务成功"), QStringLiteral("testTaskSucceededButton"),
                            3, 1, &ShortageTestController::simulateTaskSucceeded);
+    createTestActionButton(actions, QStringLiteral("保存测试状态"), QStringLiteral("testSaveStateButton"),
+                           4, 0, &ShortageTestController::saveTestState);
+    createTestActionButton(actions, QStringLiteral("重新加载测试状态"), QStringLiteral("testReloadStateButton"),
+                           4, 1, &ShortageTestController::reloadTestState);
+    createTestActionButton(actions, QStringLiteral("倒料后失败"), QStringLiteral("testFailureAfterUnloadButton"),
+                           5, 0, &ShortageTestController::simulateFailureAfterUnload);
+    createTestActionButton(actions, QStringLiteral("重复发送倒料事件"), QStringLiteral("testResendUnloadButton"),
+                           5, 1, &ShortageTestController::resendLastUnloadFact);
+    createTestActionButton(actions, QStringLiteral("模拟程序重启"), QStringLiteral("testSimulateRestartButton"),
+                           6, 0, &ShortageTestController::simulateRestart);
+    auto *clear = new QPushButton(QStringLiteral("清空测试状态"), this);
+    clear->setObjectName(QStringLiteral("testClearStateButton"));
+    m_testActionButtons.insert(clear->objectName(), clear);
+    connect(clear, &QPushButton::clicked, this, [this] {
+        // 清空修改前会直接调用控制器；现场问题是误点会删除独立测试文件；
+        // 修改后必须中文二次确认，取消时不调用控制器，不影响确认后的 StandaloneTest 清理范围。
+        if (m_testController == nullptr)
+            return;
+        const QMessageBox::StandardButton answer = QMessageBox::question(
+            this, QStringLiteral("确认清空测试状态"),
+            QStringLiteral("确认清空独立测试状态？正式 production-* 文件不会被触碰。"),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (answer == QMessageBox::Yes)
+            m_testController->clearTestStateAfterConfirmation();
+    });
+    actions->addWidget(clear, 6, 1);
     right->addLayout(actions);
     right->addStretch();
     content->addLayout(right, 1);
@@ -262,7 +422,17 @@ QWidget *ShortageConfigDialog::buildTestPage()
                 &QTextEdit::append);
         connect(m_testController, &ShortageTestController::operationRejected, m_eventLog,
                 &QTextEdit::append);
+        // snapshotChanged 是测试运行状态进入旧完整逻辑页面的唯一连接点；只刷新只读显示。
+        connect(m_testController, &ShortageTestController::snapshotChanged, this,
+                &ShortageConfigDialog::refreshTestSnapshot);
+        // actionAvailabilityChanged 是事件按钮门禁的唯一连接点；UI 不复制控制器状态机。
+        connect(m_testController, &ShortageTestController::actionAvailabilityChanged, this,
+                &ShortageConfigDialog::refreshTestActionAvailability);
+        refreshTestActionAvailability(m_testController->actionAvailability());
     }
+    refreshTestSnapshot(m_testController != nullptr ? m_testController->currentSnapshot()
+                                                    : m_snapshot);
+    refreshTestSourceControls();
 
     return page;
 }
@@ -349,6 +519,7 @@ void ShortageConfigDialog::createTestActionButton(QGridLayout *layout,
 {
     auto *button = new QPushButton(text, this);
     button->setObjectName(objectName);
+    m_testActionButtons.insert(objectName, button);
     if (m_testController != nullptr)
         connect(button, &QPushButton::clicked, m_testController, slot);
     layout->addWidget(button, row, column);
@@ -490,4 +661,188 @@ void ShortageConfigDialog::saveConfiguration()
     m_configuration = candidate;
     m_validatedConfiguration = candidate;
     emit configurationSaved();
+}
+
+void ShortageConfigDialog::submitManualSample()
+{
+    if (m_testController == nullptr)
+        return;
+
+    bool ok = false;
+    const qint64 actualQty = m_manualActualQtyEdit->text().toLongLong(&ok);
+    if (!ok || actualQty < 0) {
+        // 手工提交失败分支修改前没有 qint64 解析失败提示；现在只记录中文原因，
+        // 不写 Engine，不影响合法 actualQty 的既有完整逻辑链路。
+        const QString reason = QStringLiteral("手工样本提交失败：actualQty 不是非负 qint64");
+        if (m_eventLog != nullptr)
+            m_eventLog->append(reason);
+        return;
+    }
+
+    const ProductModel product =
+        qvariant_cast<ProductModel>(m_manualProductCombo->currentData());
+    const ProductionMode mode =
+        qvariant_cast<ProductionMode>(m_manualModeCombo->currentData());
+    m_testController->applyManualSample(product, mode, actualQty);
+}
+
+void ShortageConfigDialog::refreshTestSourceControls()
+{
+    const bool controllerAvailable = m_testController != nullptr;
+    // 修改前无控制器测试页总被当作手工源；现场问题是旧单选互斥契约被刷新覆盖；
+    // 修改后无控制器时尊重当前控件状态，不影响有控制器时由控制器决定的权威来源。
+    const ShortageTestInputSource source =
+        controllerAvailable ? m_testController->inputSource()
+                            : ((m_fieldSourceRadio != nullptr && m_fieldSourceRadio->isChecked())
+                                   ? ShortageTestInputSource::Field
+                                   : ShortageTestInputSource::Manual);
+    const ShortageTestActionAvailability availability =
+        controllerAvailable ? m_testController->actionAvailability()
+                            : ShortageTestActionAvailability {};
+    const bool manualSource = source == ShortageTestInputSource::Manual;
+
+    if (m_manualSourceRadio != nullptr)
+        m_manualSourceRadio->setChecked(manualSource);
+    if (m_fieldSourceRadio != nullptr)
+        m_fieldSourceRadio->setChecked(source == ShortageTestInputSource::Field);
+
+    const bool manualInputsEnabled =
+        !controllerAvailable || (manualSource && availability.canSubmitManualSample);
+    if (m_manualProductCombo != nullptr)
+        m_manualProductCombo->setEnabled(manualInputsEnabled);
+    if (m_manualModeCombo != nullptr)
+        m_manualModeCombo->setEnabled(manualInputsEnabled);
+    if (m_manualActualQtyEdit != nullptr)
+        m_manualActualQtyEdit->setEnabled(manualInputsEnabled);
+    if (m_manualSampleSubmitButton != nullptr)
+        m_manualSampleSubmitButton->setEnabled(manualInputsEnabled);
+}
+
+void ShortageConfigDialog::refreshTestSnapshot(const ShortageUiSnapshot &snapshot)
+{
+    m_snapshot = snapshot;
+    if (m_testRuntimeTable == nullptr)
+        return;
+
+    const ProductModel product = snapshot.runtime.product;
+    const ProductionMode mode = snapshot.runtime.mode;
+    for (int row = 0; row < 12; ++row) {
+        const int stationId = row + 1;
+        const ShortageStationRuntime *runtimeStation = nullptr;
+        for (const ShortageStationRuntime &station : snapshot.runtime.stations) {
+            if (station.stationId == stationId) {
+                runtimeStation = &station;
+                break;
+            }
+        }
+
+        const ShortageStationConfig *configStation = nullptr;
+        for (const ShortageStationConfig &station : m_configuration.stations) {
+            if (station.product == product && station.stationId == stationId) {
+                configStation = &station;
+                break;
+            }
+        }
+
+        const qint64 stock = runtimeStation == nullptr ? 0 : runtimeStation->stock;
+        const qint64 minimum = configStation == nullptr ? 0 : configStation->minimumStock;
+        const qint64 maximum = configStation == nullptr ? 0 : configStation->maximumStock;
+        const qint64 usage = configStation == nullptr ? 0 : usageForMode(*configStation, mode);
+        const int failures =
+            runtimeStation == nullptr ? 0 : runtimeStation->consecutivePreUnloadFailures;
+
+        QString status = QStringLiteral("正常");
+        if (runtimeStation != nullptr && runtimeStation->automaticPaused) {
+            status = runtimeStation->pauseReasonZh.isEmpty()
+                ? QStringLiteral("已暂停")
+                : QStringLiteral("已暂停：%1").arg(runtimeStation->pauseReasonZh);
+        } else if (snapshot.runtime.activeStationId == stationId) {
+            status = QStringLiteral("活动");
+        } else if (snapshot.runtime.waitingStationIds.contains(stationId)) {
+            status = QStringLiteral("等待");
+        } else if (!snapshot.runtime.initialized) {
+            status = QStringLiteral("未建账");
+        }
+
+        m_testRuntimeTable->item(row, 0)->setText(QString::number(stationId));
+        m_testRuntimeTable->item(row, 1)->setText(QString::number(stock));
+        m_testRuntimeTable->item(row, 2)->setText(QString::number(minimum));
+        m_testRuntimeTable->item(row, 3)->setText(QString::number(maximum));
+        m_testRuntimeTable->item(row, 4)->setText(QString::number(usage));
+        m_testRuntimeTable->item(row, 5)->setText(status);
+        m_testRuntimeTable->item(row, 6)->setText(QString::number(failures));
+    }
+
+    QStringList waitingTexts;
+    for (int stationId : snapshot.runtime.waitingStationIds)
+        waitingTexts.append(QString::number(stationId));
+    const QString waitingSummary =
+        waitingTexts.isEmpty() ? QStringLiteral("无") : waitingTexts.join(QStringLiteral("、"));
+    const QString baseline =
+        snapshot.runtime.actualQty.hasBaseline
+        ? QString::number(snapshot.runtime.actualQty.baseline)
+        : QStringLiteral("未建立");
+    if (m_testPlanSummaryLabel != nullptr) {
+        m_testPlanSummaryLabel->setText(
+            QStringLiteral("%1\n%2\n基线=%3，活动工位=%4，等待顺序=%5")
+                .arg(snapshot.summaryLine1Zh,
+                     snapshot.summaryLine2Zh,
+                     baseline)
+                .arg(snapshot.runtime.activeStationId)
+                .arg(waitingSummary));
+    }
+
+    const ReplenishmentOrder *currentOrder = nullptr;
+    for (int index = snapshot.runtime.orders.size() - 1; index >= 0; --index) {
+        const ReplenishmentOrder &order = snapshot.runtime.orders.at(index);
+        if (isNonTerminalOrder(order.state)) {
+            currentOrder = &order;
+            break;
+        }
+    }
+    if (m_testOrderSummaryLabel != nullptr) {
+        if (currentOrder == nullptr) {
+            m_testOrderSummaryLabel->setText(QStringLiteral("当前测试补料单：无"));
+        } else {
+            m_testOrderSummaryLabel->setText(
+                QStringLiteral("当前测试补料单：单号=%1，工位=%2，状态=%3，taskId=%4")
+                    .arg(currentOrder->orderNo)
+                    .arg(currentOrder->stationId)
+                    .arg(replenishmentOrderStateText(currentOrder->state))
+                    .arg(currentOrder->taskId));
+        }
+    }
+}
+
+void ShortageConfigDialog::refreshTestActionAvailability(
+    const ShortageTestActionAvailability &availability)
+{
+    auto applyButton = [this](const QString &objectName, bool enabled) {
+        QPushButton *button = m_testActionButtons.value(objectName, nullptr);
+        if (button == nullptr)
+            return;
+        button->setEnabled(enabled);
+        button->setToolTip(enabled
+                               ? QStringLiteral("可执行：控制器仍会二次校验当前测试状态")
+                               : QStringLiteral("当前测试状态不允许：控制器仍会二次校验"));
+    };
+
+    if (m_manualSampleSubmitButton != nullptr) {
+        m_manualSampleSubmitButton->setEnabled(availability.canSubmitManualSample);
+        m_manualSampleSubmitButton->setToolTip(
+            availability.canSubmitManualSample
+                ? QStringLiteral("可提交手工样本：控制器仍会二次校验输入源")
+                : QStringLiteral("当前测试状态不允许提交手工样本"));
+    }
+    applyButton(QStringLiteral("testStartFieldButton"), availability.canStartFieldSampling);
+    applyButton(QStringLiteral("testStopButton"), availability.canStopFieldSampling);
+    applyButton(QStringLiteral("testDispatchAcceptedButton"), availability.canAcceptDispatch);
+    applyButton(QStringLiteral("testDispatchRejectedButton"), availability.canRejectDispatch);
+    applyButton(QStringLiteral("testFailureBeforeUnloadButton"),
+                availability.canFailBeforeUnload);
+    applyButton(QStringLiteral("testMaterialUnloadedButton"), availability.canRecordUnload);
+    applyButton(QStringLiteral("testFailureAfterUnloadButton"), availability.canFailAfterUnload);
+    applyButton(QStringLiteral("testTaskSucceededButton"), availability.canSucceed);
+    applyButton(QStringLiteral("testResendUnloadButton"), availability.canResendUnload);
+    refreshTestSourceControls();
 }

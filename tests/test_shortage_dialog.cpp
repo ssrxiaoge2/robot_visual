@@ -3,7 +3,9 @@
 
 #include <QApplication>
 #include <QButtonGroup>
+#include <QComboBox>
 #include <QDialogButtonBox>
+#include <QDir>
 #include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
@@ -14,6 +16,7 @@
 #include <QTabWidget>
 #include <QTableWidget>
 #include <QTest>
+#include <QTemporaryDir>
 #include <QTextEdit>
 #include <QTimer>
 
@@ -83,6 +86,12 @@ private slots:
     void testBoundaryWarningIsAlwaysVisible();
     void manualAndFieldSourcesAreExclusive();
     void testPageProvidesEightOperationButtons();
+    void configDialogSupportsMinimizeMaximizeAndClose();     ///< 旧测试窗口可与主页面切换。
+    void manualSourceProvidesProductModeAndActualQty();      ///< 手工源具备完整输入。
+    void sourceSelectionCallsControllerAndGatesControls();   ///< 来源切换不会误启现场采样。
+    void snapshotRefreshesStationAndOrderViews();            ///< 首样本补料必须立即可见。
+    void testPageProvidesAllDesignedOperations();             ///< 状态、任务和异常动作完整。
+    void actionButtonsFollowControllerAvailability();         ///< 禁用只做提示，控制器仍二次校验。
     void saveExposesLastValidatedConfigurationOnly();
     void constructorDoesNotExposeInvalidConfigurationAsValidated();
     void saveValidationFocusesInvalidParameterControl();
@@ -190,6 +199,181 @@ void ShortageDialogTest::testPageProvidesEightOperationButtons()
     };
     for (const char *name : buttonNames)
         QVERIFY(requiredChild<QPushButton>(&dialog, name)->isEnabled());
+}
+
+void ShortageDialogTest::configDialogSupportsMinimizeMaximizeAndClose()
+{
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(), [] {
+        return ShortageEditConditions {};
+    });
+
+    QVERIFY(!dialog.isModal());
+    QVERIFY(dialog.windowFlags().testFlag(Qt::WindowMinimizeButtonHint));
+    QVERIFY(dialog.windowFlags().testFlag(Qt::WindowMaximizeButtonHint));
+    QVERIFY(dialog.windowFlags().testFlag(Qt::WindowCloseButtonHint));
+}
+
+void ShortageDialogTest::manualSourceProvidesProductModeAndActualQty()
+{
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(), [] {
+        return ShortageEditConditions {};
+    });
+
+    auto *product = requiredChild<QComboBox>(&dialog, "manualProductCombo");
+    auto *mode = requiredChild<QComboBox>(&dialog, "manualModeCombo");
+    auto *actualQty = requiredChild<QLineEdit>(&dialog, "manualActualQtyEdit");
+    auto *submit = requiredChild<QPushButton>(&dialog, "manualSampleSubmitButton");
+    QCOMPARE(product->count(), 3);
+    QCOMPARE(mode->count(), 3);
+    QVERIFY(actualQty->validator() != nullptr);
+    QVERIFY(submit->isEnabled());
+}
+
+void ShortageDialogTest::sourceSelectionCallsControllerAndGatesControls()
+{
+    QTemporaryDir testStateDir;
+    QVERIFY(testStateDir.isValid());
+    ShortageTestController controller(ShortageConfigStore::sheet3Defaults(),
+                                      testStateDir.path(),
+                                      nullptr,
+                                      [] {
+                                          return ShortageOperationResult {
+                                              true, QStringLiteral("允许测试采样")};
+                                      });
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(),
+                                [] {
+                                    return ShortageEditConditions {};
+                                },
+                                &controller,
+                                controller.currentSnapshot());
+
+    auto *manual = requiredChild<QRadioButton>(&dialog, "manualSourceRadio");
+    auto *field = requiredChild<QRadioButton>(&dialog, "fieldSourceRadio");
+    auto *submit = requiredChild<QPushButton>(&dialog, "manualSampleSubmitButton");
+    auto *start = requiredChild<QPushButton>(&dialog, "testStartFieldButton");
+
+    QVERIFY(manual->isChecked());
+    QCOMPARE(controller.inputSource(), ShortageTestInputSource::Manual);
+    QVERIFY(submit->isEnabled());
+    QVERIFY(!start->isEnabled());
+
+    field->click();
+    QCOMPARE(controller.inputSource(), ShortageTestInputSource::Field);
+    QVERIFY(!controller.fieldSamplingActive());
+    QVERIFY(!submit->isEnabled());
+    QVERIFY(start->isEnabled());
+
+    manual->click();
+    QCOMPARE(controller.inputSource(), ShortageTestInputSource::Manual);
+    QVERIFY(!controller.fieldSamplingActive());
+    QVERIFY(submit->isEnabled());
+    QVERIFY(!start->isEnabled());
+}
+
+void ShortageDialogTest::snapshotRefreshesStationAndOrderViews()
+{
+    QTemporaryDir testStateDir;
+    QVERIFY(testStateDir.isValid());
+    ShortageTestController controller(ShortageConfigStore::sheet3Defaults(),
+                                      testStateDir.path(),
+                                      nullptr,
+                                      [] {
+                                          return ShortageOperationResult {
+                                              true, QStringLiteral("允许测试采样")};
+                                      });
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(),
+                                [] {
+                                    return ShortageEditConditions {};
+                                },
+                                &controller,
+                                controller.currentSnapshot());
+
+    auto *initZero = requiredChild<QPushButton>(&dialog, "testInitZeroButton");
+    auto *actualQty = requiredChild<QLineEdit>(&dialog, "manualActualQtyEdit");
+    auto *submit = requiredChild<QPushButton>(&dialog, "manualSampleSubmitButton");
+    auto *runtime = requiredChild<QTableWidget>(&dialog, "testStationRuntimeTable");
+    auto *planSummary = requiredChild<QLabel>(&dialog, "testPlanSummaryLabel");
+    auto *orderSummary = requiredChild<QLabel>(&dialog, "testOrderSummaryLabel");
+
+    initZero->click();
+    actualQty->setText(QStringLiteral("100"));
+    submit->click();
+
+    QCOMPARE(runtime->item(0, 1)->text(), QStringLiteral("0"));
+    QVERIFY(planSummary->text().contains(QStringLiteral("活动工位=1")));
+    QVERIFY(orderSummary->text().contains(QStringLiteral("等待派单")));
+}
+
+void ShortageDialogTest::testPageProvidesAllDesignedOperations()
+{
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(), [] {
+        return ShortageEditConditions {};
+    });
+
+    const QList<const char *> buttonNames {
+        "testInitZeroButton",
+        "testStartFieldButton",
+        "testStopButton",
+        "testDispatchAcceptedButton",
+        "testDispatchRejectedButton",
+        "testFailureBeforeUnloadButton",
+        "testMaterialUnloadedButton",
+        "testTaskSucceededButton",
+        "testSaveStateButton",
+        "testReloadStateButton",
+        "testClearStateButton",
+        "testFailureAfterUnloadButton",
+        "testResendUnloadButton",
+        "testSimulateRestartButton",
+        "manualSampleSubmitButton",
+    };
+    for (const char *name : buttonNames)
+        QVERIFY(requiredChild<QPushButton>(&dialog, name)->isVisibleTo(&dialog)
+                || requiredChild<QPushButton>(&dialog, name)->isEnabled()
+                || !requiredChild<QPushButton>(&dialog, name)->text().isEmpty());
+}
+
+void ShortageDialogTest::actionButtonsFollowControllerAvailability()
+{
+    QTemporaryDir testStateDir;
+    QVERIFY(testStateDir.isValid());
+    ShortageTestController controller(ShortageConfigStore::sheet3Defaults(),
+                                      testStateDir.path(),
+                                      nullptr,
+                                      [] {
+                                          return ShortageOperationResult {
+                                              true, QStringLiteral("允许测试采样")};
+                                      });
+    ShortageConfigDialog dialog(ShortageConfigStore::sheet3Defaults(),
+                                [] {
+                                    return ShortageEditConditions {};
+                                },
+                                &controller,
+                                controller.currentSnapshot());
+
+    auto *submit = requiredChild<QPushButton>(&dialog, "manualSampleSubmitButton");
+    auto *start = requiredChild<QPushButton>(&dialog, "testStartFieldButton");
+    auto *accept = requiredChild<QPushButton>(&dialog, "testDispatchAcceptedButton");
+    auto *unload = requiredChild<QPushButton>(&dialog, "testMaterialUnloadedButton");
+    auto *failAfterUnload = requiredChild<QPushButton>(&dialog, "testFailureAfterUnloadButton");
+    auto *resend = requiredChild<QPushButton>(&dialog, "testResendUnloadButton");
+
+    QVERIFY(submit->isEnabled());
+    QVERIFY(!start->isEnabled());
+    QVERIFY(!accept->isEnabled());
+    QVERIFY(!unload->isEnabled());
+
+    controller.initializeZeroAfterConfirmation();
+    controller.applyManualSample(ProductModel::Model88, ProductionMode::LeftRight, 100);
+    QVERIFY(accept->isEnabled());
+
+    controller.simulateDispatchAccepted();
+    QVERIFY(unload->isEnabled());
+    QVERIFY(!failAfterUnload->isEnabled());
+
+    controller.simulateMaterialUnloaded();
+    QVERIFY(failAfterUnload->isEnabled());
+    QVERIFY(resend->isEnabled());
 }
 
 void ShortageDialogTest::saveExposesLastValidatedConfigurationOnly()

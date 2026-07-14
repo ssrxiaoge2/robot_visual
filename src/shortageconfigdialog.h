@@ -10,9 +10,12 @@
 #include <functional>
 
 class QButtonGroup;
+class QComboBox;
 class QGridLayout;
+class QLabel;
 class QLineEdit;
 class QPushButton;
+class QRadioButton;
 class QSpinBox;
 class QTabWidget;
 class QTableWidget;
@@ -59,6 +62,14 @@ private:
     bool focusStationValidationFailure(const QString &messageZh);
     void focusConfigurationWidget(QWidget *widget);
     void saveConfiguration();
+    /// 按当前选择把手工产品、模式和 qint64 actualQty 一次提交给测试控制器。
+    void submitManualSample();
+    /// 只更新输入源控件门禁；业务层仍在 ShortageTestController 二次校验。
+    void refreshTestSourceControls();
+    /// 用控制器权威快照刷新 12 工位、基线、等待顺序和当前补料单。
+    void refreshTestSnapshot(const ShortageUiSnapshot &snapshot);
+    /// 用控制器计算的动作能力刷新事件按钮，不在 UI 复制状态机规则。
+    void refreshTestActionAvailability(const ShortageTestActionAvailability &availability);
 
     ShortageConfiguration m_configuration; ///< UI 编辑副本，保存前统一交给 ShortageConfigStore 校验。
     ShortageConfiguration m_validatedConfiguration; ///< 最近一次可安全交给外层保存的已校验配置。
@@ -74,6 +85,16 @@ private:
     QSpinBox *m_alarmSpin = nullptr;
     QSpinBox *m_failureLimitSpin = nullptr;
     QTextEdit *m_eventLog = nullptr;
+    QRadioButton *m_manualSourceRadio = nullptr; ///< Dialog 拥有；默认选中且不访问真实系统。
+    QRadioButton *m_fieldSourceRadio = nullptr;  ///< Dialog 拥有；选中后仍需明确点击启动采样。
+    QComboBox *m_manualProductCombo = nullptr;   ///< Dialog 拥有；data 保存 ProductModel。
+    QComboBox *m_manualModeCombo = nullptr;      ///< Dialog 拥有；data 保存 ProductionMode。
+    QLineEdit *m_manualActualQtyEdit = nullptr;  ///< Dialog 拥有；验证完整非负 qint64 文本。
+    QPushButton *m_manualSampleSubmitButton = nullptr; ///< Dialog 拥有；只在手工源可用。
+    QTableWidget *m_testRuntimeTable = nullptr;  ///< Dialog 拥有；只读显示 12 工位权威快照。
+    QLabel *m_testPlanSummaryLabel = nullptr;    ///< Dialog 拥有；显示基线、活动工位和等待顺序。
+    QLabel *m_testOrderSummaryLabel = nullptr;   ///< Dialog 拥有；显示当前测试补料单状态。
+    QMap<QString, QPushButton *> m_testActionButtons; ///< objectName 到按钮，仅用于门禁刷新。
 };
 
 #endif // SHORTAGECONFIGDIALOG_H
