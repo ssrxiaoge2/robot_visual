@@ -1,0 +1,923 @@
+#include "shortagevalidationdialog.h"
+
+#include <QDateTime>
+#include <QGridLayout>
+#include <QGroupBox>
+#include <QHBoxLayout>
+#include <QLabel>
+#include <QListWidget>
+#include <QPlainTextEdit>
+#include <QPushButton>
+#include <QTextEdit>
+#include <QVBoxLayout>
+
+namespace {
+
+ShortageValidationStep step(const QString &instructionZh,
+                            const QString &expectedZh,
+                            ShortageValidationAction action = ShortageValidationAction::ShowInstruction,
+                            ProductModel product = ProductModel::Model88,
+                            ProductionMode mode = ProductionMode::LeftRight,
+                            qint64 actualQty = 0)
+{
+    ShortageValidationStep item;
+    item.instructionZh = instructionZh;
+    item.expectedZh = expectedZh;
+    item.action = action;
+    item.product = product;
+    item.mode = mode;
+    item.actualQty = actualQty;
+    return item;
+}
+
+ShortageValidationCase validationCase(const QString &id,
+                                      const QString &nameZh,
+                                      QList<ShortageValidationStep> steps,
+                                      const QString &passCriteriaZh,
+                                      bool requiresManualEvidence)
+{
+    ShortageValidationCase item;
+    item.id = id;
+    item.nameZh = nameZh;
+    item.steps = std::move(steps);
+    item.passCriteriaZh = passCriteriaZh;
+    item.requiresManualEvidence = requiresManualEvidence;
+    return item;
+}
+
+QString yesNo(bool value)
+{
+    return value ? QStringLiteral("是") : QStringLiteral("否");
+}
+
+} // namespace
+
+ShortageValidationDialog::ShortageValidationDialog(ShortageTestController *testController,
+                                                   QWidget *parent)
+    : QDialog(parent),
+      m_testController(testController),
+      m_cases(createValidationCases())
+{
+    setWindowTitle(QStringLiteral("独立缺料验证控制台"));
+    setWindowFlags(Qt::Window | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint
+                   | Qt::WindowCloseButtonHint);
+    setModal(false);
+    setMinimumSize(1280, 760);
+
+    buildUi();
+
+    if (m_testController != nullptr) {
+        // snapshotChanged 是验证窗口接收测试状态证据的唯一连接点；只读刷新，不回写控制器。
+        connect(m_testController, &ShortageTestController::snapshotChanged, this,
+                [this](const ShortageUiSnapshot &snapshot) {
+                    refreshSnapshotEvidence(snapshot);
+                });
+        // actionAvailabilityChanged 是验证窗口感知按钮能力变化的唯一连接点；当前向导只记录证据。
+        connect(m_testController, &ShortageTestController::actionAvailabilityChanged, this,
+                [this](const ShortageTestActionAvailability &availability) {
+                    appendValidationLog(QStringLiteral(
+                        "动作门禁刷新：手工=%1，现场启动=%2，停止=%3，接受=%4，拒收=%5，倒料=%6，重发=%7")
+                                            .arg(yesNo(availability.canSubmitManualSample))
+                                            .arg(yesNo(availability.canStartFieldSampling))
+                                            .arg(yesNo(availability.canStopFieldSampling))
+                                            .arg(yesNo(availability.canAcceptDispatch))
+                                            .arg(yesNo(availability.canRejectDispatch))
+                                            .arg(yesNo(availability.canRecordUnload))
+                                            .arg(yesNo(availability.canResendUnload)));
+                });
+        // eventLogged 是测试控制器中文业务日志进入验证控制台的唯一连接点。
+        connect(m_testController, &ShortageTestController::eventLogged, this,
+                [this](const QString &messageZh) {
+                    appendValidationLog(QStringLiteral("控制器日志：%1").arg(messageZh));
+                });
+        // operationRejected 是测试控制器拒绝原因进入验证控制台的唯一连接点。
+        connect(m_testController, &ShortageTestController::operationRejected, this,
+                [this](const QString &reasonZh) {
+                    appendValidationLog(QStringLiteral("控制器拒绝：%1").arg(reasonZh));
+                });
+        refreshSnapshotEvidence(m_testController->currentSnapshot());
+    } else {
+        refreshSnapshotEvidence({});
+    }
+
+    if (!m_cases.isEmpty())
+        m_caseList->setCurrentRow(0);
+}
+
+void ShortageValidationDialog::buildUi()
+{
+    auto *root = new QVBoxLayout(this);
+    auto *top = new QHBoxLayout;
+    root->addLayout(top, 1);
+
+    auto *caseGroup = new QGroupBox(QStringLiteral("十五项验证"), this);
+    auto *caseLayout = new QVBoxLayout(caseGroup);
+    m_caseList = new QListWidget(caseGroup);
+    m_caseList->setObjectName(QStringLiteral("validationCaseList"));
+    for (const ShortageValidationCase &item : std::as_const(m_cases))
+        m_caseList->addItem(QStringLiteral("%1 %2").arg(item.id, item.nameZh));
+    caseLayout->addWidget(m_caseList);
+    top->addWidget(caseGroup, 1);
+
+    auto *stepGroup = new QGroupBox(QStringLiteral("验证步骤和通过标准"), this);
+    auto *stepLayout = new QVBoxLayout(stepGroup);
+    m_statusLabel = new QLabel(QStringLiteral("状态：尚未开始"), stepGroup);
+    m_statusLabel->setObjectName(QStringLiteral("validationStatusLabel"));
+    stepLayout->addWidget(m_statusLabel);
+    m_stepText = new QTextEdit(stepGroup);
+    m_stepText->setObjectName(QStringLiteral("validationStepTextEdit"));
+    m_stepText->setReadOnly(true);
+    stepLayout->addWidget(m_stepText, 1);
+    auto *buttonLayout = new QHBoxLayout;
+    m_nextStepButton = new QPushButton(QStringLiteral("执行下一步"), stepGroup);
+    m_nextStepButton->setObjectName(QStringLiteral("validationNextStepButton"));
+    m_manualConfirmButton = new QPushButton(QStringLiteral("人工确认现场证据通过"), stepGroup);
+    m_manualConfirmButton->setObjectName(QStringLiteral("validationManualConfirmButton"));
+    buttonLayout->addWidget(m_nextStepButton);
+    buttonLayout->addWidget(m_manualConfirmButton);
+    stepLayout->addLayout(buttonLayout);
+    top->addWidget(stepGroup, 2);
+
+    auto *evidenceGroup = new QGroupBox(QStringLiteral("实际状态证据"), this);
+    auto *evidenceLayout = new QVBoxLayout(evidenceGroup);
+    m_snapshotEvidenceLabel = new QLabel(evidenceGroup);
+    m_snapshotEvidenceLabel->setObjectName(QStringLiteral("validationSnapshotEvidenceLabel"));
+    m_snapshotEvidenceLabel->setWordWrap(true);
+    m_snapshotEvidenceLabel->setTextInteractionFlags(Qt::TextSelectableByMouse);
+    evidenceLayout->addWidget(m_snapshotEvidenceLabel, 1);
+    top->addWidget(evidenceGroup, 2);
+
+    auto *logGroup = new QGroupBox(QStringLiteral("验证日志"), this);
+    auto *logLayout = new QVBoxLayout(logGroup);
+    m_logEdit = new QPlainTextEdit(logGroup);
+    m_logEdit->setObjectName(QStringLiteral("validationLogEdit"));
+    m_logEdit->setReadOnly(true);
+    logLayout->addWidget(m_logEdit);
+    root->addWidget(logGroup, 1);
+
+    // caseList currentRowChanged 是验证项切换的唯一连接点；切换只重置显示和步骤游标。
+    connect(m_caseList, &QListWidget::currentRowChanged, this,
+            &ShortageValidationDialog::selectCase);
+    // nextStepButton clicked 是执行验证动作的唯一连接点；动作再统一经 switch 分发。
+    connect(m_nextStepButton, &QPushButton::clicked, this,
+            &ShortageValidationDialog::executeNextStep);
+    // manualConfirmButton clicked 是人工结论转换的唯一连接点；禁止跳过等待状态。
+    connect(m_manualConfirmButton, &QPushButton::clicked, this,
+            &ShortageValidationDialog::confirmManualEvidence);
+
+    refreshStatusLabel();
+}
+
+void ShortageValidationDialog::selectCase(int row)
+{
+    if (row < 0 || row >= m_cases.size()) {
+        m_currentCaseIndex = -1;
+        m_currentStepIndex = 0;
+        m_status = ShortageValidationStatus::NotStarted;
+        refreshCaseDetails();
+        refreshStatusLabel();
+        return;
+    }
+
+    m_currentCaseIndex = row;
+    m_currentStepIndex = 0;
+    m_status = ShortageValidationStatus::NotStarted;
+    refreshCaseDetails();
+    refreshStatusLabel();
+    appendValidationLog(QStringLiteral("已选择验证项：%1 %2")
+                            .arg(m_cases.at(row).id, m_cases.at(row).nameZh));
+}
+
+void ShortageValidationDialog::executeNextStep()
+{
+    if (m_currentCaseIndex < 0 || m_currentCaseIndex >= m_cases.size())
+        return;
+
+    const ShortageValidationCase &item = m_cases.at(m_currentCaseIndex);
+    if (m_currentStepIndex >= item.steps.size()) {
+        appendValidationLog(QStringLiteral("验证步骤未执行：%1 已无待执行步骤").arg(item.id));
+        return;
+    }
+
+    const int displayStep = m_currentStepIndex + 1;
+    const ShortageValidationStep &step = item.steps.at(m_currentStepIndex);
+    m_status = ShortageValidationStatus::InProgress;
+    refreshStatusLabel();
+
+    if (m_testController == nullptr && step.action != ShortageValidationAction::ShowInstruction) {
+        appendValidationLog(QStringLiteral("验证步骤未执行：测试控制器不可用"));
+        m_status = ShortageValidationStatus::FailedAutomatically;
+        refreshStatusLabel();
+        return;
+    }
+
+    switch (step.action) {
+    case ShortageValidationAction::ShowInstruction:
+        break;
+    case ShortageValidationAction::ClearTestState:
+        m_testController->clearTestStateAfterConfirmation();
+        break;
+    case ShortageValidationAction::InitializeZero:
+        m_testController->initializeZeroAfterConfirmation();
+        break;
+    case ShortageValidationAction::SelectManualSource:
+        m_testController->selectInputSource(ShortageTestInputSource::Manual);
+        break;
+    case ShortageValidationAction::SelectFieldSource:
+        m_testController->selectInputSource(ShortageTestInputSource::Field);
+        break;
+    case ShortageValidationAction::ApplyManualSample:
+        m_testController->applyManualSample(step.product, step.mode, step.actualQty);
+        break;
+    case ShortageValidationAction::StartFieldSampling:
+        m_testController->startFieldSampling();
+        break;
+    case ShortageValidationAction::StopFieldSampling:
+        m_testController->stop();
+        break;
+    case ShortageValidationAction::DispatchRejected:
+        m_testController->simulateDispatchRejected();
+        break;
+    case ShortageValidationAction::DispatchAccepted:
+        m_testController->simulateDispatchAccepted();
+        break;
+    case ShortageValidationAction::FailureBeforeUnload:
+        m_testController->simulateFailureBeforeUnload();
+        break;
+    case ShortageValidationAction::MaterialUnloaded:
+        m_testController->simulateMaterialUnloaded();
+        break;
+    case ShortageValidationAction::FailureAfterUnload:
+        m_testController->simulateFailureAfterUnload();
+        break;
+    case ShortageValidationAction::TaskSucceeded:
+        m_testController->simulateTaskSucceeded();
+        break;
+    case ShortageValidationAction::ResendUnload:
+        m_testController->resendLastUnloadFact();
+        break;
+    case ShortageValidationAction::SaveState:
+        m_testController->saveTestState();
+        break;
+    case ShortageValidationAction::ReloadState:
+        m_testController->reloadTestState();
+        break;
+    case ShortageValidationAction::SimulateRestart:
+        m_testController->simulateRestart();
+        break;
+    }
+
+    const ShortageUiSnapshot snapshot =
+        m_testController != nullptr ? m_testController->currentSnapshot() : ShortageUiSnapshot {};
+    refreshSnapshotEvidence(snapshot);
+    appendValidationLog(QStringLiteral(
+                            "步骤完成：输入=%1，预期=%2，实际=%3")
+                            .arg(step.instructionZh,
+                                 step.expectedZh,
+                                 m_snapshotEvidenceLabel->text().simplified()));
+
+    ++m_currentStepIndex;
+    if (m_currentStepIndex >= item.steps.size()) {
+        if (item.requiresManualEvidence) {
+            m_status = ShortageValidationStatus::WaitingManualEvidence;
+        } else {
+            evaluateCurrentCase(snapshot);
+        }
+    } else {
+        m_status = ShortageValidationStatus::InProgress;
+    }
+    appendValidationLog(QStringLiteral("%1 第 %2/%3 步结束")
+                            .arg(item.id)
+                            .arg(displayStep)
+                            .arg(item.steps.size()));
+    refreshCaseDetails();
+    refreshStatusLabel();
+}
+
+void ShortageValidationDialog::evaluateCurrentCase(const ShortageUiSnapshot &snapshot)
+{
+    if (m_currentCaseIndex < 0 || m_currentCaseIndex >= m_cases.size()) {
+        m_status = ShortageValidationStatus::FailedAutomatically;
+        return;
+    }
+
+    const QString id = m_cases.at(m_currentCaseIndex).id;
+    const ShortageRuntimeState &state = snapshot.runtime;
+    bool passed = false;
+
+    if (id == QStringLiteral("VT-04")) {
+        passed = state.initialized && state.activeStationId == 1 && state.orders.size() == 1
+                 && state.orders.first().stationId == 1
+                 && state.orders.first().state == ReplenishmentOrderState::AwaitingDispatch;
+    } else if (id == QStringLiteral("VT-06")) {
+        passed = state.initialized && snapshot.hasLastProductionDelta
+                 && snapshot.lastProductionDelta == 5 && state.actualQty.baseline == 105;
+    } else if (id == QStringLiteral("VT-07")) {
+        passed = !state.orders.isEmpty() && state.orders.first().state == ReplenishmentOrderState::Running
+                 && state.orders.first().taskId >= 900000000000ULL;
+    } else if (id == QStringLiteral("VT-08")) {
+        passed = !state.orders.isEmpty()
+                 && state.orders.first().state == ReplenishmentOrderState::Succeeded
+                 && state.orders.first().unloadAccounted;
+    } else if (id == QStringLiteral("VT-09")) {
+        for (const ShortageStationRuntime &station : state.stations) {
+            if (station.stationId == state.activeStationId || station.automaticPaused) {
+                passed = station.automaticPaused;
+                break;
+            }
+        }
+    } else if (id == QStringLiteral("VT-10")) {
+        passed = !state.orders.isEmpty()
+                 && state.orders.first().state == ReplenishmentOrderState::FailedAfterUnload
+                 && state.orders.first().unloadAccounted;
+    } else if (id == QStringLiteral("VT-11")) {
+        passed = state.criticalLock && !state.criticalReasonZh.isEmpty();
+    } else {
+        passed = !state.criticalLock;
+    }
+
+    m_status = passed ? ShortageValidationStatus::PassedAutomatically
+                      : ShortageValidationStatus::FailedAutomatically;
+}
+
+void ShortageValidationDialog::confirmManualEvidence()
+{
+    if (m_status != ShortageValidationStatus::WaitingManualEvidence) {
+        appendValidationLog(QStringLiteral("人工确认被拒绝：当前状态不是等待人工确认"));
+        return;
+    }
+    m_status = ShortageValidationStatus::PassedByOperator;
+    appendValidationLog(QStringLiteral("人工确认完成：现场证据已由操作员核对通过"));
+    refreshStatusLabel();
+}
+
+void ShortageValidationDialog::appendValidationLog(const QString &messageZh)
+{
+    if (m_logEdit == nullptr)
+        return;
+    QString inputZh = QStringLiteral("无");
+    QString expectedZh = QStringLiteral("无");
+    if (m_currentCaseIndex >= 0 && m_currentCaseIndex < m_cases.size()
+        && m_currentStepIndex < m_cases.at(m_currentCaseIndex).steps.size()) {
+        const ShortageValidationStep &step = m_cases.at(m_currentCaseIndex).steps.at(m_currentStepIndex);
+        inputZh = step.instructionZh;
+        expectedZh = step.expectedZh;
+        if (step.action == ShortageValidationAction::ApplyManualSample) {
+            inputZh += QStringLiteral("（产品=%1，模式=%2，actualQty=%3）")
+                           .arg(productText(step.product),
+                                modeText(step.mode))
+                           .arg(step.actualQty);
+        }
+    }
+    const QString actualZh = m_snapshotEvidenceLabel != nullptr
+                             ? m_snapshotEvidenceLabel->text().simplified()
+                             : QStringLiteral("无实际快照");
+    const QString stepText =
+        m_currentCaseIndex >= 0 && m_currentCaseIndex < m_cases.size()
+        ? QStringLiteral("%1/%2").arg(qMin(m_currentStepIndex + 1,
+                                           m_cases.at(m_currentCaseIndex).steps.size()))
+              .arg(m_cases.at(m_currentCaseIndex).steps.size())
+        : QStringLiteral("-");
+    m_logEdit->appendPlainText(QStringLiteral("[%1] %2 步骤%3：输入=%4；预期=%5；实际=%6；消息=%7")
+                                   .arg(QDateTime::currentDateTimeUtc().toString(Qt::ISODateWithMs),
+                                        currentCaseId(),
+                                        stepText,
+                                        inputZh,
+                                        expectedZh,
+                                        actualZh,
+                                        messageZh));
+}
+
+QList<ShortageValidationCase> ShortageValidationDialog::createValidationCases()
+{
+    const QString criteria01 = QStringLiteral("两个窗口均可最小化、最大化和恢复；主窗口始终可以激活；重复点击只激活唯一窗口，不出现多个相同窗口；窗口操作不改变测试状态。");
+    const QString criteria02 = QStringLiteral("正式状态文件哈希和主 FIFO 数量不变；AGV、机械臂和扫码硬件命令计数不增加；测试状态只写入 `test-*` 文件。");
+    const QString criteria03 = QStringLiteral("页面接收手工 `actualQty=100`；真实请求计数不变；启动现场采样不可用；日志明确记录手工样本。");
+    const QString criteria04 = QStringLiteral("建账后 12 工位均为 0；首样本只建基线；低位工位按同时间工位号排序；活动工位为 1；只生成一个工位 1 的 `AwaitingDispatch` 补料单并立即显示。");
+    const QString criteria05 = QStringLiteral("真实采样只在现场源启动；两轮稳定前不产生稳定样本；首次稳定样本只建基线并立即显示一个 `AwaitingDispatch` 补料单；正式 Engine 和 FIFO 不变化。");
+    const QString criteria06 = QStringLiteral("每个启用工位库存等于旧库存减 `5×当前模式用量`；用量 0 工位不变；基线为 105；最近增量为 5。");
+    const QString criteria07 = QStringLiteral("拒收后补料单保持 `AwaitingDispatch` 且单号不变，不生成重复单；接受后绑定测试 taskId 并进入 `Running`。");
+    const QString criteria08 = QStringLiteral("倒料完成时增加准确一箱；任务终态不重复加箱；未达最高位生成下一箱；达到最高位后释放活动工位并切换下一等待工位。");
+    const QString criteria09 = QStringLiteral("每次倒料前失败不增加库存；达到阈值时只暂停目标工位；其他工位继续计划；日志包含工位、原库存、失败次数和处理动作。");
+    const QString criteria10 = QStringLiteral("已倒料的一箱不回滚；倒料前失败计数不增加；补料单进入倒料后失败终态。");
+    const QString criteria11 = QStringLiteral("库存不第二次增加；系统进入严重锁定；停止新自动意图；日志包含补料单号、taskId、工位和重复倒料处理动作。");
+    const QString criteria12 = QStringLiteral("`1000→2→5` 按新周期累计 5 扣减；连续下降序列最终合计扣 5；`1000→2→1005` 只按旧周期增量 5 扣减；页面显示基线和候选变化。");
+    const QString criteria13 = QStringLiteral("手工源九种组合使用正确配置用量；现场源一轮抖动不切换、两轮相同才确认；旧任务未终态时保存待切换上下文；排空后切换；库存沿用并使用新组合用量。");
+    const QString criteria14 = QStringLiteral("安全状态逐字段恢复；不安全状态进入维护锁定；清空只删除 `test-*` 文件；正式文件哈希始终不变。");
+    const QString criteria15 = QStringLiteral("现场采样运行中不能混用输入源；停止后可切换；非法动作按钮禁用；直接调用控制器仍被拒绝并输出中文原因。");
+
+    return {
+        validationCase(QStringLiteral("VT-01"), QStringLiteral("窗口切换能力"), {
+                           step(QStringLiteral("打开独立缺料验证控制台并保留主窗口。"),
+                                QStringLiteral("验证控制台以非模态窗口显示。")),
+                           step(QStringLiteral("最小化验证控制台后激活主窗口。"),
+                                QStringLiteral("主窗口可以自由操作且测试状态不变化。")),
+                           step(QStringLiteral("恢复验证控制台并最大化。"),
+                                QStringLiteral("窗口可恢复和最大化，内容仍完整。")),
+                           step(QStringLiteral("重复点击入口或切回验证控制台。"),
+                                QStringLiteral("只激活唯一验证窗口，不创建重复窗口。")),
+                           step(QStringLiteral("关闭验证控制台。"),
+                                QStringLiteral("关闭动作不改变测试状态。")),
+                       }, criteria01, true),
+        validationCase(QStringLiteral("VT-02"), QStringLiteral("测试与正式环境隔离"), {
+                           step(QStringLiteral("记录正式状态文件哈希、主 FIFO 数量和硬件命令计数。"),
+                                QStringLiteral("形成验证前基线，尚不执行测试动作。")),
+                           step(QStringLiteral("执行清空测试状态。"), QStringLiteral("只删除 test-* 文件。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("执行 0 建账。"),
+                                QStringLiteral("独立测试状态从 0 开始，正式侧基线不变。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("切换为手工源。"),
+                                QStringLiteral("不会访问真实 MES/PLC。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("提交手工样本 88、L/R、actualQty=100。"),
+                                QStringLiteral("独立测试状态变化，正式侧基线不变。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 100),
+                           step(QStringLiteral("复核正式状态文件、主 FIFO 和硬件命令计数。"),
+                                QStringLiteral("正式证据与基线一致。")),
+                       }, criteria02, true),
+        validationCase(QStringLiteral("VT-03"), QStringLiteral("手工源不访问真实系统"), {
+                           step(QStringLiteral("切换为手工源。"), QStringLiteral("不会访问真实 MES/PLC。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("提交手工样本 88、L/R、actualQty=100。"),
+                                QStringLiteral("页面接收手工样本并写入测试日志。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 100),
+                           step(QStringLiteral("复核真实请求计数和现场采样按钮。"),
+                                QStringLiteral("真实请求计数不变，现场采样不可用。")),
+                       }, criteria03, true),
+        validationCase(QStringLiteral("VT-04"), QStringLiteral("0 建账和首样本补料计划"), {
+                           step(QStringLiteral("清空独立测试状态。"), QStringLiteral("StandaloneTest 重新开始。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("12 个工位库存均为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("切换为手工源。"), QStringLiteral("手工源可提交样本。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("提交手工样本 88、L/R、actualQty=100。"),
+                                QStringLiteral("首样本建立基线并生成工位 1 待派单。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 100),
+                       }, criteria04, false),
+        validationCase(QStringLiteral("VT-05"), QStringLiteral("现场源首样本补料计划"), {
+                           step(QStringLiteral("清空独立测试状态。"), QStringLiteral("测试文件重新开始。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("12 工位为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("切换为现场源。"), QStringLiteral("尚未启动真实采样。"),
+                                ShortageValidationAction::SelectFieldSource),
+                           step(QStringLiteral("启动现场采样。"), QStringLiteral("只在现场源启动。"),
+                                ShortageValidationAction::StartFieldSampling),
+                           step(QStringLiteral("等待两轮现场稳定样本。"), QStringLiteral("稳定前不产生样本。")),
+                           step(QStringLiteral("停止现场采样。"), QStringLiteral("迟到样本被屏蔽。"),
+                                ShortageValidationAction::StopFieldSampling),
+                       }, criteria05, true),
+        validationCase(QStringLiteral("VT-06"), QStringLiteral("正常产量扣减"), {
+                           step(QStringLiteral("清空独立测试状态。"), QStringLiteral("旧状态清除。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("12 工位为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("切换为手工源。"), QStringLiteral("可提交手工样本。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("提交手工样本 88、L/R、actualQty=100。"),
+                                QStringLiteral("建立基线。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 100),
+                           step(QStringLiteral("提交手工样本 88、L/R、actualQty=105。"),
+                                QStringLiteral("按增量 5 扣减。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 105),
+                       }, criteria06, false),
+        validationCase(QStringLiteral("VT-07"), QStringLiteral("派单拒绝和原单重试"), {
+                           step(QStringLiteral("清空、0 建账并提交 88 L/R 100。"),
+                                QStringLiteral("形成 VT-04 状态。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("库存为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("切换为手工源。"), QStringLiteral("使用公开手工测试入口。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("提交首样本。"), QStringLiteral("生成待派单。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 100),
+                           step(QStringLiteral("模拟主调度拒收当前补料单。"),
+                                QStringLiteral("补料单保持待派且单号不变。"),
+                                ShortageValidationAction::DispatchRejected),
+                           step(QStringLiteral("模拟主调度接受当前补料单。"),
+                                QStringLiteral("绑定测试 taskId 并进入运行。"),
+                                ShortageValidationAction::DispatchAccepted),
+                       }, criteria07, false),
+        validationCase(QStringLiteral("VT-08"), QStringLiteral("倒料入账与连续补料"), {
+                           step(QStringLiteral("清空、0 建账并提交首样本。"), QStringLiteral("形成待派单。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("库存为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("切换为手工源。"), QStringLiteral("使用公开手工测试入口。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("提交首样本。"), QStringLiteral("生成待派单。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 100),
+                           step(QStringLiteral("模拟接受补料单。"), QStringLiteral("任务运行。"),
+                                ShortageValidationAction::DispatchAccepted),
+                           step(QStringLiteral("模拟倒料完成。"), QStringLiteral("准确增加一箱。"),
+                                ShortageValidationAction::MaterialUnloaded),
+                           step(QStringLiteral("模拟任务成功。"), QStringLiteral("终态不重复加箱。"),
+                                ShortageValidationAction::TaskSucceeded),
+                       }, criteria08, false),
+        validationCase(QStringLiteral("VT-09"), QStringLiteral("倒料前失败保护"), {
+                           step(QStringLiteral("清空、0 建账并提交首样本。"), QStringLiteral("形成待派单。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("库存为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("切换为手工源。"), QStringLiteral("使用公开手工测试入口。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("提交首样本。"), QStringLiteral("生成待派单。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 100),
+                           step(QStringLiteral("第 1 次接受补料单。"), QStringLiteral("任务运行。"),
+                                ShortageValidationAction::DispatchAccepted),
+                           step(QStringLiteral("第 1 次倒料前失败。"), QStringLiteral("不增加库存。"),
+                                ShortageValidationAction::FailureBeforeUnload),
+                           step(QStringLiteral("第 2 次接受补料单。"), QStringLiteral("重试原工位。"),
+                                ShortageValidationAction::DispatchAccepted),
+                           step(QStringLiteral("第 2 次倒料前失败。"), QStringLiteral("达到阈值后暂停目标工位。"),
+                                ShortageValidationAction::FailureBeforeUnload),
+                       }, criteria09, false),
+        validationCase(QStringLiteral("VT-10"), QStringLiteral("倒料后失败"), {
+                           step(QStringLiteral("清空、0 建账并提交首样本。"), QStringLiteral("形成待派单。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("库存为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("切换为手工源。"), QStringLiteral("使用公开手工测试入口。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("提交首样本。"), QStringLiteral("生成待派单。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 100),
+                           step(QStringLiteral("模拟接受补料单。"), QStringLiteral("任务运行。"),
+                                ShortageValidationAction::DispatchAccepted),
+                           step(QStringLiteral("模拟倒料完成。"), QStringLiteral("库存增加一箱。"),
+                                ShortageValidationAction::MaterialUnloaded),
+                           step(QStringLiteral("模拟倒料后失败。"), QStringLiteral("库存不回滚。"),
+                                ShortageValidationAction::FailureAfterUnload),
+                       }, criteria10, false),
+        validationCase(QStringLiteral("VT-11"), QStringLiteral("重复倒料严重锁定"), {
+                           step(QStringLiteral("清空、0 建账并提交首样本。"), QStringLiteral("形成待派单。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("库存为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("切换为手工源。"), QStringLiteral("使用公开手工测试入口。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("提交首样本。"), QStringLiteral("生成待派单。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 100),
+                           step(QStringLiteral("模拟接受补料单。"), QStringLiteral("任务运行。"),
+                                ShortageValidationAction::DispatchAccepted),
+                           step(QStringLiteral("模拟倒料完成。"), QStringLiteral("库存增加一箱。"),
+                                ShortageValidationAction::MaterialUnloaded),
+                           step(QStringLiteral("重发最近倒料事实。"), QStringLiteral("库存不第二次增加并严重锁定。"),
+                                ShortageValidationAction::ResendUnload),
+                       }, criteria11, false),
+        validationCase(QStringLiteral("VT-12"), QStringLiteral("actualQty 清零与毛刺"), {
+                           step(QStringLiteral("清空独立测试状态。"), QStringLiteral("第一组序列从干净状态开始。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("库存为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("切换为手工源。"), QStringLiteral("actualQty 序列只走公开手工入口。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("第一组提交 actualQty=1000。"), QStringLiteral("建立旧周期基线。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 1000),
+                           step(QStringLiteral("第一组提交 actualQty=2。"), QStringLiteral("识别为新周期候选。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 2),
+                           step(QStringLiteral("第一组提交 actualQty=5。"), QStringLiteral("按新周期累计 5 扣减。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 5),
+                           step(QStringLiteral("复核第一组基线、候选和库存证据。"), QStringLiteral("页面展示 1000→2→5 证据。")),
+                           step(QStringLiteral("清空独立测试状态。"), QStringLiteral("第二组序列从干净状态开始。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("库存为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("第二组提交 actualQty=1000。"), QStringLiteral("建立旧周期基线。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 1000),
+                           step(QStringLiteral("第二组提交 actualQty=900。"), QStringLiteral("连续下降候选更新。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 900),
+                           step(QStringLiteral("第二组提交 actualQty=500。"), QStringLiteral("连续下降候选继续更新。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 500),
+                           step(QStringLiteral("第二组提交 actualQty=0。"), QStringLiteral("连续下降候选到 0。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 0),
+                           step(QStringLiteral("第二组提交 actualQty=2。"), QStringLiteral("新周期候选开始累计。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 2),
+                           step(QStringLiteral("第二组提交 actualQty=5。"), QStringLiteral("连续下降最终合计扣 5。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 5),
+                           step(QStringLiteral("复核第二组基线、候选和库存证据。"), QStringLiteral("页面展示 1000→900→500→0→2→5 证据。")),
+                           step(QStringLiteral("清空独立测试状态。"), QStringLiteral("第三组序列从干净状态开始。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("库存为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("第三组提交 actualQty=1000。"), QStringLiteral("建立旧周期基线。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 1000),
+                           step(QStringLiteral("第三组提交 actualQty=2。"), QStringLiteral("记录清零候选。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 2),
+                           step(QStringLiteral("第三组提交 actualQty=1005。"), QStringLiteral("只按旧周期增量 5 扣减。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 1005),
+                           step(QStringLiteral("复核页面基线、候选和库存证据。"), QStringLiteral("三组证据均可现场追踪。")),
+                       }, criteria12, true),
+        validationCase(QStringLiteral("VT-13"), QStringLiteral("换型和九种组合"), {
+                           step(QStringLiteral("清空独立测试状态。"), QStringLiteral("九种组合从干净状态开始。"),
+                                ShortageValidationAction::ClearTestState),
+                           step(QStringLiteral("确认从 0 建账。"), QStringLiteral("库存为 0。"),
+                                ShortageValidationAction::InitializeZero),
+                           step(QStringLiteral("切换为手工源。"), QStringLiteral("九种组合只走公开手工入口。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("提交 88、L/R、actualQty=100。"), QStringLiteral("核对 88 L/R 用量。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 100),
+                           step(QStringLiteral("提交 88、L/L、actualQty=105。"), QStringLiteral("核对 88 L/L 用量。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftOnly, 105),
+                           step(QStringLiteral("提交 88、R/H、actualQty=110。"), QStringLiteral("核对 88 R/H 用量。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::RightOnly, 110),
+                           step(QStringLiteral("提交 88R、L/R、actualQty=115。"), QStringLiteral("核对 88R L/R 用量。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88R, ProductionMode::LeftRight, 115),
+                           step(QStringLiteral("提交 88R、L/L、actualQty=120。"), QStringLiteral("核对 88R L/L 用量。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88R, ProductionMode::LeftOnly, 120),
+                           step(QStringLiteral("提交 88R、R/H、actualQty=125。"), QStringLiteral("核对 88R R/H 用量。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88R, ProductionMode::RightOnly, 125),
+                           step(QStringLiteral("提交 92、L/R、actualQty=130。"), QStringLiteral("核对 92 L/R 用量。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model92, ProductionMode::LeftRight, 130),
+                           step(QStringLiteral("提交 92、L/L、actualQty=135。"), QStringLiteral("核对 92 L/L 用量。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model92, ProductionMode::LeftOnly, 135),
+                           step(QStringLiteral("提交 92、R/H、actualQty=140。"), QStringLiteral("核对 92 R/H 用量。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model92, ProductionMode::RightOnly, 140),
+                           step(QStringLiteral("切换为现场源。"), QStringLiteral("现场稳定性验证尚未自动判定。"),
+                                ShortageValidationAction::SelectFieldSource),
+                           step(QStringLiteral("启动现场采样。"), QStringLiteral("只在现场源启动真实采样。"),
+                                ShortageValidationAction::StartFieldSampling),
+                           step(QStringLiteral("现场源制造一轮抖动。"), QStringLiteral("一轮抖动不切换。")),
+                           step(QStringLiteral("现场源制造连续两轮新上下文。"), QStringLiteral("两轮相同才确认。")),
+                           step(QStringLiteral("旧任务未终态时确认上下文切换。"), QStringLiteral("保存待切换上下文。")),
+                           step(QStringLiteral("停止现场采样。"), QStringLiteral("迟到样本被屏蔽。"),
+                                ShortageValidationAction::StopFieldSampling),
+                           step(QStringLiteral("排空旧任务后复核库存。"), QStringLiteral("切换后沿用库存并使用新组合用量。")),
+                       }, criteria13, true),
+        validationCase(QStringLiteral("VT-14"), QStringLiteral("保存、重载、清空和重启恢复"), {
+                           step(QStringLiteral("保存当前测试状态。"), QStringLiteral("记录 StandaloneTest 保存证据。"),
+                                ShortageValidationAction::SaveState),
+                           step(QStringLiteral("模拟程序重启。"), QStringLiteral("重建测试运行对象并恢复。"),
+                                ShortageValidationAction::SimulateRestart),
+                           step(QStringLiteral("重新加载测试状态。"), QStringLiteral("走恢复校验。"),
+                                ShortageValidationAction::ReloadState),
+                           step(QStringLiteral("清空测试状态。"), QStringLiteral("只删除 test-* 文件。"),
+                                ShortageValidationAction::ClearTestState),
+                       }, criteria14, true),
+        validationCase(QStringLiteral("VT-15"), QStringLiteral("来源切换和误操作门禁"), {
+                           step(QStringLiteral("切换为现场源。"), QStringLiteral("手工提交不可用。"),
+                                ShortageValidationAction::SelectFieldSource),
+                           step(QStringLiteral("启动现场采样。"), QStringLiteral("采样运行中不能混用输入源。"),
+                                ShortageValidationAction::StartFieldSampling),
+                           step(QStringLiteral("切回手工源。"), QStringLiteral("先停止现场采样后允许切换。"),
+                                ShortageValidationAction::SelectManualSource),
+                           step(QStringLiteral("提交手工样本。"), QStringLiteral("停止后才可提交。"),
+                                ShortageValidationAction::ApplyManualSample,
+                                ProductModel::Model88, ProductionMode::LeftRight, 100),
+                           step(QStringLiteral("检查无前置状态按钮和直接调用拒绝原因。"),
+                                QStringLiteral("非法动作禁用且拒绝原因是中文。")),
+                       }, criteria15, true),
+    };
+}
+
+void ShortageValidationDialog::refreshCaseDetails()
+{
+    if (m_stepText == nullptr)
+        return;
+    if (m_currentCaseIndex < 0 || m_currentCaseIndex >= m_cases.size()) {
+        m_stepText->clear();
+        return;
+    }
+
+    const ShortageValidationCase &item = m_cases.at(m_currentCaseIndex);
+    QString text;
+    text += QStringLiteral("%1 %2\n\n").arg(item.id, item.nameZh);
+    for (int index = 0; index < item.steps.size(); ++index) {
+        const ShortageValidationStep &itemStep = item.steps.at(index);
+        const QString marker = index == m_currentStepIndex ? QStringLiteral("▶") : QStringLiteral(" ");
+        text += QStringLiteral("%1 步骤 %2：%3\n   动作：%4\n   预期：%5\n")
+                    .arg(marker)
+                    .arg(index + 1)
+                    .arg(itemStep.instructionZh,
+                         actionText(itemStep.action),
+                         itemStep.expectedZh);
+        if (itemStep.action == ShortageValidationAction::ApplyManualSample) {
+            text += QStringLiteral("   输入：产品=%1，模式=%2，actualQty=%3\n")
+                        .arg(productText(itemStep.product),
+                             modeText(itemStep.mode))
+                        .arg(itemStep.actualQty);
+        }
+    }
+    text += QStringLiteral("\n通过标准：%1\n").arg(item.passCriteriaZh);
+    if (item.requiresManualEvidence)
+        text += QStringLiteral("\n人工边界：本项涉及现场、窗口或外部隔离证据，自动执行后必须人工确认。\n");
+    m_stepText->setPlainText(text);
+}
+
+void ShortageValidationDialog::refreshStatusLabel()
+{
+    if (m_statusLabel == nullptr || m_manualConfirmButton == nullptr || m_nextStepButton == nullptr)
+        return;
+
+    QString statusText;
+    switch (m_status) {
+    case ShortageValidationStatus::NotStarted:
+        statusText = QStringLiteral("尚未开始");
+        break;
+    case ShortageValidationStatus::InProgress:
+        statusText = QStringLiteral("执行中");
+        break;
+    case ShortageValidationStatus::PassedAutomatically:
+        statusText = QStringLiteral("自动通过");
+        break;
+    case ShortageValidationStatus::FailedAutomatically:
+        statusText = QStringLiteral("自动失败");
+        break;
+    case ShortageValidationStatus::WaitingManualEvidence:
+        statusText = QStringLiteral("等待人工确认");
+        break;
+    case ShortageValidationStatus::PassedByOperator:
+        statusText = QStringLiteral("人工确认通过");
+        break;
+    }
+    m_statusLabel->setText(QStringLiteral("状态：%1").arg(statusText));
+    m_manualConfirmButton->setEnabled(m_status == ShortageValidationStatus::WaitingManualEvidence);
+    m_nextStepButton->setEnabled(m_currentCaseIndex >= 0);
+}
+
+void ShortageValidationDialog::refreshSnapshotEvidence(const ShortageUiSnapshot &snapshot)
+{
+    if (m_snapshotEvidenceLabel == nullptr)
+        return;
+
+    const ShortageRuntimeState &state = snapshot.runtime;
+    QString waiting;
+    for (int stationId : state.waitingStationIds) {
+        if (!waiting.isEmpty())
+            waiting += QStringLiteral("、");
+        waiting += QString::number(stationId);
+    }
+    if (waiting.isEmpty())
+        waiting = QStringLiteral("无");
+
+    QString currentOrder = QStringLiteral("无");
+    if (!state.orders.isEmpty()) {
+        const ReplenishmentOrder &order = state.orders.last();
+        currentOrder = QStringLiteral("单号=%1，工位=%2，状态=%3，taskId=%4，已倒料=%5")
+                           .arg(order.orderNo)
+                           .arg(order.stationId)
+                           .arg(orderStateText(order.state))
+                           .arg(order.taskId)
+                           .arg(yesNo(order.unloadAccounted));
+    }
+
+    m_snapshotEvidenceLabel->setText(QStringLiteral(
+        "产品/模式：%1 / %2\n"
+        "actualQty/基线：hasBaseline=%3，baseline=%4，候选=%5\n"
+        "活动工位：%6\n"
+        "等待顺序：%7\n"
+        "当前补料单：%8\n"
+        "严重锁定：%9，原因=%10\n"
+        "最近增量：%11，delta=%12\n"
+        "摘要一：%13\n"
+        "摘要二：%14")
+                                         .arg(productText(state.product),
+                                              modeText(state.mode),
+                                              yesNo(state.actualQty.hasBaseline))
+                                         .arg(state.actualQty.baseline)
+                                         .arg(state.actualQty.hasResetCandidate
+                                                  ? QString::number(state.actualQty.resetCandidate)
+                                                  : QStringLiteral("无"))
+                                         .arg(state.activeStationId)
+                                         .arg(waiting,
+                                              currentOrder,
+                                              yesNo(state.criticalLock),
+                                              state.criticalReasonZh.isEmpty()
+                                                  ? QStringLiteral("无")
+                                                  : state.criticalReasonZh,
+                                              yesNo(snapshot.hasLastProductionDelta))
+                                         .arg(snapshot.lastProductionDelta)
+                                         .arg(snapshot.summaryLine1Zh,
+                                              snapshot.summaryLine2Zh));
+}
+
+QString ShortageValidationDialog::currentCaseId() const
+{
+    if (m_currentCaseIndex < 0 || m_currentCaseIndex >= m_cases.size())
+        return QStringLiteral("VT-??");
+    return m_cases.at(m_currentCaseIndex).id;
+}
+
+QString ShortageValidationDialog::productText(ProductModel product)
+{
+    switch (product) {
+    case ProductModel::Model88:
+        return QStringLiteral("88");
+    case ProductModel::Model88R:
+        return QStringLiteral("88R");
+    case ProductModel::Model92:
+        return QStringLiteral("92");
+    }
+    return QStringLiteral("未知产品");
+}
+
+QString ShortageValidationDialog::modeText(ProductionMode mode)
+{
+    switch (mode) {
+    case ProductionMode::LeftRight:
+        return QStringLiteral("L/R");
+    case ProductionMode::LeftOnly:
+        return QStringLiteral("L/L");
+    case ProductionMode::RightOnly:
+        return QStringLiteral("R/H");
+    }
+    return QStringLiteral("未知模式");
+}
+
+QString ShortageValidationDialog::orderStateText(ReplenishmentOrderState state)
+{
+    switch (state) {
+    case ReplenishmentOrderState::AwaitingDispatch:
+        return QStringLiteral("等待派单");
+    case ReplenishmentOrderState::Queued:
+        return QStringLiteral("已入队");
+    case ReplenishmentOrderState::Running:
+        return QStringLiteral("运行中");
+    case ReplenishmentOrderState::Unloaded:
+        return QStringLiteral("已倒料");
+    case ReplenishmentOrderState::Succeeded:
+        return QStringLiteral("成功");
+    case ReplenishmentOrderState::FailedBeforeUnload:
+        return QStringLiteral("倒料前失败");
+    case ReplenishmentOrderState::FailedAfterUnload:
+        return QStringLiteral("倒料后失败");
+    case ReplenishmentOrderState::Canceled:
+        return QStringLiteral("已取消");
+    }
+    return QStringLiteral("未知状态");
+}
+
+QString ShortageValidationDialog::actionText(ShortageValidationAction action)
+{
+    switch (action) {
+    case ShortageValidationAction::ShowInstruction:
+        return QStringLiteral("显示说明");
+    case ShortageValidationAction::ClearTestState:
+        return QStringLiteral("清空测试状态");
+    case ShortageValidationAction::InitializeZero:
+        return QStringLiteral("0 建账");
+    case ShortageValidationAction::SelectManualSource:
+        return QStringLiteral("选择手工源");
+    case ShortageValidationAction::SelectFieldSource:
+        return QStringLiteral("选择现场源");
+    case ShortageValidationAction::ApplyManualSample:
+        return QStringLiteral("提交手工样本");
+    case ShortageValidationAction::StartFieldSampling:
+        return QStringLiteral("启动现场采样");
+    case ShortageValidationAction::StopFieldSampling:
+        return QStringLiteral("停止现场采样");
+    case ShortageValidationAction::DispatchRejected:
+        return QStringLiteral("派单拒收");
+    case ShortageValidationAction::DispatchAccepted:
+        return QStringLiteral("派单接受");
+    case ShortageValidationAction::FailureBeforeUnload:
+        return QStringLiteral("倒料前失败");
+    case ShortageValidationAction::MaterialUnloaded:
+        return QStringLiteral("倒料完成");
+    case ShortageValidationAction::FailureAfterUnload:
+        return QStringLiteral("倒料后失败");
+    case ShortageValidationAction::TaskSucceeded:
+        return QStringLiteral("任务成功");
+    case ShortageValidationAction::ResendUnload:
+        return QStringLiteral("重发倒料事实");
+    case ShortageValidationAction::SaveState:
+        return QStringLiteral("保存测试状态");
+    case ShortageValidationAction::ReloadState:
+        return QStringLiteral("重载测试状态");
+    case ShortageValidationAction::SimulateRestart:
+        return QStringLiteral("模拟重启");
+    }
+    return QStringLiteral("未知动作");
+}

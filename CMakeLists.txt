@@ -88,6 +88,9 @@ set(PROJECT_SOURCES
         src/shortagetestcontroller.h
         src/shortagestatestore.cpp
         src/shortagestatestore.h
+        # 独立现场验证窗口；入口可隐藏，但不把验证编排混入既有配置 Dialog。
+        src/shortagevalidationdialog.cpp
+        src/shortagevalidationdialog.h
         src/shortageconfigdialog.cpp
         src/shortageconfigdialog.h
         src/shortagerecoverydialog.cpp

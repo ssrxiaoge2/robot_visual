@@ -175,6 +175,26 @@ set_tests_properties(shortage_dialog_tests PROPERTIES
     ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
 )
 
+# 独立验证窗口测试只链接测试控制器和缺料核心，不链接 MainWindow、FIFO 或硬件控制器。
+add_shortage_cpp_test(shortage_validation_dialog_tests
+    test_shortage_validation_dialog.cpp
+    ../src/shortagevalidationdialog.cpp
+    ../src/customSysScheduler.cpp
+    ../src/shortagesamplecoordinator.cpp
+    ../src/shortagestatestore.cpp
+    ../src/shortageledger.cpp
+    ../src/replenishmentplanner.cpp
+    ../src/shortageengine.cpp
+    ../src/shortagetestcontroller.cpp
+)
+target_link_libraries(shortage_validation_dialog_tests PRIVATE Qt6::Widgets)
+target_compile_definitions(shortage_validation_dialog_tests PRIVATE
+    ROBOT_VISUAL_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+set_tests_properties(shortage_validation_dialog_tests PROPERTIES
+    ENVIRONMENT "QT_QPA_PLATFORM=offscreen"
+)
+
 add_shortage_cpp_test(live_shortage_coordinator_tests
     test_live_shortage_coordinator.cpp
     ../src/liveshortagecoordinator.cpp
