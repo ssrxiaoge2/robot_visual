@@ -39,7 +39,7 @@ ShortageConfiguration validationTestConfiguration()
             station.boxQuantity = 100 + stationId;
             station.minimumStock = 20;
             station.maximumStock = 200;
-            station.usageLeftRight = stationId;
+            station.usageLeftRight = stationId == 12 ? 0 : stationId;
             station.usageLeftOnly = stationId * 10;
             station.usageRightOnly = stationId * 100;
             configuration.stations.append(station);
@@ -118,6 +118,7 @@ private slots:
     void nextStepUsesOnlyTestControllerPublicActions();      ///< 向导不直接修改 Engine。
     void automaticCaseShowsActualSnapshotEvidence();         ///< 可判定项目显示预期、实际和结果。
     void automaticCasesLogFixedCriteriaEvidence();           ///< 自动项必须记录对应固定标准的本地证据。
+    void vt08RequiresManualEvidenceForUnprovenContinuitySwitch(); ///< VT-08 未覆盖释放切换时不得纯自动通过。
     void nullControllerRejectsValidationProgression();       ///< 控制器为空时只能浏览，不能走验证结论。
     void fieldEvidenceWaitsForManualConfirmation();          ///< 实机项不能被本地测试冒充通过。
     void sourceFilesContainNoProductionOrHardwareDependency();///< 新 Dialog 与正式/FIFO/硬件隔离。
@@ -357,20 +358,26 @@ void ShortageValidationDialogTest::automaticCasesLogFixedCriteriaEvidence()
              QStringLiteral("唯一待派单")}},
         {5, {QStringLiteral("VT-06 自动判定通过"),
              QStringLiteral("基线=105"),
-             QStringLiteral("最近增量=5")}},
+             QStringLiteral("最近增量=5"),
+             QStringLiteral("工位1：旧库存=0，用量=1，预期=-5，实际=-5"),
+             QStringLiteral("工位12：旧库存=0，用量=0，预期=0，实际=0")}},
         {6, {QStringLiteral("VT-07 自动判定通过"),
              QStringLiteral("拒收后原单号保持"),
              QStringLiteral("运行中")}},
-        {7, {QStringLiteral("VT-08 自动判定通过"),
-             QStringLiteral("准确一箱"),
-             QStringLiteral("终态不重复加箱")}},
         {8, {QStringLiteral("VT-09 自动判定通过"),
+             QStringLiteral("工位=1"),
+             QStringLiteral("原库存=0"),
+             QStringLiteral("处理动作="),
              QStringLiteral("暂停目标工位"),
              QStringLiteral("失败次数=2")}},
         {9, {QStringLiteral("VT-10 自动判定通过"),
              QStringLiteral("倒料后失败"),
              QStringLiteral("失败计数不增加")}},
         {10, {QStringLiteral("VT-11 自动判定通过"),
+              QStringLiteral("补料单号=1"),
+              QStringLiteral("taskId=900000000000"),
+              QStringLiteral("工位=1"),
+              QStringLiteral("重复倒料处理动作=严重锁定且不加库存"),
               QStringLiteral("库存不第二次增加"),
               QStringLiteral("严重锁定")}},
     };
@@ -396,6 +403,31 @@ void ShortageValidationDialogTest::automaticCasesLogFixedCriteriaEvidence()
                                      .arg(evidence, log->toPlainText())));
         }
     }
+}
+
+void ShortageValidationDialogTest::vt08RequiresManualEvidenceForUnprovenContinuitySwitch()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    auto controller = std::unique_ptr<ShortageTestController>(
+        newController(directory.path(), nullptr));
+    ShortageValidationDialog dialog(controller.get());
+    auto *status = requiredChild<QLabel>(&dialog, "validationStatusLabel");
+    auto *log = requiredChild<QPlainTextEdit>(&dialog, "validationLogEdit");
+
+    executeAllSteps(&dialog, 7);
+
+    QVERIFY2(status->text().contains(QStringLiteral("等待人工确认")),
+             qPrintable(QStringLiteral("VT-08 不应在释放/切换子项未本地证明时纯自动通过，实际状态：%1")
+                             .arg(status->text())));
+    QVERIFY(log->toPlainText().contains(QStringLiteral("VT-08 本地证据通过")));
+    QVERIFY(log->toPlainText().contains(QStringLiteral("工位=1")));
+    QVERIFY(log->toPlainText().contains(QStringLiteral("原库存=0")));
+    QVERIFY(log->toPlainText().contains(QStringLiteral("配置箱数=101")));
+    QVERIFY(log->toPlainText().contains(QStringLiteral("倒料后库存=101")));
+    QVERIFY(log->toPlainText().contains(QStringLiteral("终态库存=101")));
+    QVERIFY(log->toPlainText().contains(QStringLiteral("释放切换=未执行")));
+    QVERIFY(log->toPlainText().contains(QStringLiteral("处理动作=保留人工现场证据")));
 }
 
 void ShortageValidationDialogTest::nullControllerRejectsValidationProgression()

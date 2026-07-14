@@ -66,3 +66,48 @@ Total Test time (real) =   1.04 sec
 ```text
 无输出。
 ```
+
+复审修正：强化自动判定精确证据
+
+修正内容
+- VT-06 改为配置感知判定：从测试控制器复制当前配置，只按当前产品/模式读取每个工位的启用状态和用量，逐工位校验 `旧库存 - 5×当前模式用量`；测试配置专门加入用量 0 工位，验证“用量 0 工位不变”不是泛化字符串。
+- VT-08 不再报告纯自动通过。当前固定步骤可本地证明“准确一箱”和“任务终态不重复加箱”，但不能证明“达到最高位后释放活动工位并切换下一等待工位”；因此本地证据通过后转为等待人工确认，日志明确写出配置箱数、原库存、倒料后库存、终态库存，以及“释放切换=未执行，处理动作=保留人工现场证据”。
+- VT-09 自动日志补齐固定字段：工位、原库存、首次失败后库存、当前库存、失败次数、处理动作，并校验每次倒料前失败不增加库存、目标工位暂停、其他工位继续计划。
+- VT-11 自动日志补齐固定字段：补料单号、taskId、工位、重复倒料处理动作，并校验库存不第二次增加、严重锁定和停止新自动意图。
+- 回归测试新增会失败的精确证据断言：VT-06 逐工位用量/预期/实际，VT-08 手工边界，VT-09/VT-11 必需日志字段。
+
+TDD 记录
+- RED：新增精确证据测试后，`shortage_validation_dialog_tests` 失败；VT-06 缺少“工位1：旧库存=0，用量=1，预期=-5，实际=-5”等逐工位证据，VT-08 仍显示“状态：自动通过”。
+- GREEN：实现配置感知扣减、VT-08 手工边界和 VT-09/VT-11 字段化日志后，指定测试通过。
+
+复审修正验证命令输出
+
+`cmake --build build-shortage --target shortage_validation_dialog_tests --parallel`
+
+```text
+[  0%] Built target shortage_validation_dialog_tests_autogen_timestamp_deps
+[ 12%] Built target shortage_validation_dialog_tests_autogen
+[100%] Built target shortage_validation_dialog_tests
+```
+
+`QT_QPA_PLATFORM=offscreen ctest --test-dir build-shortage -R '^shortage_validation_dialog_tests$' --output-on-failure`
+
+```text
+Internal ctest changing into directory: /home/dh/project/robot/robot_visual20260625_0630_xianchangceshi/robot_visual20260625/robot_visual/build-shortage
+Test project /home/dh/project/robot/robot_visual20260625_0630_xianchangceshi/robot_visual20260625/robot_visual/build-shortage
+    Start 12: shortage_validation_dialog_tests
+1/1 Test #12: shortage_validation_dialog_tests ...   Passed    1.07 sec
+
+100% tests passed, 0 tests failed out of 1
+
+Total Test time (real) =   1.07 sec
+```
+
+`git diff --check`
+
+```text
+无输出。
+```
+
+仍需人工边界
+- VT-08 的“达到最高位后释放活动工位并切换下一等待工位”当前固定步骤没有把目标工位补到最高位，也没有触发释放和切换动作；本次按复审要求保留为人工证据边界，不作为纯自动通过条件。

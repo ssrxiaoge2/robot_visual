@@ -144,13 +144,96 @@ bool stockUnchangedForAllStations(const ShortageRuntimeState &before,
     return true;
 }
 
+const ShortageStationConfig *configForStation(const ShortageConfiguration &configuration,
+                                              ProductModel product,
+                                              int stationId)
+{
+    for (const ShortageStationConfig &station : configuration.stations) {
+        if (station.product == product && station.stationId == stationId)
+            return &station;
+    }
+    return nullptr;
+}
+
+qint64 usageForMode(const ShortageStationConfig &station, ProductionMode mode)
+{
+    switch (mode) {
+    case ProductionMode::LeftRight:
+        return station.usageLeftRight;
+    case ProductionMode::LeftOnly:
+        return station.usageLeftOnly;
+    case ProductionMode::RightOnly:
+        return station.usageRightOnly;
+    }
+    return 0;
+}
+
+bool configuredProductionDeductionMatches(const ShortageRuntimeState &before,
+                                          const ShortageRuntimeState &after,
+                                          const ShortageConfiguration &configuration,
+                                          qint64 productionDelta,
+                                          QStringList *evidenceRows)
+{
+    if (!hasTwelveStations(before) || !hasTwelveStations(after))
+        return false;
+
+    bool matched = true;
+    bool sawEnabledStation = false;
+    for (int stationId = 1; stationId <= 12; ++stationId) {
+        const ShortageStationRuntime *beforeStation = stationById(before, stationId);
+        const ShortageStationRuntime *afterStation = stationById(after, stationId);
+        const ShortageStationConfig *stationConfig =
+            configForStation(configuration, after.product, stationId);
+        if (beforeStation == nullptr || afterStation == nullptr || stationConfig == nullptr) {
+            matched = false;
+            continue;
+        }
+
+        qint64 usage = 0;
+        qint64 expectedStock = beforeStation->stock;
+        if (stationConfig->enabled) {
+            sawEnabledStation = true;
+            usage = usageForMode(*stationConfig, after.mode);
+            expectedStock = beforeStation->stock - productionDelta * usage;
+        }
+
+        if (afterStation->stock != expectedStock)
+            matched = false;
+        if (evidenceRows != nullptr) {
+            evidenceRows->append(QStringLiteral("工位%1：旧库存=%2，用量=%3，预期=%4，实际=%5")
+                                     .arg(stationId)
+                                     .arg(beforeStation->stock)
+                                     .arg(usage)
+                                     .arg(expectedStock)
+                                     .arg(afterStation->stock));
+        }
+    }
+
+    return matched && sawEnabledStation;
+}
+
+bool hasAwaitingAutomaticOrderForStation(const ShortageRuntimeState &state, int stationId)
+{
+    for (const ReplenishmentOrder &order : state.orders) {
+        if (order.stationId == stationId
+            && order.origin == ReplenishmentOrigin::Automatic
+            && order.state == ReplenishmentOrderState::AwaitingDispatch) {
+            return true;
+        }
+    }
+    return false;
+}
+
 } // namespace
 
 ShortageValidationDialog::ShortageValidationDialog(ShortageTestController *testController,
                                                    QWidget *parent)
     : QDialog(parent),
       m_testController(testController),
-      m_cases(createValidationCases())
+      m_cases(createValidationCases()),
+      m_validationConfiguration(testController != nullptr
+                                    ? testController->engineForTest().configuration()
+                                    : ShortageConfiguration {})
 {
     setWindowTitle(QStringLiteral("独立缺料验证控制台"));
     setWindowFlags(Qt::Window | Qt::WindowMinimizeButtonHint | Qt::WindowMaximizeButtonHint
@@ -437,20 +520,14 @@ void ShortageValidationDialog::evaluateCurrentCase(const ShortageUiSnapshot &sna
     } else if (id == QStringLiteral("VT-06")) {
         const bool hasBeforeSample = m_currentCaseSnapshots.size() >= 5;
         bool stocksDeducted = false;
+        QStringList stationEvidence;
         if (hasBeforeSample) {
             const ShortageRuntimeState &beforeDelta = m_currentCaseSnapshots.at(3).runtime;
-            stocksDeducted = hasTwelveStations(beforeDelta) && hasTwelveStations(state);
-            bool anyChanged = false;
-            for (const ShortageStationRuntime &station : state.stations) {
-                const ShortageStationRuntime *before = stationById(beforeDelta, station.stationId);
-                if (before == nullptr || station.stock > before->stock) {
-                    stocksDeducted = false;
-                    break;
-                }
-                if (station.stock < before->stock)
-                    anyChanged = true;
-            }
-            stocksDeducted = stocksDeducted && anyChanged;
+            stocksDeducted = configuredProductionDeductionMatches(beforeDelta,
+                                                                  state,
+                                                                  m_validationConfiguration,
+                                                                  5,
+                                                                  &stationEvidence);
         }
         passed = state.initialized && snapshot.hasLastProductionDelta
                  && snapshot.lastProductionDelta == 5
@@ -459,8 +536,10 @@ void ShortageValidationDialog::evaluateCurrentCase(const ShortageUiSnapshot &sna
                  && stocksDeducted
                  && !state.criticalLock;
         evidenceZh = passed
-                     ? QStringLiteral("VT-06 自动判定通过：基线=105，最近增量=5，12工位库存相对旧库存完成扣减。")
-                     : QStringLiteral("VT-06 自动判定失败：缺少基线105、最近增量5或库存扣减证据。");
+                     ? QStringLiteral("VT-06 自动判定通过：基线=105，最近增量=5；%1。")
+                           .arg(stationEvidence.join(QStringLiteral("；")))
+                     : QStringLiteral("VT-06 自动判定失败：缺少基线105、最近增量5或逐工位配置用量扣减证据；%1。")
+                           .arg(stationEvidence.join(QStringLiteral("；")));
     } else if (id == QStringLiteral("VT-07")) {
         const bool hasSnapshots = m_currentCaseSnapshots.size() >= 6;
         if (hasSnapshots) {
@@ -486,31 +565,39 @@ void ShortageValidationDialog::evaluateCurrentCase(const ShortageUiSnapshot &sna
                      ? QStringLiteral("VT-07 自动判定通过：拒收后原单号保持且不生成重复单，接受后绑定测试taskId并进入运行中。")
                      : QStringLiteral("VT-07 自动判定失败：拒收原单、重复单或运行中taskId证据不完整。");
     } else if (id == QStringLiteral("VT-08")) {
-        const bool hasSnapshots = m_currentCaseSnapshots.size() >= 7;
-        if (hasSnapshots) {
-            const ShortageRuntimeState &beforeUnload = m_currentCaseSnapshots.at(4).runtime;
-            const ShortageRuntimeState &afterUnload = m_currentCaseSnapshots.at(5).runtime;
-            const ShortageRuntimeState &afterSuccess = m_currentCaseSnapshots.at(6).runtime;
-            passed = stockIncreasedOnlyForStation(beforeUnload, afterUnload, 1)
-                     && stockUnchangedForAllStations(afterUnload, afterSuccess)
-                     && afterSuccess.orders.size() == 1
-                     && afterSuccess.orders.first().stationId == 1
-                     && afterSuccess.orders.first().state == ReplenishmentOrderState::Succeeded
-                     && afterSuccess.orders.first().unloadAccounted
-                     && !afterSuccess.criticalLock;
-        }
-        evidenceZh = passed
-                     ? QStringLiteral("VT-08 自动判定通过：倒料完成准确一箱入账，任务终态不重复加箱。")
-                     : QStringLiteral("VT-08 自动判定失败：缺少一箱入账、终态不重复加箱或成功终态证据。");
+        passed = false;
+        evidenceZh = QStringLiteral("VT-08 自动判定失败：连续补料和最高位释放切换需要现场/额外步骤证据，本项不报告纯自动通过。");
     } else if (id == QStringLiteral("VT-09")) {
         const bool hasSnapshots = m_currentCaseSnapshots.size() >= 8;
+        qint64 originalStock = 0;
+        qint64 firstFailureStock = 0;
+        qint64 finalStock = 0;
+        int failureCount = 0;
+        QString actionZh;
         if (hasSnapshots) {
             const ShortageRuntimeState &beforeFailures = m_currentCaseSnapshots.at(3).runtime;
+            const ShortageRuntimeState &afterFirstFailure = m_currentCaseSnapshots.at(5).runtime;
             const ShortageStationRuntime *beforeStation = stationById(beforeFailures, 1);
+            const ShortageStationRuntime *afterFirstStation = stationById(afterFirstFailure, 1);
             const ShortageStationRuntime *targetStation = stationById(state, 1);
-            bool othersContinue = !state.waitingStationIds.isEmpty() || state.activeStationId != 0;
+            bool othersContinue = false;
+            for (int stationId : state.waitingStationIds)
+                othersContinue = othersContinue || stationId != 1;
+            othersContinue = othersContinue || (state.activeStationId != 0
+                                                && state.activeStationId != 1);
+            if (beforeStation != nullptr)
+                originalStock = beforeStation->stock;
+            if (afterFirstStation != nullptr)
+                firstFailureStock = afterFirstStation->stock;
+            if (targetStation != nullptr) {
+                finalStock = targetStation->stock;
+                failureCount = targetStation->consecutivePreUnloadFailures;
+                actionZh = targetStation->pauseReasonZh;
+            }
             passed = beforeStation != nullptr
+                     && afterFirstStation != nullptr
                      && targetStation != nullptr
+                     && afterFirstStation->stock == beforeStation->stock
                      && targetStation->stock == beforeStation->stock
                      && targetStation->automaticPaused
                      && targetStation->consecutivePreUnloadFailures >= 2
@@ -519,8 +606,18 @@ void ShortageValidationDialog::evaluateCurrentCase(const ShortageUiSnapshot &sna
                      && !state.criticalLock;
         }
         evidenceZh = passed
-                     ? QStringLiteral("VT-09 自动判定通过：倒料前失败不增加库存，失败次数=2，暂停目标工位且其他工位继续计划。")
-                     : QStringLiteral("VT-09 自动判定失败：未证明失败不加库存、达到阈值暂停目标工位和其他工位继续计划。");
+                     ? QStringLiteral("VT-09 自动判定通过：工位=1，原库存=%1，首次失败后库存=%2，当前库存=%3，失败次数=%4，处理动作=%5；暂停目标工位且其他工位继续计划。")
+                           .arg(originalStock)
+                           .arg(firstFailureStock)
+                           .arg(finalStock)
+                           .arg(failureCount)
+                           .arg(actionZh)
+                     : QStringLiteral("VT-09 自动判定失败：工位=1，原库存=%1，首次失败后库存=%2，当前库存=%3，失败次数=%4，处理动作=%5；未证明失败不加库存、达到阈值暂停目标工位和其他工位继续计划。")
+                           .arg(originalStock)
+                           .arg(firstFailureStock)
+                           .arg(finalStock)
+                           .arg(failureCount)
+                           .arg(actionZh.isEmpty() ? QStringLiteral("无") : actionZh);
     } else if (id == QStringLiteral("VT-10")) {
         const bool hasSnapshots = m_currentCaseSnapshots.size() >= 7;
         if (hasSnapshots) {
@@ -540,17 +637,43 @@ void ShortageValidationDialog::evaluateCurrentCase(const ShortageUiSnapshot &sna
                      : QStringLiteral("VT-10 自动判定失败：缺少倒料后失败、库存不回滚或失败计数不增加证据。");
     } else if (id == QStringLiteral("VT-11")) {
         const bool hasSnapshots = m_currentCaseSnapshots.size() >= 7;
+        quint64 orderNo = 0;
+        quint64 taskId = 0;
+        int stationId = 0;
+        QString duplicateActionZh;
         if (hasSnapshots) {
             const ShortageRuntimeState &afterUnload = m_currentCaseSnapshots.at(5).runtime;
+            if (!afterUnload.orders.isEmpty()) {
+                orderNo = afterUnload.orders.first().orderNo;
+                taskId = afterUnload.orders.first().taskId;
+                stationId = afterUnload.orders.first().stationId;
+            }
+            duplicateActionZh = state.criticalReasonZh.contains(QStringLiteral("处理动作=严重锁定且不加库存"))
+                                    ? QStringLiteral("严重锁定且不加库存")
+                                    : state.criticalReasonZh;
+            const bool noAwaitingAutomatic = !hasAwaitingAutomaticOrderForStation(state, stationId);
             passed = stockUnchangedForAllStations(afterUnload, state)
                      && state.criticalLock
                      && !state.criticalReasonZh.isEmpty()
                      && !state.orders.isEmpty()
-                     && state.orders.first().unloadAccounted;
+                     && state.orders.first().unloadAccounted
+                     && orderNo != 0
+                     && taskId != 0
+                     && stationId != 0
+                     && duplicateActionZh == QStringLiteral("严重锁定且不加库存")
+                     && noAwaitingAutomatic;
         }
         evidenceZh = passed
-                     ? QStringLiteral("VT-11 自动判定通过：库存不第二次增加，系统进入严重锁定并停止新自动意图。")
-                     : QStringLiteral("VT-11 自动判定失败：缺少库存幂等或严重锁定证据。");
+                     ? QStringLiteral("VT-11 自动判定通过：补料单号=%1，taskId=%2，工位=%3，重复倒料处理动作=%4；库存不第二次增加，系统进入严重锁定并停止新自动意图。")
+                           .arg(orderNo)
+                           .arg(taskId)
+                           .arg(stationId)
+                           .arg(duplicateActionZh)
+                     : QStringLiteral("VT-11 自动判定失败：补料单号=%1，taskId=%2，工位=%3，重复倒料处理动作=%4；缺少库存幂等、严重锁定或停止新自动意图证据。")
+                           .arg(orderNo)
+                           .arg(taskId)
+                           .arg(stationId)
+                           .arg(duplicateActionZh.isEmpty() ? QStringLiteral("无") : duplicateActionZh);
     } else {
         passed = false;
         evidenceZh = QStringLiteral("%1 自动判定失败：本验证项没有已定义的本地自动判定规则。")
@@ -565,6 +688,70 @@ void ShortageValidationDialog::evaluateCurrentCase(const ShortageUiSnapshot &sna
 bool ShortageValidationDialog::evaluateManualLocalCriteria(const QString &caseId,
                                                            QString *evidenceZh) const
 {
+    if (caseId == QStringLiteral("VT-08")) {
+        bool passed = false;
+        QString evidence = QStringLiteral("VT-08 本地证据失败：缺少倒料前、倒料后或终态快照。");
+        if (m_currentCaseSnapshots.size() >= 7) {
+            const ShortageRuntimeState &beforeUnload = m_currentCaseSnapshots.at(4).runtime;
+            const ShortageRuntimeState &afterUnload = m_currentCaseSnapshots.at(5).runtime;
+            const ShortageRuntimeState &afterSuccess = m_currentCaseSnapshots.at(6).runtime;
+            const ReplenishmentOrder *runningOrder =
+                beforeUnload.orders.isEmpty() ? nullptr : &beforeUnload.orders.first();
+            const int stationId = runningOrder != nullptr ? runningOrder->stationId : 0;
+            const ShortageStationRuntime *beforeStation = stationById(beforeUnload, stationId);
+            const ShortageStationRuntime *afterUnloadStation = stationById(afterUnload, stationId);
+            const ShortageStationRuntime *afterSuccessStation = stationById(afterSuccess, stationId);
+            const ShortageStationConfig *stationConfig =
+                configForStation(m_validationConfiguration, afterSuccess.product, stationId);
+            const qint64 oldStock = beforeStation != nullptr ? beforeStation->stock : 0;
+            const qint64 unloadStock = afterUnloadStation != nullptr ? afterUnloadStation->stock : 0;
+            const qint64 terminalStock = afterSuccessStation != nullptr ? afterSuccessStation->stock : 0;
+            const qint64 boxQuantity = stationConfig != nullptr ? stationConfig->boxQuantity : 0;
+            const bool exactBox = beforeStation != nullptr
+                                  && afterUnloadStation != nullptr
+                                  && stationConfig != nullptr
+                                  && unloadStock == oldStock + boxQuantity
+                                  && stockIncreasedOnlyForStation(beforeUnload,
+                                                                  afterUnload,
+                                                                  stationId);
+            const bool terminalNoRepeat = afterSuccessStation != nullptr
+                                          && terminalStock == unloadStock
+                                          && stockUnchangedForAllStations(afterUnload, afterSuccess);
+            const bool succeeded = afterSuccess.orders.size() == 1
+                                   && afterSuccess.orders.first().stationId == stationId
+                                   && afterSuccess.orders.first().state
+                                          == ReplenishmentOrderState::Succeeded
+                                   && afterSuccess.orders.first().unloadAccounted
+                                   && !afterSuccess.criticalLock;
+            const bool belowMaximum = stationConfig != nullptr
+                                      && afterSuccessStation != nullptr
+                                      && terminalStock < stationConfig->maximumStock;
+            const bool nextBoxVisible = hasAwaitingAutomaticOrderForStation(afterSuccess, stationId);
+
+            passed = exactBox && terminalNoRepeat && succeeded;
+            evidence = passed
+                ? QStringLiteral("VT-08 本地证据通过：工位=%1，补料单号=%2，taskId=%3，原库存=%4，配置箱数=%5，倒料后库存=%6，终态库存=%7；未达最高位=%8，下一箱可见=%9，释放切换=未执行，处理动作=保留人工现场证据。")
+                      .arg(stationId)
+                      .arg(runningOrder != nullptr ? runningOrder->orderNo : 0)
+                      .arg(runningOrder != nullptr ? runningOrder->taskId : 0)
+                      .arg(oldStock)
+                      .arg(boxQuantity)
+                      .arg(unloadStock)
+                      .arg(terminalStock)
+                      .arg(yesNo(belowMaximum))
+                      .arg(yesNo(nextBoxVisible))
+                : QStringLiteral("VT-08 本地证据失败：工位=%1，原库存=%2，配置箱数=%3，倒料后库存=%4，终态库存=%5；未证明准确一箱、终态不重复加箱或成功终态。")
+                      .arg(stationId)
+                      .arg(oldStock)
+                      .arg(boxQuantity)
+                      .arg(unloadStock)
+                      .arg(terminalStock);
+        }
+        if (evidenceZh != nullptr)
+            *evidenceZh = evidence;
+        return passed;
+    }
+
     if (caseId != QStringLiteral("VT-15"))
         return true;
 
@@ -777,7 +964,7 @@ QList<ShortageValidationCase> ShortageValidationDialog::createValidationCases()
                                 ShortageValidationAction::MaterialUnloaded),
                            step(QStringLiteral("模拟任务成功。"), QStringLiteral("终态不重复加箱。"),
                                 ShortageValidationAction::TaskSucceeded),
-                       }, criteria08, false),
+                       }, criteria08, true),
         validationCase(QStringLiteral("VT-09"), QStringLiteral("倒料前失败保护"), {
                            step(QStringLiteral("清空、0 建账并提交首样本。"), QStringLiteral("形成待派单。"),
                                 ShortageValidationAction::ClearTestState),

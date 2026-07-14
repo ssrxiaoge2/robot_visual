@@ -99,6 +99,7 @@ private:
 
     ShortageTestController *m_testController = nullptr; ///< 非拥有；为空时只允许浏览步骤。
     QList<ShortageValidationCase> m_cases;              ///< Dialog 拥有的固定验证定义。
+    ShortageConfiguration m_validationConfiguration;    ///< 从测试控制器复制的只读配置，用于自动判定配置用量。
     ShortageUiSnapshot m_latestSnapshot;                ///< 最近一次控制器信号快照，保留增量证据。
     QList<ShortageUiSnapshot> m_currentCaseSnapshots;   ///< 当前项逐步快照，用于自动判定前后对比。
     QStringList m_currentCaseControllerLogs;            ///< 当前项控制器中文日志，用于本地证据核对。
