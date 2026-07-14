@@ -71,7 +71,8 @@ private:
     /// 构造无副作用的测试快照；result 只携带本次产量增量，不修改 Engine。
     ShortageUiSnapshot buildSnapshot(const ShortageEngineResult &result = {}) const;
     void emitSnapshot(const ShortageEngineResult &result = {});
-    void recordTerminal(TaskFactKind kind, const QString &reasonZh);
+    /// 记录测试任务终态；false 表示没有已接受任务，调用方必须停止后续重评估动作。
+    bool recordTerminal(TaskFactKind kind, const QString &reasonZh);
     TaskFact currentTaskFact(TaskFactKind kind, const QString &reasonZh) const;
     std::optional<ShortageDispatchRequest> currentRequestOrReject(const QString &actionZh);
     QString summaryLine1() const;

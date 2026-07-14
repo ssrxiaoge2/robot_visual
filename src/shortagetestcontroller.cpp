@@ -189,7 +189,8 @@ void ShortageTestController::simulateDispatchRejected()
 
 void ShortageTestController::simulateFailureBeforeUnload()
 {
-    recordTerminal(TaskFactKind::Failed, QStringLiteral("测试倒料前失败"));
+    if (!recordTerminal(TaskFactKind::Failed, QStringLiteral("测试倒料前失败")))
+        return;
     // 倒料前失败释放占用后，测试控制器显式用最后样本重评估，驱动拒收/重试闭环。
     if (!m_engine->state().criticalLock)
         applyManualSample(m_lastProduct, m_lastMode, m_lastActualQty);
@@ -253,6 +254,9 @@ void ShortageTestController::reloadTestState()
                                       .arg(loaded.state.waitingStationIds.size())
                                       .arg(loaded.state.criticalReasonZh);
         emit snapshotChanged(snapshot);
+        // 修改前该异常恢复分支只发快照；现场两个测试窗口会保留旧按钮状态。
+        // 修改后仍不安装不安全状态，但同步发出门禁刷新，保持控制器二次校验权威。
+        emit actionAvailabilityChanged(actionAvailability());
         return;
     }
     applyEngineResult(result);
@@ -347,16 +351,17 @@ ShortageUiSnapshot ShortageTestController::buildSnapshot(const ShortageEngineRes
     return snapshot;
 }
 
-void ShortageTestController::recordTerminal(TaskFactKind kind, const QString &reasonZh)
+bool ShortageTestController::recordTerminal(TaskFactKind kind, const QString &reasonZh)
 {
     if (m_currentOrderNo == 0 || m_currentTaskId == 0) {
         rejectOperation(QStringLiteral("模拟终态失败：没有已接受的测试任务"));
-        return;
+        return false;
     }
     applyEngineResult(m_engine->recordTaskTerminal(currentTaskFact(kind, reasonZh)));
     m_currentOrderNo = 0;
     m_currentTaskId = 0;
     m_currentStationId = 0;
+    return true;
 }
 
 TaskFact ShortageTestController::currentTaskFact(TaskFactKind kind, const QString &reasonZh) const

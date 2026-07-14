@@ -126,6 +126,8 @@ private slots:
     void firstStableSampleCreatesVisibleDispatchOrder();  ///< 0 建账后的首样本必须产生待派补料单。
     void actionAvailabilityFollowsOrderLifecycle();       ///< 按钮能力必须随待派、运行、倒料和终态变化。
     void simulatedRestartUsesOnlyTestNamespace();         ///< 模拟重启不得改变 production-* 文件。
+    void failureBeforeUnloadWithoutTaskHasNoSideEffects();///< 非法公开动作必须只拒绝，不重评估样本。
+    void unsafeReloadStillEmitsActionAvailability();      ///< 不安全恢复快照也必须同步刷新按钮门禁。
     void failedFieldSamplingGuardKeepsControllerInactive();
     void inactiveContextConfirmationDoesNotReachEngine();
     void testSaveClearReloadKeepsProductionHash();            // IN-04。
@@ -376,6 +378,59 @@ void ShortageTestControllerTest::simulatedRestartUsesOnlyTestNamespace()
     QCOMPARE(productionHash(directory.path()), before);
     QCOMPARE(controller.stateNamespaceForTest(), ShortageStateNamespace::StandaloneTest);
     QVERIFY(!controller.fieldSamplingActive());
+}
+
+void ShortageTestControllerTest::failureBeforeUnloadWithoutTaskHasNoSideEffects()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    ShortageTestController controller(
+        testConfiguration(), directory.path(), nullptr,
+        [] { return ShortageOperationResult{true, QStringLiteral("允许")}; });
+    QSignalSpy rejectedSpy(&controller, &ShortageTestController::operationRejected);
+
+    controller.initializeZeroAfterConfirmation();
+    const ShortageUiSnapshot before = controller.currentSnapshot();
+
+    controller.simulateFailureBeforeUnload();
+
+    QCOMPARE(rejectedSpy.count(), 1);
+    const ShortageUiSnapshot after = controller.currentSnapshot();
+    QCOMPARE(after.runtime.initialized, before.runtime.initialized);
+    QCOMPARE(after.runtime.actualQty.hasBaseline, before.runtime.actualQty.hasBaseline);
+    QCOMPARE(after.runtime.orders.size(), before.runtime.orders.size());
+    QCOMPARE(after.runtime.activeStationId, before.runtime.activeStationId);
+}
+
+void ShortageTestControllerTest::unsafeReloadStillEmitsActionAvailability()
+{
+    QTemporaryDir directory;
+    QVERIFY(directory.isValid());
+    {
+        ShortageTestController controller(
+            testConfiguration(), directory.path(), nullptr,
+            [] { return ShortageOperationResult{true, QStringLiteral("允许")}; });
+        controller.initializeZeroAfterConfirmation();
+        controller.applyManualSample(ProductModel::Model88, ProductionMode::LeftRight, 100);
+        controller.simulateDispatchAccepted();
+        controller.saveTestState();
+    }
+
+    ShortageTestController restarted(
+        testConfiguration(), directory.path(), nullptr,
+        [] { return ShortageOperationResult{true, QStringLiteral("允许")}; });
+    QSignalSpy snapshotSpy(&restarted, &ShortageTestController::snapshotChanged);
+    QSignalSpy availabilitySpy(&restarted, &ShortageTestController::actionAvailabilityChanged);
+
+    restarted.reloadTestState();
+
+    QVERIFY(!snapshotSpy.isEmpty());
+    QVERIFY(!availabilitySpy.isEmpty());
+    const ShortageUiSnapshot snapshot =
+        qvariant_cast<ShortageUiSnapshot>(snapshotSpy.last().at(0));
+    QVERIFY(snapshot.summaryLine1Zh.contains(QStringLiteral("待维护确认")));
+    QVERIFY(!restarted.actionAvailability().canAcceptDispatch);
+    QVERIFY(!restarted.actionAvailability().canRecordUnload);
 }
 
 void ShortageTestControllerTest::failedFieldSamplingGuardKeepsControllerInactive()

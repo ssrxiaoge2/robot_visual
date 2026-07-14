@@ -1,89 +1,31 @@
-# Task 5 Report
+# Task 5 Report: 全量回归、现场验证清单和用户文档同步
+
+## Status
+
+- Completed.
 
 ## Changes
 
-- 新增 `ReplenishmentPlanner`，实现低位触发、高位停止、首次低位时间 + 工位号稳定排序、活动工位非抢占、拒收重试同一补料单号、倒料前失败暂停和任务事实校验。
-- 新增 `ShortageEngine` 统一事务门面，Engine 唯一持有运行态；Planner/Ledger 只操作事务副本，通过 Engine 发布。
-- 新增 Task 5 领域类型：`ShortageDispatchRequest`、`TaskFactKind`、`TaskFact`、`ShortageEngineResult`、`ShortageUiSnapshot`、`PlannerApplyResult`。
-- Engine 恢复安装增加补料单、等待表排序、等待工位低位状态、序列号等校验；`Queued`/`Running`/`Unloaded` 恢复进入维护锁定。
-- Engine 对建账、人工建单、派单结果、任务开始、倒料、终态、维护修正等运行态变化写入 `ShortageStateStore`；关键持久化失败时保留内存事实并设置 `criticalLock`。
-- 实现旧任务未排空时的换型保护：采样上下文变化且存在 FIFO 相关未终态任务时只保存 `pendingActualQty`，`activatePendingContextIfDrained(true)` 后再按新上下文扣减并重评估。
-- 新增 `replenishment_planner_tests`，覆盖 PL-01～PL-06、TK-04～TK-08、PS-11、PS-15、ER-03 相关行为。
-
-## TDD / Review Notes
-
-- RED 1：新增测试后目标构建失败，缺少 `replenishmentplanner.h`。
-- GREEN 1：实现 Planner/Engine 后 focused test 通过。
-- Review 后新增 RED：派单接受未持久化、旧任务未排空时换型被提前应用。
-- GREEN 2：补齐关键状态持久化、恢复校验和 pending context 事务后 focused test 通过。
+- 修复 `live_shortage_coordinator_tests` 夹具：独立测试控制器默认手工源后，测试共享现场采样互斥场景必须先显式切到现场源。
+- `README.md` 增加缺料完整逻辑测试、验证向导、窗口最小化/最大化和正式 FIFO/硬件隔离说明。
+- `changelog/CHANGELOG.md` 增加 2026-07-14 缺料测试修复与独立验证控制台记录。
+- `docs/superpowers/specs/2026-07-14-shortage-test-bugfix.md` 增加 VT-01～VT-15 现场验证结果表，所有结论初始为“未执行”。
 
 ## Verification
 
-- `cmake --build build-shortage --target replenishment_planner_tests -j2`：通过。
-- `ctest --test-dir build-shortage -R '^replenishment_planner_tests$' --output-on-failure`：1/1 通过。
-- `ctest --test-dir build-shortage --output-on-failure`：12/12 通过。
+- `/opt/Qt/qt6.8/6.8.3/gcc_64/bin/qt-cmake -S . -B build-shortage-validation -DBUILD_TESTING=ON -DCMAKE_BUILD_TYPE=Debug`：通过。
+- `cmake --build build-shortage-validation -j2`：通过，`wh-robot-visual` 和全部测试目标构建成功。
+- 首轮全量 CTest：17/18 通过，`live_shortage_coordinator_tests` 因测试夹具未按新输入源门禁切到现场源失败。
+- 修复后聚焦验证：`live_shortage_coordinator_tests` 通过。
+- 修复后全量验证：`QT_QPA_PLATFORM=offscreen ctest --test-dir build-shortage-validation --output-on-failure`：18/18 通过。
+- 边界扫描：
+  - `src/shortagevalidationdialog.h/.cpp` 未命中 `ShortageEngine|LineManager|TaskQueue|AgvController|HuayanScheduler|CustomSysScheduler`。
+  - 缺料窗口打开路径未新增 `exec()`；扫描到的 `src/mainwindow.cpp:1835 dlg->exec()` 是既有 `HandEyeDialog` 路径。
+  - 关键枚举、结构、成员和验证类型注释命中。
 - `git diff --check`：无输出。
-
-## Files Changed
-
-- `CMakeLists.txt`
-- `src/shortagetypes.h`
-- `src/replenishmentplanner.h`
-- `src/replenishmentplanner.cpp`
-- `src/shortageengine.h`
-- `src/shortageengine.cpp`
-- `tests/CMakeLists.txt`
-- `tests/test_replenishment_planner.cpp`
-- `.superpowers/sdd/task-5-report.md`
+- `git diff -- test-state.json test-state.backup.json test-events.jsonl`：无输出。
 
 ## Concerns
 
-- `recordDispatchResult()` 接口没有事件时间参数，目前持久化审计时间使用 `QDateTime::currentDateTimeUtc()`；后续接入 LineManager 时可考虑传入调度接受时间以便全链路时间一致。
-- 生产协调器接入时仍需在调用 `applyMaintenanceCorrection()` 前复核全部门禁；本任务仅提供 Engine 侧事务入口。
-
-## Review Fix 2026-07-14
-
-- 修复 PS-15 恢复安装校验：`activeStationId` 现在必须为 0 或存在于 12 工位状态中，并与等待表、暂停、低位/最高位和严重锁定语义一致；等待表校验改为双向校验，低位且未暂停、启用自动补料的工位必须在等待表中，等待表条目也必须对应有效工位与 `firstLowAtUtc`。
-- 修复 TK-05 严重任务事实处理：任务开始、倒料、终态的未知/错 taskId/错工位等关键事实在安装内存 `criticalLock` 后，会通过 `saveCritical()` 持久化锁定状态和审计，且不修改补料单或库存事实。
-- 修复 Planner `changed` 判定：`reevaluate()` 现在把工位运行元数据纳入变化比较，包含 `firstLowAtUtc` 等 planner-only 元数据。
-- 新增回归测试：
-  - `restoreRejectsInvalidActiveAndWaitingSemantics()` 覆盖非法活动工位和低位工位缺失等待表记录。
-  - `invalidTaskFactsPersistCriticalLock()` 覆盖非法任务终态事实落盘严重锁定且不改变补料单/库存。
-
-## Review Fix Verification 2026-07-14
-
-- RED：新增回归测试后，focused test 失败在 `restoreRejectsInvalidActiveAndWaitingSemantics()`（非法活动工位被接受）和 `invalidTaskFactsPersistCriticalLock()`（落盘状态未包含 `criticalLock`）。
-- `cmake --build build-shortage --target replenishment_planner_tests -j2`：通过。
-- `ctest --test-dir build-shortage -R '^replenishment_planner_tests$' --output-on-failure`：1/1 通过。
-- `ctest --test-dir build-shortage --output-on-failure`：11/12 通过；非本任务范围的 `shortage_sample_coordinator_tests` 持续失败于 `protocolReplyKeepsRoundIdAndAddressRange()` 的 `plcSpy.wait(2000)`。
-- `ctest --test-dir build-shortage -R '^shortage_sample_coordinator_tests$' --output-on-failure`：复现同一失败，确认不是本次 focused planner 测试失败。
-
-## Review Fix 2 2026-07-14
-
-- 修复 PS-15 恢复安装校验：恢复时按工位统计 `AwaitingDispatch`、`Queued`、`Running` 这类尚未倒料且仍代表一箱占用的非终态补料单，同一工位出现第二个即拒绝恢复并进入严重锁定。
-- 保留安全历史：`Succeeded`、`FailedBeforeUnload`、`FailedAfterUnload`、`Canceled` 等终态/历史补料单不计入未倒料占用，避免误拒绝可保留审计历史。
-- 新增回归测试 `restoreRejectsMultipleOutstandingOrdersPerStation()`：覆盖同工位两个 `AwaitingDispatch` 恢复必须拒绝，以及同工位一个 `AwaitingDispatch` + 一个 `Succeeded` 历史单可以安装。
-
-## Review Fix 2 Verification 2026-07-14
-
-- RED：新增回归测试后，focused test 失败在 `restoreRejectsMultipleOutstandingOrdersPerStation()` 的 `!duplicateResult.ok`，证明恢复校验此前错误接受同工位两个 `AwaitingDispatch`。
-- `cmake --build build-shortage --target replenishment_planner_tests -j2`：通过。
-- `ctest --test-dir build-shortage -R '^replenishment_planner_tests$' --output-on-failure`：1/1 通过。
-- `ctest --test-dir build-shortage --output-on-failure`：11/12 通过；非本任务范围的 `shortage_sample_coordinator_tests` 仍失败于 `protocolReplyKeepsRoundIdAndAddressRange()` 的 `plcSpy.wait(2000)`。
-- `git diff --check`：无输出。
-
-## Final Review Fix 2026-07-14
-
-- 修复 TK-05 来源一致性校验：`factMatchesOrder()` 现在同时比较 `TaskFact::origin` 和 `ReplenishmentOrder::origin`，来源不一致与错补料单号、错 taskId、错工位一样走严重任务事实拒绝路径。
-- 来源不一致仍通过 Engine 的 invalid-fact 路径 `saveCritical()` 落盘 `criticalLock` 和审计；拒绝时不推进补料单状态，也不修改库存。
-- 修复 PS-15 防御性恢复安装：`installRestoredState()` 对 `ok=true` 但 `source=None` 的构造结果显式拒绝并进入恢复维护锁定，避免发布无来源恢复态。
-- 新增回归测试 `sourceMismatchTaskFactsPersistCriticalLock()`：覆盖人工补料单收到默认自动事实、自动补料单收到人工事实，均必须拒绝、落盘锁定并保持补料单/库存不变。
-- 新增回归测试 `restoreRejectsOkResultWithoutSource()`：覆盖 `ShortageStateLoadResult{ok=true, source=None}` 必须拒绝。
-- 调整既有 `duplicateUnloadLocksAndDoesNotAddSecondBox()` 测试夹具，使人工补料单的正常开始/倒料事实携带人工来源，继续专注覆盖重复倒料。
-
-## Final Review Fix Verification 2026-07-14
-
-- RED：新增回归测试后，focused test 失败在 `sourceMismatchTaskFactsPersistCriticalLock()` 的 `!result.ok` 和 `restoreRejectsOkResultWithoutSource()` 的 `!result.ok`，证明此前错误接受来源不一致事实和无来源恢复结果。
-- GREEN：补充来源比较和恢复来源校验后，`cmake --build build-shortage --target replenishment_planner_tests --parallel && ctest --test-dir build-shortage -R '^replenishment_planner_tests$' --output-on-failure`：1/1 通过。
-- `git diff --check`：无输出。
-- `ctest --test-dir build-shortage --output-on-failure`：12/12 通过。
+- 真实通信、窗口人工切换和现场设备未动作仍需现场人工填写 VT-01～VT-15 结果表确认。
+- 未跟踪现场文件 `test-events.jsonl`、`test-state.backup.json`、`test-state.json` 保持未暂存、未修改、未删除。
