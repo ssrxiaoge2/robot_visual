@@ -27,6 +27,7 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
+#include <QStringList>
 #include <QtMath>
 
 // ── 默认手眼变换矩阵（T_tool_cam，行主序）──────────────────────
@@ -173,13 +174,162 @@ void VisionHttpClient::checkStatus()
 
 // ── 推理结果解析 ─────────────────────────────────────────────
 
-// 目标到图像中心的平面距离平方（mm²），用于同层时择近
-static double centerDistSq(const QJsonObject &obj)
+namespace {
+
+bool readFiniteNumber(const QJsonValue &value, double *result)
 {
-    const QJsonObject off = obj.value("offset_mm").toObject();
-    const double x = off.value("x").toDouble();
-    const double y = off.value("y").toDouble();
-    return x * x + y * y;
+    if (!result || !value.isDouble())
+        return false;
+    const double number = value.toDouble();
+    if (!qIsFinite(number))
+        return false;
+    *result = number;
+    return true;
+}
+
+double centerDistSq(const VisionHttpClient::TargetCandidate &candidate)
+{
+    return candidate.x * candidate.x + candidate.y * candidate.y;
+}
+
+QString selectionReasonText(VisionHttpClient::TargetSelectionReason reason)
+{
+    using Reason = VisionHttpClient::TargetSelectionReason;
+    switch (reason) {
+    case Reason::HighestLayer:
+        return QStringLiteral("最高层");
+    case Reason::SameLayerNearestCenter:
+        return QStringLiteral("同层最近中心");
+    case Reason::StableSourceIndex:
+        return QStringLiteral("原始下标稳定兜底");
+    case Reason::None:
+        return QStringLiteral("无目标");
+    }
+    return QStringLiteral("无目标");
+}
+
+} // namespace
+
+VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(const QJsonArray &objects)
+{
+    TargetSelection selection;
+    QList<int> insideIndexes;
+
+    for (int sourceIndex = 0; sourceIndex < objects.size(); ++sourceIndex) {
+        TargetCandidate candidate;
+        candidate.sourceIndex = sourceIndex;
+        const QJsonValue entry = objects.at(sourceIndex);
+        if (!entry.isObject()) {
+            candidate.rejectionReason = QStringLiteral("目标不是JSON对象");
+            selection.candidates.append(candidate);
+            continue;
+        }
+
+        const QJsonObject object = entry.toObject();
+        const QJsonValue offsetValue = object.value(QStringLiteral("offset_mm"));
+        if (!offsetValue.isObject()) {
+            candidate.rejectionReason = QStringLiteral("offset_mm不是对象");
+            selection.candidates.append(candidate);
+            continue;
+        }
+
+        const QJsonObject offset = offsetValue.toObject();
+        if (!readFiniteNumber(offset.value(QStringLiteral("x")), &candidate.x)
+            || !readFiniteNumber(offset.value(QStringLiteral("y")), &candidate.y)
+            || !readFiniteNumber(object.value(QStringLiteral("depth_compensated")), &candidate.depth)
+            || !readFiniteNumber(object.value(QStringLiteral("angle")), &candidate.angle)
+            || !readFiniteNumber(object.value(QStringLiteral("confidence")), &candidate.confidence)) {
+            candidate.rejectionReason = QStringLiteral("字段缺失或不是有限数值");
+            selection.candidates.append(candidate);
+            continue;
+        }
+
+        candidate.valid = true;
+        candidate.insideStationRoi = qAbs(candidate.x) <= VISION_STATION_ROI_HALF_X_MM
+            && qAbs(candidate.y) <= VISION_STATION_ROI_HALF_Y_MM;
+        selection.candidates.append(candidate);
+        if (candidate.insideStationRoi)
+            insideIndexes.append(selection.candidates.size() - 1);
+    }
+
+    if (insideIndexes.isEmpty())
+        return selection;
+
+    double highestDepth = selection.candidates.at(insideIndexes.first()).depth;
+    for (int candidateIndex : insideIndexes)
+        highestDepth = qMin(highestDepth, selection.candidates.at(candidateIndex).depth);
+
+    QList<int> sameLayerIndexes;
+    for (int candidateIndex : insideIndexes) {
+        if (qAbs(selection.candidates.at(candidateIndex).depth - highestDepth)
+            <= kSameLayerTolMm) {
+            sameLayerIndexes.append(candidateIndex);
+        }
+    }
+
+    int bestIndex = sameLayerIndexes.first();
+    bool usedStableTieBreak = false;
+    for (int candidateIndex : sameLayerIndexes) {
+        const double candidateDistance = centerDistSq(selection.candidates.at(candidateIndex));
+        const double bestDistance = centerDistSq(selection.candidates.at(bestIndex));
+        if (candidateDistance < bestDistance) {
+            bestIndex = candidateIndex;
+            usedStableTieBreak = false;
+        } else if (qFuzzyCompare(candidateDistance + 1.0, bestDistance + 1.0)
+                   && selection.candidates.at(candidateIndex).sourceIndex
+                       < selection.candidates.at(bestIndex).sourceIndex) {
+            bestIndex = candidateIndex;
+            usedStableTieBreak = true;
+        } else if (candidateIndex != bestIndex
+                   && qFuzzyCompare(candidateDistance + 1.0, bestDistance + 1.0)) {
+            usedStableTieBreak = true;
+        }
+    }
+
+    selection.selectedCandidateIndex = bestIndex;
+    if (usedStableTieBreak) {
+        selection.reason = TargetSelectionReason::StableSourceIndex;
+    } else if (sameLayerIndexes.size() > 1) {
+        selection.reason = TargetSelectionReason::SameLayerNearestCenter;
+    } else {
+        selection.reason = TargetSelectionReason::HighestLayer;
+    }
+    return selection;
+}
+
+QString VisionHttpClient::formatTargetSelectionLog(const TargetSelection &selection)
+{
+    QStringList candidateParts;
+    int insideCount = 0;
+    for (const TargetCandidate &candidate : selection.candidates) {
+        if (!candidate.valid) {
+            candidateParts.append(QStringLiteral("#%1 非法(%2)")
+                                      .arg(candidate.sourceIndex)
+                                      .arg(candidate.rejectionReason));
+            continue;
+        }
+        if (candidate.insideStationRoi)
+            ++insideCount;
+        candidateParts.append(QStringLiteral("#%1 x=%2 y=%3 z=%4 %5")
+                                  .arg(candidate.sourceIndex)
+                                  .arg(candidate.x, 0, 'f', 1)
+                                  .arg(candidate.y, 0, 'f', 1)
+                                  .arg(candidate.depth, 0, 'f', 1)
+                                  .arg(candidate.insideStationRoi
+                                           ? QStringLiteral("范围内")
+                                           : QStringLiteral("范围外")));
+    }
+
+    const QString selectedText = selection.hasTarget()
+        ? QStringLiteral("#%1")
+              .arg(selection.candidates.at(selection.selectedCandidateIndex).sourceIndex)
+        : QStringLiteral("无");
+    return QStringLiteral("[视觉选择] 候选数=%1 范围内=%2 [%3] 选中=%4 原因=%5")
+        .arg(selection.candidates.size())
+        .arg(insideCount)
+        .arg(candidateParts.join(QStringLiteral("; ")))
+        .arg(selectedText)
+        .arg(selectionReasonText(selection.reason));
 }
 
 /**
@@ -196,8 +346,8 @@ static double centerDistSq(const QJsonObject &obj)
  *   }]
  * }
  *
- * 多目标抓取优先级：深度最小（离相机最近/堆叠最上层）优先；深度差在
- * kSameLayerTolMm 内视为并排平放同层，改取离图像中心最近者。
+ * 多目标抓取优先级：先过滤当前工位 ROI，再按最高层、同层最近中心、
+ * 原始下标稳定兜底的确定性规则选择。
  */
 void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
 {
@@ -212,44 +362,22 @@ void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
         return;
     }
 
-    const QJsonObject root = doc.object();
-    const int objCount = root.value("object_count").toInt(0);
-
-    if (objCount == 0) {
-        emit noObjectDetected(); // 未检测到目标
-        return;
-    }
-
-    const QJsonArray objects = root.value("objects").toArray();
-    if (objects.isEmpty()) {
+    const QJsonArray objects = doc.object().value(QStringLiteral("objects")).toArray();
+    const TargetSelection selection = selectTarget(objects);
+    emit selectionLogMessage(formatTargetSelectionLog(selection));
+    if (!selection.hasTarget()) {
         emit noObjectDetected();
         return;
     }
 
-    // 线性挑选最优抓取目标：深度小的优先，同层（深度差 < 容差）时离中心近的优先
-    QJsonObject obj = objects.first().toObject();
-    for (int i = 1; i < objects.size(); ++i) {
-        const QJsonObject cand = objects.at(i).toObject();
-        const double dz = cand.value("depth_compensated").toDouble()
-                        - obj.value("depth_compensated").toDouble();
-        const bool prefer = (qAbs(dz) >= kSameLayerTolMm)
-                          ? dz < 0.0                                  // 不同层：候选更浅则优先
-                          : centerDistSq(cand) < centerDistSq(obj);   // 同层：候选离中心更近则优先
-        if (prefer)
-            obj = cand;
-    }
-
-    const QJsonObject offsetMm = obj.value("offset_mm").toObject();
-
-    const float cx    = static_cast<float>(offsetMm.value("x").toDouble());  // X 偏移（mm）
-    const float cy    = static_cast<float>(offsetMm.value("y").toDouble());  // Y 偏移（mm）
-    const float cz    = static_cast<float>(obj.value("depth_compensated").toDouble()); // Z 深度（mm）
-    const float angle = static_cast<float>(obj.value("angle").toDouble());   // 旋转角（度）
-    const float conf  = static_cast<float>(obj.value("confidence").toDouble());
-
-    // 发出日志（供上层转发到 UI）
-    // 注意：此信号没有 log，由调用方记录
-    Q_UNUSED(conf) // 当前仅记录 confidence，不过滤
+    const TargetCandidate &candidate =
+        selection.candidates.at(selection.selectedCandidateIndex);
+    const float cx = static_cast<float>(candidate.x);          // 原始视觉 X 偏移，单位 mm。
+    const float cy = static_cast<float>(candidate.y);          // 原始视觉 Y 偏移，单位 mm。
+    const float cz = static_cast<float>(candidate.depth);      // 补偿深度，单位 mm。
+    const float angle = static_cast<float>(candidate.angle);   // 箱体角度，单位 deg。
+    const float conf = static_cast<float>(candidate.confidence); // 仅记录，不新增置信度阈值。
+    Q_UNUSED(conf)
 
     const RawCoords raw = transformToMm(cx, cy, cz, angle);
     emit rawCoordinatesReady(raw.x, raw.y, raw.z, raw.rz);

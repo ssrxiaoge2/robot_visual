@@ -134,6 +134,8 @@ DeviceManager::DeviceManager(QObject *parent)
     });
 
     m_visionClient = new VisionHttpClient(this);
+    connect(m_visionClient, &VisionHttpClient::selectionLogMessage,
+            this, &DeviceManager::logMessage);
     connect(m_visionClient, &VisionHttpClient::statusChanged,
             this, [this](bool ok, const QString &msg) {
         emit logMessage(QString("[视觉] %1").arg(msg));
@@ -232,6 +234,16 @@ DeviceManager::DeviceManager(QObject *parent)
             this, &DeviceManager::dispatchAgv);
     // 注入工位→站点解析器：到达判定须与 AGV 监控回报的物理站点号同空间比较
     m_lineOrch->setStationResolver([this](int ws) { return resolveStation(ws); });
+    // 新旧两个顶层流程共用 AGV/机械臂；这里仅注入只读互斥判定，不转移对象所有权。
+    m_lineManager->setExternalWorkflowRunning([this]() {
+        return m_lineOrch && m_lineOrch->isRunning();
+    });
+    // 新 LineManager 在 Running/ReturningHome/Error 或保留当前任务时，都视为占用整线资源。
+    m_lineOrch->setExternalWorkflowRunning([this]() {
+        return m_lineManager
+            && (m_lineManager->state() != LineSystemState::Idle
+                || m_lineManager->currentTask().taskId != 0);
+    });
     connect(m_lineOrch, &LineOrchestrator::lineLog,
             this, &DeviceManager::logMessage);
     connect(m_lineOrch, &LineOrchestrator::lineError, this, [this](const QString &msg) {
@@ -263,6 +275,49 @@ DeviceManager::~DeviceManager()
     shutdownScanThread(m_nscanTestThread.data(),
                        boundedScanWaitMs(m_nscanTestOptions),
                        "N-ScanHub test thread did not finish before shutdown timeout");
+}
+
+bool DeviceManager::startStandaloneStageOne(int stationId)
+{
+    const StationTaskConfig *config = stationConfig(stationId);
+    if (!config) {
+        emit logMessage(QStringLiteral("[华沿测试] 工位号无效或配置缺失：%1").arg(stationId));
+        return false;
+    }
+    if (!m_huayanScheduler || !m_huayanScheduler->isConnected()) {
+        emit logMessage(QStringLiteral("[华沿测试] 机械臂未连接，拒绝启动工位%1阶段一").arg(stationId));
+        return false;
+    }
+    if (m_lineManager
+        && (m_lineManager->state() != LineSystemState::Idle
+            || m_lineManager->currentTask().taskId != 0)) {
+        emit logMessage(QStringLiteral("[华沿测试] 总调度未完全空闲，拒绝启动工位%1阶段一").arg(stationId));
+        return false;
+    }
+    if (m_lineOrch && m_lineOrch->isRunning()) {
+        emit logMessage(QStringLiteral("[华沿测试] 兼容整线流程仍在运行，拒绝单独测试"));
+        return false;
+    }
+    if (m_huayanScheduler->isBusy()) {
+        emit logMessage(QStringLiteral("[华沿测试] 机械臂已有动作运行，拒绝并发启动"));
+        return false;
+    }
+
+    HuayanScheduler::StationArmFunctions stationFuncs;
+    stationFuncs.captureFunc = config->captureFunc;
+    stationFuncs.afterGripMode = config->afterGripMode;
+    stationFuncs.afterGripFunc = config->afterGripFunc;
+    stationFuncs.grabZClearance = config->grabZClearance;
+    stationFuncs.unloadPointFunc = config->unloadPointFunc;
+    stationFuncs.unloadFunc = config->unloadFunc;
+    m_huayanScheduler->setStationFunctions(stationFuncs);
+    m_huayanScheduler->setPreGripScanEnabled(false);
+
+    emit logMessage(QStringLiteral("[华沿测试] 工位%1阶段一配置已隔离注入：capture=%2，扫码=关闭")
+                        .arg(stationId)
+                        .arg(config->captureFunc));
+    m_huayanScheduler->startStageOne();
+    return true;
 }
 
 void DeviceManager::applyConfig()

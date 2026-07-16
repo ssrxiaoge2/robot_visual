@@ -231,6 +231,7 @@ void TaskExecutor::onAgvMonitor(const AgvMonitorData &data)
         && data.navStation == m_expectedLm
         && data.curStation == m_expectedLm) {
         m_agvTimeout->stop();
+        m_agvNavigationElapsed.invalidate();
         emit logMessage(prefix(QStringLiteral("AGV"))
                         + QStringLiteral(" 已到达 LM%1").arg(m_expectedLm));
 
@@ -447,14 +448,19 @@ void TaskExecutor::onAgvTimeout()
         return;
     }
 
-    raiseSystemError(QStringLiteral("AGV 导航到 LM%1 超时（%2 ms）")
+    const qint64 waitedMs = m_agvNavigationElapsed.isValid()
+        ? m_agvNavigationElapsed.elapsed()
+        : kAgvTimeoutMs;
+    raiseSystemError(QStringLiteral("AGV 导航到 LM%1 超时：已等待 %2 ms（上限 %3 ms）")
                          .arg(m_expectedLm)
+                         .arg(waitedMs)
                          .arg(kAgvTimeoutMs));
 }
 
 void TaskExecutor::resetRuntimeState()
 {
     m_agvTimeout->stop();
+    m_agvNavigationElapsed.invalidate();
     m_state = ExecState::Idle;
     m_stationCfg = nullptr;
     m_palletCfg = nullptr;
@@ -681,6 +687,7 @@ void TaskExecutor::startAgvStep(ExecState state, int lm, const QString &statusTe
     setTaskRunning(taskStepForState(state), statusText);
     emit logMessage(prefix(QStringLiteral("AGV"))
                     + QStringLiteral(" 请求导航到 LM%1").arg(lm));
+    m_agvNavigationElapsed.start();
     m_agvTimeout->start(kAgvTimeoutMs);
     emit agvDispatchRequested(lm);
 }

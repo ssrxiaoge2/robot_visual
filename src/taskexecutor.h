@@ -1,6 +1,7 @@
 #ifndef TASKEXECUTOR_H
 #define TASKEXECUTOR_H
 
+#include <QElapsedTimer>
 #include <QObject>
 
 #include "agvcontroller.h"
@@ -95,7 +96,7 @@ private:
         CleanupStow              ///< 任务级失败后的安全恢复；失败则升级系统 ERROR。
     };
 
-    static constexpr int kAgvTimeoutMs = 120000; ///< 每个 AGV 导航步骤上限，单位 ms。
+    static constexpr int kAgvTimeoutMs = 300000; ///< 每个 AGV 导航步骤上限，单位 ms（5 分钟）。
     /**
      * @brief 是否允许扫码首轮失败后执行工具 Rz 旋转 180° 的补救动作。
      *
@@ -123,7 +124,7 @@ private:
     bool resolveTaskConfigs();
     /// 进入非 AGV 状态并立即启动该状态对应的高层动作。
     void enterState(ExecState state, const QString &statusText);
-    /// 初始化 AGV 到站跟踪、启动 120s 超时并发出数字 LM。
+    /// 初始化 AGV 到站跟踪、启动 5 分钟超时并发出数字 LM。
     void startAgvStep(ExecState state, int lm, const QString &statusText);
     /// 进入 PreGripScan 并发出带默认参数的异步扫码请求。
     void requestScan(const QString &statusText);
@@ -145,6 +146,7 @@ private:
     NScanScheduler *m_scanner = nullptr;  ///< 非拥有指针；保留依赖身份，实际扫码由上层 worker 执行。
     PalletScheduler *m_pallet = nullptr;  ///< 非拥有指针；码垛配置和缓存唯一实例。
     QTimer *m_agvTimeout = nullptr;       ///< 当前一个 AGV 步骤的单次超时计时器。
+    QElapsedTimer m_agvNavigationElapsed; ///< 当前任务导航的单调时钟；仅用于超时诊断，不参与状态推进。
     Task m_task;                          ///< 当前任务的权威运行快照。
     ExecState m_state = ExecState::Idle;  ///< 当前单任务精细状态。
     const StationTaskConfig *m_stationCfg = nullptr;   ///< 指向静态工位配置，任务结束时清空。

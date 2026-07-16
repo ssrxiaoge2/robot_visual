@@ -1,9 +1,11 @@
 #ifndef LINEORCHESTRATOR_H
 #define LINEORCHESTRATOR_H
 
+#include <QElapsedTimer>
 #include <QObject>
 #include <QTimer>
 #include <functional>
+#include <utility>
 #include "agvcontroller.h"   // AgvMonitorData 需完整定义
 
 class HuayanScheduler;
@@ -29,6 +31,9 @@ public:
     /// 工位号→AGV 物理站点号解析器（注入 DeviceManager::resolveStation）。
     /// 派单走工位号，但 AGV 监控回报的是物理站点号，到达判定须先解析为同一空间比较。
     void setStationResolver(std::function<int(int)> resolver) { m_resolveStation = std::move(resolver); }
+
+    /// 注入新 LineManager 是否运行的只读判定；用于拒绝两个顶层调度同时控制 AGV/机械臂。
+    void setExternalWorkflowRunning(std::function<bool()> predicate) { m_externalWorkflowRunning = std::move(predicate); }
 
     bool isRunning() const { return m_state != LineState::Idle; }
 
@@ -77,6 +82,7 @@ private:
     LineState m_state = LineState::Idle;
     AgvMonitorData m_lastMonitor;    // 最近一次 AGV 监控快照（初检读 curStation）
     QTimer *m_agvTimeout = nullptr;  // AGV 单步超时保护
+    QElapsedTimer m_agvElapsed;      ///< 兼容整线当前 AGV 步骤的实际等待计时，仅用于诊断。
 
     int  m_expectedStation = 0;    // 本次 AGV 移动目标站，到达判定校验用
     bool m_agvSeenMoving   = false; // 已观察到 AGV 进入导航，避免旧到达态误判
@@ -87,8 +93,9 @@ private:
     int m_unloadStation = 4;
 
     std::function<int(int)> m_resolveStation; // 工位→物理站点，DeviceManager 注入
+    std::function<bool()> m_externalWorkflowRunning; ///< 新 LineManager 运行判定；只在 start() 入口读取。
 
-    static constexpr int kAgvTimeoutMs = 120000; // AGV 单步 120s 超时
+    static constexpr int kAgvTimeoutMs = 300000; ///< 兼容整线单步 AGV 上限，单位 ms（5 分钟）。
 };
 
 #endif // LINEORCHESTRATOR_H

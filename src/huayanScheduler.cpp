@@ -260,6 +260,14 @@ bool HuayanScheduler::isConnected() const
     return m_connected && HRIF_IsConnected(m_boxID);
 }
 
+bool HuayanScheduler::isBusy() const
+{
+    return m_stage != Stage::None
+        || m_action != Action::None
+        || m_pendingCommand.kind != PendingCommandKind::None
+        || hasActiveRobotCommand();
+}
+
 void HuayanScheduler::setStackingFunction(const QString &funcName,
                                           const QStringList &params)
 {
@@ -1660,19 +1668,52 @@ HuayanScheduler::RobotStateSnapshot HuayanScheduler::readRobotStateSnapshot() co
     int nErrorAxis = 0;
     int nBreaking = 0;
     int nBlendingDone = 0;
-    const int flagsRet = HRIF_ReadRobotFlags(m_boxID, m_rbtID,
-                                             snapshot.movingState,
-                                             nEnableState,
-                                             snapshot.errorState,
-                                             snapshot.errorCode,
-                                             nErrorAxis,
-                                             nBreaking,
-                                             snapshot.pauseState,
-                                             nBlendingDone);
+    snapshot.flagsRet = HRIF_ReadRobotFlags(m_boxID, m_rbtID,
+                                            snapshot.movingState,
+                                            nEnableState,
+                                            snapshot.errorState,
+                                            snapshot.errorCode,
+                                            nErrorAxis,
+                                            nBreaking,
+                                            snapshot.pauseState,
+                                            nBlendingDone);
     string fsmText;
-    const int fsmRet = HRIF_ReadCurFSM(m_boxID, m_rbtID, snapshot.nCurFSM, fsmText);
-    snapshot.strCurFSM = fsmRet == 0 ? QString::fromStdString(fsmText) : QStringLiteral("unknown");
-    snapshot.valid = flagsRet == 0 && fsmRet == 0;
+    snapshot.fsmRet = HRIF_ReadCurFSM(m_boxID, m_rbtID, snapshot.nCurFSM, fsmText);
+    snapshot.strCurFSM = snapshot.fsmRet == 0
+        ? QString::fromStdString(fsmText)
+        : QStringLiteral("未知");
+    snapshot.valid = snapshot.flagsRet == 0 && snapshot.fsmRet == 0;
+    return snapshot;
+}
+
+HuayanScheduler::MotionDiagnosticSnapshot
+HuayanScheduler::readMotionDiagnosticSnapshot(bool readPoseAndJoints,
+                                              bool readAxisErrors) const
+{
+    MotionDiagnosticSnapshot snapshot;
+    snapshot.robotState = readRobotStateSnapshot();
+
+    if (readPoseAndJoints) {
+        snapshot.actualTcpRet = HRIF_ReadActTcpPos(
+            m_boxID, m_rbtID,
+            snapshot.actualTcp.x, snapshot.actualTcp.y, snapshot.actualTcp.z,
+            snapshot.actualTcp.rx, snapshot.actualTcp.ry, snapshot.actualTcp.rz);
+        snapshot.commandedTcpRet = HRIF_ReadCmdTcpPos(
+            m_boxID, m_rbtID,
+            snapshot.commandedTcp.x, snapshot.commandedTcp.y, snapshot.commandedTcp.z,
+            snapshot.commandedTcp.rx, snapshot.commandedTcp.ry, snapshot.commandedTcp.rz);
+        snapshot.jointsRet = HRIF_ReadActJointPos(
+            m_boxID, m_rbtID,
+            snapshot.joints[0], snapshot.joints[1], snapshot.joints[2],
+            snapshot.joints[3], snapshot.joints[4], snapshot.joints[5]);
+    }
+
+    if (readAxisErrors) {
+        snapshot.axisErrorsRet = HRIF_ReadAxisErrorCode(
+            m_boxID, m_rbtID, snapshot.axisErrorCode,
+            snapshot.axisErrors[0], snapshot.axisErrors[1], snapshot.axisErrors[2],
+            snapshot.axisErrors[3], snapshot.axisErrors[4], snapshot.axisErrors[5]);
+    }
     return snapshot;
 }
 
@@ -1700,14 +1741,71 @@ bool HuayanScheduler::readActualTcpPose(PalletPose *pose, QString *error) const
 
 QString HuayanScheduler::formatRobotStateSnapshot(const RobotStateSnapshot &snapshot) const
 {
-    return QStringLiteral("moving=%1 pause=%2 error=%3 errorCode=%4 fsm=%5/%6 valid=%7")
+    return QStringLiteral("运动=%1 暂停=%2 错误=%3 主错误码=%4 状态机=%5/%6 标志读取返回码=%7 状态机读取返回码=%8 有效=%9")
         .arg(snapshot.movingState)
         .arg(snapshot.pauseState)
         .arg(snapshot.errorState)
         .arg(snapshot.errorCode)
         .arg(snapshot.nCurFSM)
         .arg(snapshot.strCurFSM)
-        .arg(snapshot.valid ? QStringLiteral("true") : QStringLiteral("false"));
+        .arg(snapshot.flagsRet)
+        .arg(snapshot.fsmRet)
+        .arg(snapshot.valid ? QStringLiteral("是") : QStringLiteral("否"));
+}
+
+void HuayanScheduler::emitMoveRelFailureDiagnostics(
+    const PendingCommand &cmd,
+    const MotionDiagnosticSnapshot &before,
+    const MotionDiagnosticSnapshot &after,
+    int sdkReturnCode)
+{
+    static const QString kAxisNames[] = {
+        QStringLiteral("X"), QStringLiteral("Y"), QStringLiteral("Z"),
+        QStringLiteral("Rx"), QStringLiteral("Ry"), QStringLiteral("Rz")
+    };
+    const QString axis = cmd.poseId >= 0 && cmd.poseId < 6
+        ? kAxisNames[cmd.poseId] : QString::number(cmd.poseId);
+    const QString unit = cmd.poseId >= 0 && cmd.poseId < 3
+        ? QStringLiteral("mm") : QStringLiteral("deg");
+    const QString frame = cmd.kind == PendingCommandKind::MoveRelTool
+        ? QStringLiteral("TCP/工具系") : QStringLiteral("UCS/基坐标系");
+    const QString detail = describeError(m_boxID, sdkReturnCode);
+
+    emit logMessage(QStringLiteral("[华沿][MoveRelL诊断][命令=%1] SDK拒绝：标签=%2 轴=%3 方向=%4 距离=%5%6 坐标系=%7 返回码=%8（%9）")
+                        .arg(cmd.diagnosticCommandId)
+                        .arg(cmd.label)
+                        .arg(axis)
+                        .arg(cmd.direction == 1 ? QStringLiteral("正向")
+                                                : QStringLiteral("负向"))
+                        .arg(cmd.distance, 0, 'f', 3)
+                        .arg(unit)
+                        .arg(frame)
+                        .arg(sdkReturnCode)
+                        .arg(detail.isEmpty() ? QStringLiteral("未知") : detail));
+    emit logMessage(QStringLiteral("[华沿][MoveRelL诊断][命令=%1] 命令前TCP 实际=(%2,%3,%4,%5,%6,%7) 返回码=%8 指令=(%9,%10,%11,%12,%13,%14) 返回码=%15")
+                        .arg(cmd.diagnosticCommandId)
+                        .arg(before.actualTcp.x, 0, 'f', 3).arg(before.actualTcp.y, 0, 'f', 3)
+                        .arg(before.actualTcp.z, 0, 'f', 3).arg(before.actualTcp.rx, 0, 'f', 3)
+                        .arg(before.actualTcp.ry, 0, 'f', 3).arg(before.actualTcp.rz, 0, 'f', 3)
+                        .arg(before.actualTcpRet)
+                        .arg(before.commandedTcp.x, 0, 'f', 3).arg(before.commandedTcp.y, 0, 'f', 3)
+                        .arg(before.commandedTcp.z, 0, 'f', 3).arg(before.commandedTcp.rx, 0, 'f', 3)
+                        .arg(before.commandedTcp.ry, 0, 'f', 3).arg(before.commandedTcp.rz, 0, 'f', 3)
+                        .arg(before.commandedTcpRet));
+    emit logMessage(QStringLiteral("[华沿][MoveRelL诊断][命令=%1] 命令前关节=(%2,%3,%4,%5,%6,%7) 返回码=%8 状态={%9}")
+                        .arg(cmd.diagnosticCommandId)
+                        .arg(before.joints[0], 0, 'f', 3).arg(before.joints[1], 0, 'f', 3)
+                        .arg(before.joints[2], 0, 'f', 3).arg(before.joints[3], 0, 'f', 3)
+                        .arg(before.joints[4], 0, 'f', 3).arg(before.joints[5], 0, 'f', 3)
+                        .arg(before.jointsRet)
+                        .arg(formatRobotStateSnapshot(before.robotState)));
+    emit logMessage(QStringLiteral("[华沿][MoveRelL诊断][命令=%1] 命令后状态={%2} 轴读取返回码=%3 轴总错误=%4 各轴错误=(%5,%6,%7,%8,%9,%10)")
+                        .arg(cmd.diagnosticCommandId)
+                        .arg(formatRobotStateSnapshot(after.robotState))
+                        .arg(after.axisErrorsRet)
+                        .arg(after.axisErrorCode)
+                        .arg(after.axisErrors[0]).arg(after.axisErrors[1]).arg(after.axisErrors[2])
+                        .arg(after.axisErrors[3]).arg(after.axisErrors[4]).arg(after.axisErrors[5]));
 }
 
 void HuayanScheduler::stopVisionWaitTimeout()
@@ -1742,6 +1840,7 @@ bool HuayanScheduler::beginCommandWhenReady(const PendingCommand &cmd)
     // 20018 的现场根因是串行命令之间只判断“不运动”，没有确认控制器已允许下一条命令。
     ++m_commandSeq;
     m_pendingCommand = cmd;
+    m_pendingCommand.diagnosticCommandId = m_commandSeq;
     m_commandReadyElapsedMs = 0;
     m_commandResetIssued = false;
     return pollCommandReady();
@@ -1856,8 +1955,13 @@ bool HuayanScheduler::dispatchReadyCommand(const PendingCommand &cmd)
 
     if (cmd.kind == PendingCommandKind::MoveRelTool || cmd.kind == PendingCommandKind::MoveRelBase) {
         const int toolMotion = cmd.kind == PendingCommandKind::MoveRelTool ? 1 : 0;
-        int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, cmd.poseId, cmd.direction, cmd.distance, toolMotion);
+        const MotionDiagnosticSnapshot before =
+            readMotionDiagnosticSnapshot(true, false);
+        const int nRet = HRIF_MoveRelL(m_boxID, m_rbtID, cmd.poseId, cmd.direction, cmd.distance, toolMotion);
         if (nRet != 0) {
+            const MotionDiagnosticSnapshot after =
+                readMotionDiagnosticSnapshot(false, true);
+            emitMoveRelFailureDiagnostics(cmd, before, after, nRet);
             const QString detail = describeError(m_boxID, nRet);
             emitOperationError(detail.isEmpty()
                 ? QStringLiteral("%1失败：%2").arg(cmd.label).arg(nRet)

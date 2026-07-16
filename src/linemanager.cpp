@@ -1,6 +1,7 @@
 #include "linemanager.h"
 
 #include <QTimer>
+#include <utility>
 
 #include "huayanScheduler.h"
 #include "taskexecutor.h"
@@ -71,6 +72,11 @@ Task LineManager::currentTask() const
     return m_currentTask;
 }
 
+void LineManager::setExternalWorkflowRunning(std::function<bool()> predicate)
+{
+    m_externalWorkflowRunning = std::move(predicate);
+}
+
 void LineManager::start()
 {
     if (m_state == LineSystemState::Error) {
@@ -80,6 +86,16 @@ void LineManager::start()
 
     if (m_state != LineSystemState::Idle) {
         emit logMessage(QStringLiteral("[LineManager] Start 被忽略：系统未处于 Idle"));
+        return;
+    }
+
+    if (m_externalWorkflowRunning && m_externalWorkflowRunning()) {
+        emit logMessage(QStringLiteral("[LineManager] Start 被拒绝：兼容整线流程正在运行"));
+        return;
+    }
+
+    if (m_arm && m_arm->isBusy()) {
+        emit logMessage(QStringLiteral("[LineManager] Start 被拒绝：机械臂正被单独测试占用"));
         return;
     }
 
@@ -302,7 +318,12 @@ void LineManager::onReturnHomeTimeout()
         return;
     }
 
-    enterError(QStringLiteral("AGV 回 LM1 超时（%1 ms）").arg(kReturnHomeTimeoutMs));
+    const qint64 waitedMs = m_returnHomeElapsed.isValid()
+        ? m_returnHomeElapsed.elapsed()
+        : kReturnHomeTimeoutMs;
+    enterError(QStringLiteral("AGV 回 LM1 超时：已等待 %1 ms（上限 %2 ms）")
+                   .arg(waitedMs)
+                   .arg(kReturnHomeTimeoutMs));
 }
 
 void LineManager::setState(LineSystemState state, const QString &text)
@@ -379,6 +400,7 @@ void LineManager::returnHomeIfNeeded()
     clearCurrentTask();
     m_returnHomeActive = true;
     m_returnHomeSeenMoving = false;
+    m_returnHomeElapsed.start();
     m_returnHomeTimeout->start(kReturnHomeTimeoutMs);
     setState(LineSystemState::ReturningHome, QStringLiteral("回待机点"));
     emit logMessage(QStringLiteral("[LineManager] 当前无待执行任务，AGV 返回 LM1 待机"));
@@ -402,6 +424,7 @@ void LineManager::cancelReturnHomeForNewTask()
 void LineManager::stopReturnHomeTracking()
 {
     m_returnHomeTimeout->stop();
+    m_returnHomeElapsed.invalidate();
     m_returnHomeActive = false;
     m_returnHomeSeenMoving = false;
 }

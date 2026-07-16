@@ -1,6 +1,7 @@
 #ifndef MAINWINDOW_H
 #define MAINWINDOW_H
 
+#include <QComboBox>
 #include <QMainWindow>
 #include <QFile>
 #include <QLabel>
@@ -107,6 +108,8 @@ private:
     void updateLineSystemState(LineSystemState state, const QString &text); ///< 只更新状态/报警控件。
     void updateLineQueue(const QList<Task> &tasks);                         ///< 只展示未完成任务快照。
     void updateLineCurrentTask(const Task &task);                           ///< 更新当前任务和最近结果文案。
+    /// 根据机械臂连接/忙碌状态与整线状态，集中刷新手工阶段一和总调度入口的互斥状态。
+    void updateStandalonePickupControls();
     bool lineManagerOwnsTopLevelWorkflowUi() const;
 
     void log(const QString &msg);
@@ -209,6 +212,7 @@ private:
     QPushButton     *m_huayanDisconnectBtn = nullptr;
     DeviceIndicator *m_huayanIndicator     = nullptr;
     QPushButton     *m_huayanStartBtn      = nullptr;
+    QComboBox *m_huayanStationCombo = nullptr; ///< 仅供手工阶段一测试选择 1～12 号工位。
     QPushButton     *m_huayanStopBtn       = nullptr;
     QPushButton     *m_huayanReleaseBtn    = nullptr;
     QSlider         *m_huayanSpeedSlider   = nullptr;

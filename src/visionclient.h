@@ -28,10 +28,18 @@
 #ifndef VISIONCLIENT_H
 #define VISIONCLIENT_H
 
+#include <QJsonArray>
+#include <QList>
 #include <QObject>
 #include <QImage>
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
+
+// 当前工位视觉候选矩形的 X 半宽，单位 mm；只过滤原始 offset_mm.x，不参与机械臂运动限位。
+#define VISION_STATION_ROI_HALF_X_MM 500.0
+
+// 当前工位视觉候选矩形的 Y 半宽，单位 mm；只过滤原始 offset_mm.y，不参与机械臂运动限位。
+#define VISION_STATION_ROI_HALF_Y_MM 500.0
 
 class VisionHttpClient : public QObject
 {
@@ -47,6 +55,45 @@ public:
     /// 多目标同层容差（mm）：深度差小于此值视为并排平放同层，改按离图像中心距离择近
     /// 须远小于料箱高度（110mm），仅覆盖深度噪声；少一层即差约 110mm，会判为不同层
     static constexpr float kSameLayerTolMm = 20.0f;
+
+    /// 视觉目标最终入选原因；用于测试和现场候选摘要，不改变坐标转换语义。
+    enum class TargetSelectionReason {
+        None,                   ///< 没有合法且位于当前工位矩形内的目标。
+        HighestLayer,           ///< 最高层分组中只有一个候选，按 Z 直接选中。
+        SameLayerNearestCenter, ///< 最高层有多个候选，按原始 XY 距离选择最近中心者。
+        StableSourceIndex       ///< 深度和 XY 距离完全相同时，按服务端原始下标稳定兜底。
+    };
+
+    /// 单个视觉候选；坐标仍处于视觉 API 的原始 offset/depth 空间，单位均为 mm。
+    struct TargetCandidate {
+        int sourceIndex = -1;        ///< 候选在原始 objects 数组中的下标，用于日志和稳定兜底。
+        double x = 0.0;              ///< 原始 offset_mm.x，单位 mm。
+        double y = 0.0;              ///< 原始 offset_mm.y，单位 mm。
+        double depth = 0.0;          ///< 原始 depth_compensated，值越小代表层越高。
+        double angle = 0.0;          ///< 原始箱体角度，单位 deg。
+        double confidence = 0.0;     ///< 视觉服务置信度，仅记录，不在本次新增阈值过滤。
+        bool valid = false;          ///< 所有抓取所需 JSON 字段均存在、为数值且有限。
+        bool insideStationRoi = false; ///< 合法目标是否位于共用当前工位 XY 矩形内。
+        QString rejectionReason;     ///< 非法目标的首个拒绝原因；合法目标为空。
+    };
+
+    /// 一次推理响应的完整选择结果；selectedCandidateIndex 指向 candidates，而非原 JSON。
+    struct TargetSelection {
+        QList<TargetCandidate> candidates; ///< 保留所有原始候选的解析/ROI 状态，供单行日志使用。
+        int selectedCandidateIndex = -1;   ///< 最终候选在 candidates 中的下标；-1 表示无目标。
+        TargetSelectionReason reason = TargetSelectionReason::None; ///< 最终选择规则。
+
+        bool hasTarget() const
+        {
+            return selectedCandidateIndex >= 0
+                && selectedCandidateIndex < candidates.size();
+        }
+    };
+
+    /// 纯逻辑：先过滤当前工位 XY，再找最高层，最后在同层中选择最近中心目标。
+    static TargetSelection selectTarget(const QJsonArray &objects);
+    /// 把一次选择的全部候选压缩为单行现场日志；不得包含换行符。
+    static QString formatTargetSelectionLog(const TargetSelection &selection);
 
     explicit VisionHttpClient(QObject *parent = nullptr);
 
@@ -122,6 +169,8 @@ signals:
     void errorOccurred(QString msg);
     /// 工具坐标系原始 mm 值（手眼变换后，未乘寄存器倍率）
     void rawCoordinatesReady(double x, double y, double z, double rz);
+    /// 每次 /inference 响应最多发出一次候选选择摘要，由 DeviceManager 转发到现场日志。
+    void selectionLogMessage(QString message);
 private:
     /// 解析 /inference 响应 JSON
     void parseInferenceReply(QNetworkReply *reply);

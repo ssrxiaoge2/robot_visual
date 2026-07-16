@@ -88,6 +88,14 @@ public slots:
     void cancelAgvNav();
     void pauseAgvNav();
     void resumeAgvNav();
+    /**
+     * @brief 启动指定工位的手工阶段一测试。
+     * @param stationId 现场工位号，允许 1～12。
+     * @return 已完成互斥检查和配置注入并发起阶段一时返回 true；拒绝时返回 false 并记录原因。
+     *
+     * 该入口固定关闭扫码，只复用 HuayanScheduler 的既有阶段一状态机；总调度不得调用。
+     */
+    bool startStandaloneStageOne(int stationId);
 
 signals:
     void robotStatusChanged(bool ok, const QString &statusText);

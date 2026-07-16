@@ -33,7 +33,13 @@ LineOrchestrator::LineOrchestrator(AgvController *agv,
     m_agvTimeout->setSingleShot(true);
     m_agvTimeout->setInterval(kAgvTimeoutMs);
     connect(m_agvTimeout, &QTimer::timeout, this, [this]() {
-        abort(QStringLiteral("AGV 单步超时（%1s 未到达）").arg(kAgvTimeoutMs / 1000));
+        const qint64 waitedMs = m_agvElapsed.isValid()
+            ? m_agvElapsed.elapsed()
+            : kAgvTimeoutMs;
+        abort(QStringLiteral("AGV 导航到站%1超时：已等待 %2 ms（上限 %3 ms）")
+                  .arg(m_expectedStation)
+                  .arg(waitedMs)
+                  .arg(kAgvTimeoutMs));
     });
 }
 
@@ -51,7 +57,16 @@ int LineOrchestrator::resolvedStation(int workstation) const
 
 void LineOrchestrator::start()
 {
-    if (m_state != LineState::Idle) return;
+    if (m_state != LineState::Idle)
+        return;
+    if (m_externalWorkflowRunning && m_externalWorkflowRunning()) {
+        emit lineLog(QStringLiteral("[整线] 启动被拒绝：新总调度正在运行"));
+        return;
+    }
+    if (m_arm && m_arm->isBusy()) {
+        emit lineLog(QStringLiteral("[整线] 启动被拒绝：机械臂已有阶段或测试动作运行"));
+        return;
+    }
     emit lineStarted();
     emit lineLog(QStringLiteral("[整线] 流程启动，初始检查"));
     enterState(LineState::InitCheck);
@@ -68,6 +83,7 @@ void LineOrchestrator::stop()
 void LineOrchestrator::haltDevices()
 {
     m_agvTimeout->stop();
+    m_agvElapsed.invalidate();
     m_agv->cancelNavigation();
     m_arm->stop();
     m_state = LineState::Idle;
@@ -122,6 +138,7 @@ void LineOrchestrator::enterState(LineState s)
         emit lineLog(QStringLiteral("[整线] AGV 前往取料站 %1").arg(m_pickupStation));
         m_expectedStation = resolvedStation(m_pickupStation);
         m_agvSeenMoving = false;
+        m_agvElapsed.start(); // 新导航步骤重新计时，单位 ms。
         m_agvTimeout->start();
         emit agvDispatchRequested(m_pickupStation);
         break;
@@ -137,6 +154,7 @@ void LineOrchestrator::enterState(LineState s)
         emit lineLog(QStringLiteral("[整线] AGV 前往倒料站 %1").arg(m_unloadStation));
         m_expectedStation = resolvedStation(m_unloadStation);
         m_agvSeenMoving = false;
+        m_agvElapsed.start(); // 新导航步骤重新计时，单位 ms。
         m_agvTimeout->start();
         emit agvDispatchRequested(m_unloadStation);
         break;
@@ -152,6 +170,7 @@ void LineOrchestrator::enterState(LineState s)
         emit lineLog(QStringLiteral("[整线] AGV 返回待机站 %1").arg(m_homeStation));
         m_expectedStation = resolvedStation(m_homeStation);
         m_agvSeenMoving = false;
+        m_agvElapsed.start(); // 新导航步骤重新计时，单位 ms。
         m_agvTimeout->start();
         emit agvDispatchRequested(m_homeStation);
         break;
@@ -170,6 +189,14 @@ void LineOrchestrator::onAgvMonitor(const AgvMonitorData &d)
                           || m_state == LineState::AgvReturnHome);
     if (!waitingAgv) return;
 
+    // 明确失败/取消/超时是 AGV 对当前导航的终态，应立即中止，不能等待 5 分钟软件超时。
+    if (d.navStatus >= 5 && d.navStatus <= 7) {
+        static const char *txt[] = {"", "", "", "", "", "失败", "取消", "超时"};
+        abort(QStringLiteral("AGV 导航%1（状态 %2）")
+                  .arg(QString::fromUtf8(txt[d.navStatus])).arg(d.navStatus));
+        return;
+    }
+
     // 先观察到 AGV 真正进入导航(等待1/执行2)，再判到达/失败，避免上一单残留态误判
     if (d.navStatus == 1 || d.navStatus == 2)
         m_agvSeenMoving = true;
@@ -180,6 +207,7 @@ void LineOrchestrator::onAgvMonitor(const AgvMonitorData &d)
     if (d.navStatus == 4 && d.navStation == m_expectedStation
         && d.curStation == m_expectedStation) {
         m_agvTimeout->stop();
+        m_agvElapsed.invalidate();
         switch (m_state) {
         case LineState::AgvToPickup: enterState(LineState::ArmPicking);   break;
         case LineState::AgvToUnload: enterState(LineState::ArmUnloading); break;
@@ -191,10 +219,6 @@ void LineOrchestrator::onAgvMonitor(const AgvMonitorData &d)
         default:
             break;
         }
-    } else if (d.navStatus >= 5 && d.navStatus <= 7) {
-        static const char *txt[] = {"", "", "", "", "", "失败", "取消", "超时"};
-        abort(QStringLiteral("AGV 导航%1（状态 %2）")
-                  .arg(QString::fromUtf8(txt[d.navStatus])).arg(d.navStatus));
     }
 }
 

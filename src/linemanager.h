@@ -1,7 +1,9 @@
 #ifndef LINEMANAGER_H
 #define LINEMANAGER_H
 
+#include <QElapsedTimer>
 #include <QObject>
+#include <functional>
 
 #include "agvcontroller.h"
 #include "lineconfig.h"
@@ -33,6 +35,8 @@ public:
     LineSystemState state() const;
     QList<Task> queueSnapshot() const;
     Task currentTask() const;
+    /// 注入兼容旧整线是否运行的只读判定；用于拒绝两个顶层调度同时控制 AGV/机械臂。
+    void setExternalWorkflowRunning(std::function<bool()> predicate);
 
 public slots:
     /// Idle -> Running；有 Pending 时直接执行，无任务时确保 AGV 回 LM1。
@@ -68,7 +72,7 @@ private slots:
 
 private:
     static constexpr int kHomeLm = 1;                 ///< 队列为空时的 AGV 待机点。
-    static constexpr int kReturnHomeTimeoutMs = 120000; ///< 回 LM1 超时，单位 ms。
+    static constexpr int kReturnHomeTimeoutMs = 300000; ///< 回 LM1 超时，单位 ms（5 分钟）。
 
     void setState(LineSystemState state, const QString &text);
     void setCurrentTask(const Task &task);
@@ -88,6 +92,7 @@ private:
     HuayanScheduler *m_arm = nullptr;          ///< 非拥有指针；Stop 时立即停止机械臂。
     TaskExecutor *m_executor = nullptr;        ///< QObject 子对象；一次只执行一个任务。
     QTimer *m_returnHomeTimeout = nullptr;     ///< 仅 ReturningHome 期间启用。
+    QElapsedTimer m_returnHomeElapsed;         ///< 本轮独立返航的实际等待计时，只用于超时日志。
 
     TaskQueue m_queue;                                  ///< 仅含 Pending 的 FIFO。
     Task m_currentTask;                                 ///< 当前 Running/终态任务快照。
@@ -99,6 +104,8 @@ private:
     bool m_returnHomeSeenMoving = false; ///< 已看到回站导航进入 Waiting/Running。
     bool m_hasAgvMonitor = false;        ///< m_lastAgvMonitor 是否至少更新过一次。
     AgvMonitorData m_lastAgvMonitor;     ///< 最近 AGV 快照，仅供回 LM1 状态机使用。
+
+    std::function<bool()> m_externalWorkflowRunning; ///< 兼容旧整线运行判定；不拥有对象，只在 start() 入口读取。
 };
 
 #endif // LINEMANAGER_H

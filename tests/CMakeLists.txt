@@ -1,4 +1,4 @@
-find_package(Qt6 REQUIRED COMPONENTS Core Test)
+find_package(Qt6 REQUIRED COMPONENTS Core Test Network Gui)
 
 add_executable(station_pickup_config_tests
     test_station_pickup_config.cpp
@@ -110,3 +110,51 @@ target_link_libraries(pallet_param_dialog_contract_tests PRIVATE
 
 add_test(NAME pallet_param_dialog_contract_tests
          COMMAND pallet_param_dialog_contract_tests)
+
+add_executable(vision_target_selection_tests
+    test_vision_target_selection.cpp
+    ../src/visionclient.cpp
+)
+
+target_include_directories(vision_target_selection_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(vision_target_selection_tests PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Network
+)
+
+add_test(NAME vision_target_selection_tests
+         COMMAND vision_target_selection_tests)
+
+add_executable(standalone_pickup_contract_tests
+    test_standalone_pickup_contract.cpp
+)
+
+target_include_directories(standalone_pickup_contract_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(standalone_pickup_contract_tests PRIVATE
+    Qt6::Core
+)
+
+add_test(NAME standalone_pickup_contract_tests
+         COMMAND standalone_pickup_contract_tests)
+
+add_executable(navigation_timeout_contract_tests
+    test_navigation_timeout_contract.cpp
+)
+
+target_include_directories(navigation_timeout_contract_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(navigation_timeout_contract_tests PRIVATE
+    Qt6::Core
+)
+
+add_test(NAME navigation_timeout_contract_tests
+         COMMAND navigation_timeout_contract_tests)

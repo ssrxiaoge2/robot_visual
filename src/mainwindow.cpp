@@ -370,6 +370,8 @@ MainWindow::MainWindow(QWidget *parent)
                 this, &MainWindow::onHuayanStageCompleted);
         connect(hs, &HuayanScheduler::stageError,
                 this, &MainWindow::onHuayanStageError);
+        connect(hs, &HuayanScheduler::schedulerStopped,
+                this, &MainWindow::updateStandalonePickupControls);
         // 顶部"机械臂"指示灯跟随 SDK 连接状态
         connect(hs, &HuayanScheduler::connected, this, [this]() {
             m_indRobot->setStatus(true, QStringLiteral("SDK 已连接"));
@@ -1234,6 +1236,13 @@ void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
     vbox->addWidget(line);
 
     auto *row2 = new QHBoxLayout();
+    m_huayanStationCombo = new QComboBox();
+    m_huayanStationCombo->setToolTip(QStringLiteral("选择单独阶段一测试使用的工位配置；不影响总调度配置表"));
+    for (int stationId = 1; stationId <= 12; ++stationId) {
+        m_huayanStationCombo->addItem(QStringLiteral("工位%1").arg(stationId), stationId);
+    }
+    m_huayanStationCombo->setCurrentIndex(0);
+    m_huayanStationCombo->setEnabled(false);
     m_huayanStartBtn   = new QPushButton(QStringLiteral("启动取料（阶段一）"));
     m_huayanStopBtn    = new QPushButton(QStringLiteral("停止"));
     m_huayanReleaseBtn = new QPushButton(QStringLiteral("松开夹爪"));
@@ -1243,6 +1252,7 @@ void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
     m_huayanStartBtn->setFixedHeight(28);
     m_huayanStopBtn->setFixedHeight(28);
     m_huayanReleaseBtn->setFixedHeight(28);
+    row2->addWidget(m_huayanStationCombo);
     row2->addWidget(m_huayanStartBtn);
     row2->addWidget(m_huayanStopBtn);
     row2->addWidget(m_huayanReleaseBtn);
@@ -1912,6 +1922,7 @@ void MainWindow::updateLineSystemState(LineSystemState state, const QString &tex
         setProperty("lineAlarmLastReason", QString());
     }
 
+    updateStandalonePickupControls();
 }
 
 void MainWindow::updateLineQueue(const QList<Task> &tasks)
@@ -2013,6 +2024,32 @@ bool MainWindow::lineManagerOwnsTopLevelWorkflowUi() const
         || lm->currentTask().taskId != 0;
 }
 
+void MainWindow::updateStandalonePickupControls()
+{
+    HuayanScheduler *arm = m_devMgr ? m_devMgr->huayanScheduler() : nullptr;
+    LineManager *line = m_devMgr ? m_devMgr->lineManager() : nullptr;
+    LineOrchestrator *legacyLine = m_devMgr ? m_devMgr->lineOrchestrator() : nullptr;
+    const bool lineCompletelyIdle = line
+        && line->state() == LineSystemState::Idle
+        && line->currentTask().taskId == 0;
+    const bool legacyIdle = !legacyLine || !legacyLine->isRunning();
+    const bool armIdle = arm && !arm->isBusy();
+    const bool standaloneEnabled = arm && arm->isConnected()
+        && armIdle && lineCompletelyIdle && legacyIdle;
+
+    // 手工阶段一与总调度共用同一个机械臂状态机，入口按钮必须由这里统一互斥。
+    if (m_huayanStartBtn)
+        m_huayanStartBtn->setEnabled(standaloneEnabled);
+    if (m_huayanStationCombo)
+        m_huayanStationCombo->setEnabled(standaloneEnabled);
+
+    const bool lineStartEnabled = lineCompletelyIdle && armIdle && legacyIdle;
+    if (m_btnStart)
+        m_btnStart->setEnabled(lineStartEnabled);
+    if (m_lineStartBtn)
+        m_lineStartBtn->setEnabled(lineStartEnabled);
+}
+
 // ── 华沿 SDK 调试面板槽 ──────────────────────────────────────
 
 void MainWindow::onHuayanConnect()
@@ -2030,18 +2067,23 @@ void MainWindow::onHuayanDisconnect()
 
 void MainWindow::onHuayanStartStageOne()
 {
+    const int stationId = m_huayanStationCombo
+        ? m_huayanStationCombo->currentData().toInt()
+        : 1;
     m_huayanStartBtn->setEnabled(false);
-    m_devMgr->huayanScheduler()->startStageOne();
+    if (m_huayanStationCombo)
+        m_huayanStationCombo->setEnabled(false);
+    if (!m_devMgr->startStandaloneStageOne(stationId))
+        updateStandalonePickupControls();
 }
 
 void MainWindow::onHuayanStop()
 {
     m_devMgr->huayanScheduler()->stop();
     m_huayanStopBtn->setEnabled(false);
-    m_huayanStartBtn->setEnabled(true);
     m_huayanIndicator->setStatus(false, QStringLiteral("已停止"));
-    m_btnStart->setEnabled(true);
     m_btnStop->setEnabled(false);
+    updateStandalonePickupControls();
 }
 
 void MainWindow::onHuayanConnected()
@@ -2052,6 +2094,7 @@ void MainWindow::onHuayanConnected()
     m_huayanStopBtn->setEnabled(false);
     m_huayanReleaseBtn->setEnabled(true);
     m_huayanIndicator->setStatus(true, QStringLiteral("已连接"));
+    updateStandalonePickupControls();
 }
 
 void MainWindow::onHuayanDisconnected()
@@ -2059,9 +2102,12 @@ void MainWindow::onHuayanDisconnected()
     m_huayanConnectBtn->setEnabled(true);
     m_huayanDisconnectBtn->setEnabled(false);
     m_huayanStartBtn->setEnabled(false);
+    if (m_huayanStationCombo)
+        m_huayanStationCombo->setEnabled(false);
     m_huayanStopBtn->setEnabled(false);
     m_huayanReleaseBtn->setEnabled(false);
     m_huayanIndicator->setStatus(false, QStringLiteral("未连接"));
+    updateStandalonePickupControls();
 }
 
 void MainWindow::onHuayanLog(const QString &msg)
@@ -2092,6 +2138,7 @@ void MainWindow::onLineStarted()
 {
     m_btnStart->setEnabled(false);
     m_btnStop->setEnabled(true);
+    updateStandalonePickupControls();
 }
 
 void MainWindow::onLineFinished()
@@ -2101,6 +2148,7 @@ void MainWindow::onLineFinished()
     m_flow->setActiveStep(-1);
     m_lblCycle->setText(QString::number(++m_cycleCount));
     m_lblStep->setText(QStringLiteral("完成"));
+    updateStandalonePickupControls();
 }
 
 void MainWindow::onLineStopped()
@@ -2109,6 +2157,7 @@ void MainWindow::onLineStopped()
     m_btnStop->setEnabled(false);
     m_flow->setActiveStep(-1);
     m_lblStep->setText(QStringLiteral("已停止"));
+    updateStandalonePickupControls();
 }
 
 void MainWindow::onLineError(const QString &reason)
@@ -2118,6 +2167,7 @@ void MainWindow::onLineError(const QString &reason)
     m_flow->setActiveStep(-1);
     m_lblStep->setText(QStringLiteral("错误"));
     log(QStringLiteral("整线流程中止：%1").arg(reason));
+    updateStandalonePickupControls();
 }
 
 void MainWindow::onHuayanStageStarted(const QString &stageName)
@@ -2126,6 +2176,7 @@ void MainWindow::onHuayanStageStarted(const QString &stageName)
     m_huayanStopBtn->setEnabled(true);
     m_huayanIndicator->setStatus(true, QStringLiteral("运行中"));
     log(QStringLiteral("[华沿] 阶段启动：%1").arg(stageName));
+    updateStandalonePickupControls();
 
     if (lineManagerOwnsTopLevelWorkflowUi()) {
         return;
@@ -2137,10 +2188,10 @@ void MainWindow::onHuayanStageStarted(const QString &stageName)
 
 void MainWindow::onHuayanStageCompleted(const QString &stageName)
 {
-    m_huayanStartBtn->setEnabled(true);
     m_huayanStopBtn->setEnabled(false);
     m_huayanIndicator->setStatus(true, QStringLiteral("完成"));
     log(QStringLiteral("[华沿] 阶段完成：%1").arg(stageName));
+    updateStandalonePickupControls();
 
     if (lineManagerOwnsTopLevelWorkflowUi()) {
         return;
@@ -2156,10 +2207,10 @@ void MainWindow::onHuayanStageCompleted(const QString &stageName)
 
 void MainWindow::onHuayanStageError(const QString &msg)
 {
-    m_huayanStartBtn->setEnabled(true);
     m_huayanStopBtn->setEnabled(false);
     m_huayanIndicator->setStatus(false, QStringLiteral("错误"));
     log(QStringLiteral("[华沿] 错误：%1").arg(msg));
+    updateStandalonePickupControls();
 
     if (lineManagerOwnsTopLevelWorkflowUi()) {
         return;

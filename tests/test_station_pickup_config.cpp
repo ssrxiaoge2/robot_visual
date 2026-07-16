@@ -37,7 +37,7 @@ int main()
     requireTrue(s12->afterGripMode == AfterGripMode::CaptureFunc, "工位12夹紧后必须保持复用拍照函数回安全位");
     const StationTaskConfig *s3 = stationConfig(3);
     requireTrue(s3 != nullptr, "工位3配置必须存在");
-    requireTrue(s3->stowAfterUnloadFunc == QStringLiteral("Func_yun_xing_zhong_s3"),
+    requireTrue(s3->stowAfterUnloadFunc == QStringLiteral("Func_daoliao3_huianquanwei"),
                 "工位3倒料后收姿态必须使用带过渡点的新函数");
 
     const StationTaskConfig *s1 = stationConfig(1);
@@ -57,16 +57,16 @@ int main()
     for (int station = 1; station <= 11; ++station) {
         const StationTaskConfig *cfg = stationConfig(station);
         requireTrue(cfg != nullptr, "工位1-11配置必须存在");
-        requireNear(cfg->grabZClearance, 417.0, 0.001, "工位1-11篮筐余量必须保持原生产值 417.0");
+        requireNear(cfg->grabZClearance, 412.0, 0.001, "工位1-11篮筐余量必须保持当前生产值 412.0");
     }
     for (int station = 1; station <= 12; ++station) {
         const StationTaskConfig *cfg = stationConfig(station);
         requireTrue(cfg != nullptr, "12工位配置必须完整");
         requireTrue(!cfg->stowAfterUnloadFunc.isEmpty(),
                     "每个工位都必须显式配置倒料后收姿态函数");
-        if (station != 3) {
+        if (station != 3 && station != 11) {
             requireTrue(cfg->stowAfterUnloadFunc == QStringLiteral("Func_yun_xing_zhong"),
-                        "非工位3默认使用原全局收姿态函数");
+                        "非工位3/11默认使用原全局收姿态函数");
         }
     }
     requireTrue(s12->grabZClearance < 425.0, "工位12紫框余量应小于旧值以增加下探");

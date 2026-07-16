@@ -63,6 +63,29 @@ int main()
                 "目标 TCP Z 高于码垛初始点位时必须拒绝执行，避免高层接近奇异点");
     requireTrue(source.contains(QStringLiteral("startPalletPlaceFromClampedSafety")),
                 "HuayanScheduler 必须提供已夹紧安全位入口给主流程复用");
+    requireTrue(header.contains(QStringLiteral("struct MotionDiagnosticSnapshot")),
+                "HuayanScheduler 必须定义 MoveRelL 失败诊断快照");
+    requireTrue(header.contains(QStringLiteral("quint64 diagnosticCommandId")),
+                "待下发命令必须携带现场诊断命令序号");
+    requireTrue(source.contains(QStringLiteral("HRIF_ReadCmdTcpPos"))
+                    && source.contains(QStringLiteral("HRIF_ReadActJointPos"))
+                    && source.contains(QStringLiteral("HRIF_ReadAxisErrorCode")),
+                "失败快照必须读取指令 TCP、实际关节角和轴错误码");
+    requireTrue(source.contains(QStringLiteral("[华沿][MoveRelL诊断][命令=%1]")),
+                "MoveRelL 诊断日志必须带本地命令序号");
+
+    const qsizetype moveCall = source.indexOf(QStringLiteral("const int nRet = HRIF_MoveRelL"));
+    const qsizetype failureBranch = source.indexOf(QStringLiteral("if (nRet != 0)"), moveCall);
+    const qsizetype diagnostics = source.indexOf(
+        QStringLiteral("emitMoveRelFailureDiagnostics"), failureBranch);
+    const qsizetype successState = source.indexOf(
+        QStringLiteral("m_activeCommandKind = cmd.kind"), failureBranch);
+    requireTrue(moveCall >= 0 && failureBranch > moveCall
+                    && diagnostics > failureBranch && diagnostics < successState,
+                "诊断输出必须只位于 MoveRelL SDK 非零返回分支，成功路径不得打印快照");
+    requireTrue(source.contains(QStringLiteral("readMotionDiagnosticSnapshot(true, false)"))
+                    && source.contains(QStringLiteral("readMotionDiagnosticSnapshot(false, true)")),
+                "SDK 调用前必须保存位姿/关节，失败后必须读取控制器/轴错误状态");
 
     return 0;
 }

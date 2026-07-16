@@ -1,6 +1,8 @@
 #ifndef HUAYANSCHEDULER_H
 #define HUAYANSCHEDULER_H
 
+#include <array>
+
 #include <QObject>
 #include <QString>
 #include <QStringList>
@@ -70,6 +72,8 @@ public:
     bool connectRobot();
     bool disconnectRobot();
     bool isConnected() const;
+    /// 是否有阶段、独立动作、待下发命令或已下发命令占用机械臂；只读接口用于入口互斥。
+    bool isBusy() const;
 
     void setStackingFunction(const QString &funcName,
                              const QStringList &params = QStringList());
@@ -345,6 +349,7 @@ private:
         QString ucsName = QStringLiteral("Base"); ///< kind=MoveJ 时使用的用户坐标系。
         int timeoutMs = 30000; ///< 到位等待超时，单位 ms，默认 30000ms。
         QStringList params;   ///< 兼容旧码垛脚本等带参数的 RunFunc。
+        quint64 diagnosticCommandId = 0; ///< 本地单调命令序号，仅用于关联 SDK 返回码和失败快照。
     };
 
     struct RobotStateSnapshot {
@@ -355,7 +360,23 @@ private:
         int errorCode = 0;
         int nCurFSM = 0;
         QString strCurFSM;
+        int flagsRet = -1; ///< HRIF_ReadRobotFlags 返回码；0 表示读取成功。
+        int fsmRet = -1;   ///< HRIF_ReadCurFSM 返回码；0 表示读取成功。
         bool valid = false;
+    };
+
+    /// MoveRelL 失败现场快照；按读取开关填充，所有 ret 字段用于区分“值为0”和“读取失败”。
+    struct MotionDiagnosticSnapshot {
+        Pose actualTcp;                    ///< 实际 TCP 位姿，平移 mm、旋转 deg。
+        Pose commandedTcp;                 ///< 控制器指令 TCP 位姿，平移 mm、旋转 deg。
+        std::array<double, 6> joints{};     ///< J1～J6 实际关节角，单位 deg。
+        RobotStateSnapshot robotState;     ///< flags/FSM 快照。
+        int axisErrorCode = 0;             ///< HRIF_ReadAxisErrorCode 返回的总轴错误码。
+        std::array<int, 6> axisErrors{};    ///< J1～J6 各轴错误码。
+        int actualTcpRet = -1;             ///< HRIF_ReadActTcpPos 返回码；-1 表示本次未读取。
+        int commandedTcpRet = -1;          ///< HRIF_ReadCmdTcpPos 返回码；-1 表示本次未读取。
+        int jointsRet = -1;                ///< HRIF_ReadActJointPos 返回码；-1 表示本次未读取。
+        int axisErrorsRet = -1;            ///< HRIF_ReadAxisErrorCode 返回码；-1 表示本次未读取。
     };
 
     /// 在真正下发 SDK 命令前先做一次控制器状态门控。
@@ -376,6 +397,14 @@ private:
     bool hasActiveRobotCommand() const; ///< 当前是否仍有已下发但尚未完成的 SDK 命令。
     void stopVisionWaitTimeout();       ///< 收到视觉结果后关闭 WaitForVision 的超时保护，避免误判为执行中命令。
     RobotStateSnapshot readRobotStateSnapshot() const;
+    /// 按开关读取 MoveRelL 前/后快照；readPoseAndJoints 控制 TCP/关节读取，readAxisErrors 控制轴错误读取。
+    MotionDiagnosticSnapshot readMotionDiagnosticSnapshot(bool readPoseAndJoints,
+                                                          bool readAxisErrors) const;
+    /// 每个 SDK 拒绝命令调用一次，集中输出不超过四行的命令、位姿、关节和错误摘要。
+    void emitMoveRelFailureDiagnostics(const PendingCommand &cmd,
+                                       const MotionDiagnosticSnapshot &before,
+                                       const MotionDiagnosticSnapshot &after,
+                                       int sdkReturnCode);
     bool readActualTcpPose(PalletPose *pose, QString *error = nullptr) const;
     QString formatRobotStateSnapshot(const RobotStateSnapshot &snapshot) const;
 
