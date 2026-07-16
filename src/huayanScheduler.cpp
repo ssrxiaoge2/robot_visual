@@ -36,6 +36,8 @@ static constexpr int    kResetSettleMs     = 1000;
 //   （本例 D=1048, H=640 → 408）。此值对不同深度通用，视觉深度变化时下探量自动适应。
 static constexpr double kMaxDescend     = 1078.0;  // 下探安全上限(mm)，正常不应触发截断
 static constexpr bool   kZDescendInvert = false;   // Z 下探方向；若实际朝反方向，改 true
+static constexpr double kGrabXCompensation = 30.0; // Z 下探到物料箱位置后的工具系 X 补偿(mm)
+static constexpr double kGrabYCompensation = -17.0; // X 补偿后的工具系 Y 补偿(mm)
 static constexpr double kOffsetIgnoreDistance = 0.5; // 码垛平移死区(mm)
 static constexpr double kOffsetIgnoreAngle = 0.5;    // 码垛旋转死区(deg)
 static constexpr double kRotateToolAngle = 180.0;    // 扫码补救的工具系 Rz 角(deg)
@@ -682,6 +684,16 @@ void HuayanScheduler::onPollTick()
                 return;
             }
         }
+        const bool completedGrabZDescend =
+            m_stage == Stage::StageOne
+            && m_stageStep == StageStep::DescendZ
+            && m_activeCommandKind == PendingCommandKind::MoveRelTool
+            && m_activeCommandLabel == QStringLiteral("Z 下探");
+        const bool completedGrabXCompensation =
+            m_stage == Stage::StageOne
+            && m_stageStep == StageStep::DescendZ
+            && m_activeCommandKind == PendingCommandKind::MoveRelTool
+            && m_activeCommandLabel == QStringLiteral("X 补偿");
         m_activeCommandKind = PendingCommandKind::None;
         m_activeCommandLabel.clear();
         m_loggedRunFuncScriptRunning = false;
@@ -718,6 +730,30 @@ void HuayanScheduler::onPollTick()
                     && m_stageStep == StageStep::WaitForVision)
                     proceedStage();
             });
+            return;
+        }
+        if (completedGrabZDescend && qAbs(kGrabXCompensation) >= kOffsetIgnoreDistance) {
+            emit logMessage(QStringLiteral("[阶段一] Z 下探到位，执行 X 补偿 %1mm")
+                                .arg(kGrabXCompensation, 0, 'f', 1));
+            PendingCommand cmd;
+            cmd.kind = PendingCommandKind::MoveRelTool;
+            cmd.label = QStringLiteral("X 补偿");
+            cmd.poseId = 0;
+            cmd.direction = kGrabXCompensation >= 0.0 ? 1 : 0;
+            cmd.distance = qAbs(kGrabXCompensation);
+            beginCommandWhenReady(cmd);
+            return;
+        }
+        if ((completedGrabZDescend || completedGrabXCompensation) && qAbs(kGrabYCompensation) >= kOffsetIgnoreDistance) {
+            emit logMessage(QStringLiteral("[阶段一] 执行 Y 补偿 %1mm")
+                                .arg(kGrabYCompensation, 0, 'f', 1));
+            PendingCommand cmd;
+            cmd.kind = PendingCommandKind::MoveRelTool;
+            cmd.label = QStringLiteral("Y 补偿");
+            cmd.poseId = 1;
+            cmd.direction = kGrabYCompensation >= 0.0 ? 1 : 0;
+            cmd.distance = qAbs(kGrabYCompensation);
+            beginCommandWhenReady(cmd);
             return;
         }
         // MoveToGrab 是多次 MoveRelL 串联，单次到位后继续下一个偏移分量
