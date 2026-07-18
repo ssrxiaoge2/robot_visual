@@ -35,7 +35,7 @@ static constexpr int    kResetSettleMs     = 1000;
 // grabZClearance 标定法：固定一物体，记视觉深度 D 和能夹到的下探量 H，则 = D - H
 //   （本例 D=1048, H=640 → 408）。此值对不同深度通用，视觉深度变化时下探量自动适应。
 static constexpr double kMaxDescend     = 1078.0;  // 下探安全上限(mm)，正常不应触发截断
-static constexpr double HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 220.0; // 阶段一单次 X/Y 微调硬上限(mm)，超过即 fail-closed 拒绝下发 MoveRelL。
+static constexpr double HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 250.0; // 阶段一单次 X/Y 微调硬上限(mm)，现场验证 250mm 可覆盖正常锁定目标微调；超过即 fail-closed 拒绝下发 MoveRelL。
 static constexpr double HUAYAN_MAX_Z_DESCEND_MM = 1078.0; // 阶段一 Z 下探硬上限(mm)，不得因临时调试放大，超过即 fail-closed。
 static constexpr bool   kZDescendInvert = false;   // Z 下探方向；若实际朝反方向，改 true
 static constexpr double kGrabXCompensation = 30.0; // Z 下探到物料箱位置后的工具系 X 补偿(mm)
@@ -1081,17 +1081,21 @@ void HuayanScheduler::resetVisionAnchorTracking()
     m_anchorHasPreviousTarget = false;
     m_anchorPreviousTargetX = 0.0;
     m_anchorPreviousTargetY = 0.0;
+    m_anchorMissingFrames = 0;
 }
 
 VisionHttpClient::TargetSelectionContext HuayanScheduler::makeVisionTargetSelectionContext() const
 {
     VisionHttpClient::TargetSelectionContext context;
     context.anchorEnabled = m_stage == Stage::StageOne;
+    context.lockEnabled = true;
     context.accumulatedToolX = m_anchorAccumulatedToolX;
     context.accumulatedToolY = m_anchorAccumulatedToolY;
     context.hasPreviousAnchorTarget = m_anchorHasPreviousTarget;
     context.previousAnchorX = m_anchorPreviousTargetX;
     context.previousAnchorY = m_anchorPreviousTargetY;
+    context.lockMissingFrames = m_anchorMissingFrames;
+    context.maxLockMissingFrames = VISION_LOCK_MAX_MISSING_FRAMES;
     return context;
 }
 
@@ -1535,6 +1539,7 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz,
     m_anchorHasPreviousTarget = true;
     m_anchorPreviousTargetX = contextSelectedAnchorX;
     m_anchorPreviousTargetY = contextSelectedAnchorY;
+    m_anchorMissingFrames = 0;
     setGrabOffset(x, y, z, rz);
 }
 
@@ -1603,6 +1608,36 @@ void HuayanScheduler::onVisionTargetRejectedForPickup(VisionHttpClient::TargetSe
     case Reason::AnchorTargetJumpTooFar:
         reasonText = QStringLiteral("闭环目标相对上一帧跳变过大");
         break;
+    case Reason::LockTargetMissing:
+    case Reason::LockTargetLost: {
+        const int nextMissingFrames = m_anchorMissingFrames + 1;
+        m_anchorMissingFrames = nextMissingFrames;
+        if (reason == Reason::LockTargetLost
+            || nextMissingFrames >= VISION_LOCK_MAX_MISSING_FRAMES) {
+            emitOperationError(QStringLiteral("[阶段一] 锁定目标连续丢失 %1/%2 帧：%3，锁定=(%4,%5)，拒绝切换旁边工位目标")
+                                   .arg(nextMissingFrames)
+                                   .arg(VISION_LOCK_MAX_MISSING_FRAMES)
+                                   .arg(msg)
+                                   .arg(m_anchorPreviousTargetX, 0, 'f', 1)
+                                   .arg(m_anchorPreviousTargetY, 0, 'f', 1));
+            return;
+        }
+
+        emit logMessage(QStringLiteral("[阶段一] 锁定目标暂时丢失 %1/%2 帧：%3，锁定=(%4,%5)，拒绝切换旁边工位目标，本帧不下发 MoveRelL")
+                            .arg(nextMissingFrames)
+                            .arg(VISION_LOCK_MAX_MISSING_FRAMES)
+                            .arg(msg)
+                            .arg(m_anchorPreviousTargetX, 0, 'f', 1)
+                            .arg(m_anchorPreviousTargetY, 0, 'f', 1));
+        const quint64 seq = nextCallbackSeq();
+        QTimer::singleShot(kVisionSettleMs, this, [this, seq] {
+            if (seq == m_commandSeq
+                && m_stage == Stage::StageOne
+                && m_stageStep == StageStep::WaitForVision)
+                proceedStage();
+        });
+        return;
+    }
     default:
         reasonText = QStringLiteral("锚点可信规则拒绝");
         break;

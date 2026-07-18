@@ -1,8 +1,8 @@
 # 固定拍照锚点视觉目标可信选择设计
 
 **日期：** 2026-07-18
-**状态：** 已实施并完成自动化验证；阈值等待现场根据 anchor distance 日志微调
-**关联日志：** `log/2026-07-17+log.txt`
+**状态：** 已实施并完成自动化验证；2026-07-18 现场验证确认“目标锁定”策略有效，40961 待向华研厂家确认
+**关联日志：** `log/2026-07-17+log.txt`、`log/2026-07-18+log.txt`
 **关联上一版设计：** `docs/superpowers/specs/2026-07-16-field-fault-diagnostics-and-workflow-isolation-design.md`
 
 ## 1. 背景
@@ -115,7 +115,7 @@
 - `VISION_ANCHOR_MAX_TRUST_XY_MM = 450.0`
 - `VISION_ANCHOR_SAME_LAYER_Z_TOL_MM = 20.0`
 - `VISION_ANCHOR_SWITCH_MAX_XY_MM = 220.0`
-- `HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 220.0`
+- `HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 250.0`
 - `HUAYAN_MAX_Z_DESCEND_MM = 1078.0`
 
 这些值不是最终现场标定值，只是第一版保守保护。后续根据日志收紧。
@@ -227,7 +227,7 @@
 单次运动保护日志示例：
 
 ```text
-[阶段一] 目标不可信：计划 Y 微调 253.4mm 超过单次上限 220.0mm，拒绝下发 MoveRelL
+[阶段一] 目标不可信：计划 Y 微调 253.4mm 超过单次上限 250.0mm，拒绝下发 MoveRelL
 ```
 
 ### 6.8 现场调参方式
@@ -348,3 +348,154 @@ ctest --test-dir build-field-fixes --output-on-failure
 - 被拒绝目标是否确实来自旁边工位或明显远离拍照位。
 - 正常抓取的 `anchorDistance` 最大值，用于后续收紧 `VISION_ANCHOR_MAX_TRUST_XY_MM`。
 - 是否还出现 49601；若出现，检查对应命令是否已在上位机保护范围之外。
+
+## 13. 2026-07-18 现场复测后的修订结论
+
+现场使用 `log/2026-07-18+log.txt` 复测后，第一版固定拍照锚点策略能暴露旁边工位目标和异常大位移，但仍不能稳定选中业务目标。主要表现为：
+
+- 同层两个箱子高度接近时，视觉返回的 Z 抖动会让目标在左右两个箱子之间切换。
+- 旁边工位目标偶发识别到时，如果它的 Z 被判断为更高，会让正常目标被拒绝或被抢走。
+- 机械臂开始闭环微调后，如果本帧没有识别到原目标，而只识别到旁边工位目标，不能把旁边工位目标当成新的候选继续追踪。
+- 49601 不能由视觉策略彻底根治，但错误目标导致的 380mm 以上大幅 X/Y 微调可以通过更稳定的目标选择显著减少。
+
+因此，后续策略从“每帧重新按锚点和 Z 选择”升级为“初始锁定目标，闭环只跟踪锁定目标”。
+
+## 14. 目标锁定策略
+
+### 14.1 初始锁定
+
+阶段一第一次到达 `Func_captureN` 拍照位后，视觉选择按以下顺序执行：
+
+1. 先过滤离初始拍照锚点过远的候选，明显属于旁边工位的目标不能参与最高层竞争。
+2. 在可信候选中选择最高层，满足低层箱子不能被夹爪碰撞的业务要求。
+3. 最高层有多个同层候选时，不再按锚点最近或图像中心最近选择，而是按固定侧规则选择。
+4. 选中后记录为本轮锁定目标，保存其锚点坐标、层高参考、固定侧配置和丢帧计数。
+
+### 14.2 闭环跟踪
+
+机械臂开始向锁定目标微调后，后续帧进入闭环跟踪模式：
+
+1. 只允许在锁定目标附近查找候选。
+2. 如果有候选落入锁定目标允许范围，则继续更新锁定目标位置并下发正常微调。
+3. 如果本帧没有找到锁定目标，则本帧不下发 `MoveRelL`，记录一次“锁定目标暂时丢失”。
+4. 连续丢失达到上限后，阶段一失败并停止调度。
+5. 禁止因为原目标本帧丢失，就退回全局最高 Z 选择。
+6. 禁止把旁边工位偶发识别到的目标当作锁定目标的替代目标。
+
+这条规则的核心原则是：视觉可以短暂不稳定，但机械臂不能跟着视觉漂移。宁可等待或停止，也不能自动换到其他工位目标。
+
+### 14.3 固定侧同层选择
+
+同层多个候选时，使用现场可调宏固定选择一侧，避免两个箱子之间左右摇摆。
+
+第一版建议使用 Y 轴固定侧：
+
+```cpp
+#define VISION_LOCK_FIXED_SIDE_AXIS_Y 1
+#define VISION_LOCK_FIXED_SIDE_PICK_MIN 1
+```
+
+含义：
+
+- `VISION_LOCK_FIXED_SIDE_AXIS_Y`：同层候选按 Y 轴做固定侧选择。
+- `VISION_LOCK_FIXED_SIDE_PICK_MIN`：值为 `1` 时选择 Y 最小，值为 `0` 时选择 Y 最大。
+
+如果现场确认应该按 X 轴区分左右，可增加对应宏并保持同一个选择接口。
+
+### 14.4 新增参数
+
+目标锁定参数集中定义在 `visionclient.h`，并在注释中写明单位和现场调参方式：
+
+```cpp
+#define VISION_LOCK_MAX_MISSING_FRAMES 3
+#define VISION_LOCK_TRACK_RADIUS_MM 260.0
+#define VISION_LOCK_SAME_LAYER_Z_TOL_MM 80.0
+#define VISION_LOCK_FIXED_SIDE_AXIS_Y 1
+#define VISION_LOCK_FIXED_SIDE_PICK_MIN 1
+```
+
+参数说明：
+
+- `VISION_LOCK_MAX_MISSING_FRAMES`：锁定目标连续丢失多少帧后阶段失败，第一版使用 3 帧。
+- `VISION_LOCK_TRACK_RADIUS_MM`：闭环候选离锁定目标锚点位置的最大允许距离，单位 mm。
+- `VISION_LOCK_SAME_LAYER_Z_TOL_MM`：目标锁定模式下的同层 Z 容差，单位 mm。
+- `VISION_LOCK_FIXED_SIDE_AXIS_Y`：同层固定侧选择是否使用 Y 轴。
+- `VISION_LOCK_FIXED_SIDE_PICK_MIN`：固定侧选择最小值还是最大值。
+
+这些参数仍是现场可调宏，不是最终标定值。
+
+### 14.5 拒绝执行规则
+
+目标锁定后发生以下情况时，不允许自动切换目标：
+
+- 本帧只识别到旁边工位目标。
+- 本帧候选全部超出锁定目标跟踪半径。
+- 本帧最高 Z 候选与锁定目标不连续。
+- 原目标短暂丢失但丢失帧数未达到上限。
+
+处理方式：
+
+- 丢失帧数未达到上限：记录日志，本帧不下发 `MoveRelL`，等待下一帧。
+- 丢失帧数达到上限：阶段一失败，日志写明锁定目标连续丢失次数、最后一次锁定目标锚点坐标、当前候选摘要。
+
+### 14.6 日志要求
+
+新增日志应保持单行摘要，避免刷屏。每次目标锁定或丢失时记录：
+
+- 当前模式：初始锁定 / 闭环跟踪。
+- 锁定目标锚点坐标。
+- 当前候选到锁定目标的距离。
+- 连续丢失帧数。
+- 是否因固定侧规则选中。
+- 是否拒绝自动切换到旁边工位目标。
+
+示例：
+
+```text
+[视觉锁定] 模式=闭环跟踪 锁定=(23.0,211.3) 候选数=2 最近锁定距离=18.5mm 丢失=0 选中=#0 原因=锁定目标连续
+[视觉锁定] 模式=闭环跟踪 锁定=(23.0,211.3) 候选数=1 最近锁定距离=547.6mm 丢失=1/3 选中=无 原因=锁定目标暂时丢失，拒绝切换旁站目标
+```
+
+## 15. 修订后验收标准
+
+- 初始拍照位第一次选中目标后，闭环过程中不会自动切换到其他工位目标。
+- 同层两个箱子高度接近时，目标按固定侧规则稳定选择，不再左右摇摆。
+- 旁边工位目标即使 Z 更高，也不能抢走锁定目标。
+- 锁定目标短暂丢失时，本帧不下发运动；连续丢失 3 帧后停止阶段一。
+- 40961/49601 若仍出现，应主要来自控制器对正常范围运动的安全空间判断，而不是视觉错误目标导致的大幅跨工位微调。
+
+## 16. 目标锁定实现落地说明
+
+本轮实现保持视觉服务接口不变，只在上位机目标选择和阶段一调度上下文中增加锁定状态：
+
+- `VisionHttpClient::TargetSelectionContext::lockEnabled`：阶段一启用目标锁定策略。
+- `VisionHttpClient::TargetSelectionContext::lockMissingFrames`：调度器传入的当前连续丢失帧数。
+- `VisionHttpClient::TargetSelectionReason::LockInitialHighestLayer`：初始帧在可信候选中锁定唯一最高层目标。
+- `VisionHttpClient::TargetSelectionReason::LockInitialFixedSide`：初始帧最高同层多目标按固定侧锁定。
+- `VisionHttpClient::TargetSelectionReason::LockTrackingTarget`：闭环帧继续跟踪锁定目标附近候选。
+- `VisionHttpClient::TargetSelectionReason::LockTrackingFixedSide`：闭环帧锁定范围内同层多目标按固定侧选择。
+- `VisionHttpClient::TargetSelectionReason::LockTargetMissing`：锁定目标暂时丢失，本帧拒绝下发 `MoveRelL`。
+- `VisionHttpClient::TargetSelectionReason::LockTargetLost`：锁定目标连续丢失达到上限，阶段一失败。
+
+`HuayanScheduler` 维护 `m_anchorMissingFrames`。阶段一第一次选中目标后清零丢失计数；后续如果视觉只识别到旁边工位目标或候选全部超出锁定半径，则不进入普通无目标搜索下移，而是等待下一帧。连续丢失达到 `VISION_LOCK_MAX_MISSING_FRAMES` 后，阶段一失败并记录锁定目标锚点。
+
+本地验证：
+
+```bash
+cmake --build build-field-fixes --target locked_target_selection_tests anchor_target_selection_tests vision_target_selection_tests huayan_scheduler_contract_tests wh-robot-visual -j2
+ctest --test-dir build-field-fixes -R '^(locked_target_selection_tests|anchor_target_selection_tests|vision_target_selection_tests|huayan_scheduler_contract_tests)$' --output-on-failure
+```
+
+## 17. 现场验证结论与华研待确认问题
+
+现场复测结论：
+
+- 目标锁定策略选择效果良好，不再选择到旁边工位目标。
+- 底层目标也可以稳定选择，说明“可信范围内 Z 优先 + 同层固定侧 + 闭环锁定”符合当前业务场景。
+- 该方法依赖现场工位料箱摆放准确性，以及 `Func_captureN` 拍照点位尽量位于当前工位正中间附近；若两者偏差过大，锚点锁定范围会被带偏。
+- 阶段一单次 X/Y 微调硬上限按现场验证同步为 `HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 250.0`。
+
+仍需向华研厂家确认的问题：
+
+- 现场仍出现 `40961`，需要厂家确认错误码含义、触发条件，以及是否与此前日志中的 `49601（Target orientation exceeded cartesian safety space）` 属于同类笛卡尔安全空间限制。
+- 当前上位机只能通过目标锁定和单次 X/Y 微调硬上限减少错误目标导致的大幅运动；控制器对正常范围运动的安全空间拒绝不在上位机侧宣称根治。

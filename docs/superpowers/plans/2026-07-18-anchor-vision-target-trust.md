@@ -2,9 +2,9 @@
 
 > **给智能体执行者：** 必需子技能：使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 按任务执行本计划；步骤使用复选框语法记录进度。
 
-**目标：** 以阶段一最初拍照位作为固定锚点，在当前工位可信目标内按 Z 最高优先选择箱子，并在目标不可信、XY 微调过大或 Z 下探过大时提前拒绝执行，减少 49601 风险。
+**目标：** 以阶段一最初拍照位作为固定锚点，在当前工位可信目标内按 Z 最高优先选择箱子，并在目标不可信、XY 微调过大或 Z 下探过大时提前拒绝执行，减少 40961/49601 风险。
 
-**实施状态（2026-07-18）：** 任务 1-4 已在本地实现；最终审查补丁要求的锚点拒绝执行通道与 Z 未截断计划值硬上限检查已同步到代码/契约/文档。本计划按“一个大功能一次提交”收口为单个本地提交，未推送，等待人工推送。
+**实施状态（2026-07-18）：** 任务 1-4 已在本地实现；最终审查补丁要求的锚点拒绝执行通道与 Z 未截断计划值硬上限检查已同步到代码/契约/文档。本计划按“一个大功能一次提交”收口为单个本地提交，未推送，等待人工推送。7 月 18 日现场复测后确认第一版仍会在视觉不稳定时重新选择旁边工位目标，因此追加任务 5：目标锁定闭环跟踪。
 
 **架构：** `VisionHttpClient` 负责纯视觉候选解析、工具系换算、锚点选择和单行日志；普通无目标继续发 `noObjectDetected()`，`AnchorDistanceTooFar` / `AnchorTargetJumpTooFar` 通过独立拒绝信号交给调度器直接阶段失败。`HuayanScheduler` 负责维护本轮拍照锚点上下文、累计已完成工具系 XY 位移，并在下发机械臂相对运动前做硬保护；Z 下探先按未截断 `plannedDescend = 视觉深度 - 工位余量` 与硬上限(mm)比较，未超限时才计算实际下发距离。测试先锁住纯选择规则和调度契约，再改生产代码。
 
@@ -33,6 +33,9 @@
 - `tests/test_anchor_target_selection.cpp`
   纯逻辑测试：锚点坐标换算、Z 优先、同层锚点最近、目标距离过远、目标跳变过大、顺序稳定。
 
+- `tests/test_locked_target_selection.cpp`
+  目标锁定测试：初始锁定、同层固定侧选择、闭环只跟踪锁定目标、锁定目标短暂丢失不切换、连续丢失达到上限后失败。
+
 ### 修改
 
 - `src/visionclient.h`
@@ -58,6 +61,9 @@
 
 - `docs/superpowers/specs/2026-07-18-anchor-vision-target-trust-design.md`
   实施完成后同步最终接口名、日志格式和验证结果。
+
+- `docs/superpowers/plans/2026-07-18-anchor-vision-target-trust.md`
+  追加现场复测后的目标锁定任务，保持计划和代码后续修改一致。
 
 ---
 
@@ -854,7 +860,7 @@ ctest --test-dir build-field-fixes -R '^huayan_scheduler_contract_tests$' --outp
 修改 `src/huayanScheduler.cpp`，位置靠近现有 `kMaxDescend`：
 
 ```cpp
-static constexpr double HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 220.0; ///< 阶段一单次 XY 微调上限(mm)，现场按 锚点日志微调。
+static constexpr double HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 250.0; ///< 阶段一单次 XY 微调上限(mm)，现场验证 250mm 可覆盖正常锁定目标微调。
 static constexpr double HUAYAN_MAX_Z_DESCEND_MM = 1078.0;       ///< 阶段一 Z 下探硬上限(mm)，不得因临时调试放大。
 ```
 
@@ -957,7 +963,7 @@ ctest --test-dir build-field-fixes -R '^huayan_scheduler_contract_tests$' --outp
 编辑 `docs/superpowers/specs/2026-07-18-anchor-vision-target-trust-design.md`：
 
 ```markdown
-**状态：** 已实施并完成自动化验证；阈值等待现场根据 锚点距离 日志微调
+**状态：** 已实施并完成自动化验证；目标锁定策略已现场验证有效，40961 待向华研厂家确认
 ```
 
 增加验证结果章节：
@@ -976,7 +982,7 @@ ctest --test-dir build-field-fixes -R '^huayan_scheduler_contract_tests$' --outp
 - 多目标时日志中最高层目标的 `anchorDistance`。
 - 被拒绝目标是否确实来自旁边工位或明显远离拍照位。
 - 正常抓取的 `anchorDistance` 最大值，用于后续收紧 `VISION_ANCHOR_MAX_TRUST_XY_MM`。
-- 是否还出现 49601；若出现，检查对应命令是否已在上位机保护范围之外。
+- 是否还出现 40961/49601；若出现，检查对应命令是否已在上位机保护范围之外。
 ```
 
 - [x] **步骤 2：运行空白字符和占位符检查**
@@ -1100,3 +1106,242 @@ git log -2 --oneline
 - 规格覆盖：任务 1-3 覆盖锚点选择、目标不可信、运动保护和日志；任务 4 覆盖文档、验证和单个本地提交。
 - 占位符扫描：本计划不包含禁止的占位符标记。
 - 类型一致性：`TargetSelectionContext` 在任务 1 定义、任务 2 使用；运动保护辅助函数在任务 3 定义并使用。
+
+---
+
+## 任务 5：现场复测后的目标锁定闭环跟踪
+
+**状态：** 已实施并完成现场验证；选择效果良好，40961 待厂家确认。
+
+**目标：** 解决 2026-07-18 现场复测发现的目标左右摇摆、旁边工位目标偶发抢占、锁定目标短暂丢失后误切换的问题。机械臂一旦开始朝某个箱子闭环微调，后续帧只允许继续跟踪这个锁定目标；如果锁定目标暂时识别不到，本帧不下发 `MoveRelL`，连续丢失达到上限后停止阶段一。
+
+**文件：**
+
+- 新增：`tests/test_locked_target_selection.cpp`
+- 修改：`tests/CMakeLists.txt`
+- 修改：`src/visionclient.h`
+- 修改：`src/visionclient.cpp`
+- 修改：`src/huayanScheduler.h`
+- 修改：`src/huayanScheduler.cpp`
+- 修改：`docs/superpowers/specs/2026-07-18-anchor-vision-target-trust-design.md`
+- 修改：`docs/superpowers/plans/2026-07-18-anchor-vision-target-trust.md`
+
+**新增或调整的接口：**
+
+- `VisionHttpClient::TargetSelectionContext`：在原锚点上下文上扩展 `lockEnabled`、`lockMissingFrames`、锁定半径、同层容差和固定侧配置，避免另起一套重复接口。
+- `VisionHttpClient::TargetSelection`：扩展锁定日志字段，包括锁定目标锚点、连续丢失帧数、最近锁定距离和丢失上限。
+- `VisionHttpClient::selectTarget(const QJsonArray &objects, const TargetSelectionContext &context, const float handEyeMatrix[4][4])`：复用现有纯逻辑入口；`lockEnabled=true` 时执行目标锁定策略，未启用时保持原锚点选择行为。
+- `HuayanScheduler::resetVisionAnchorTracking()`：阶段一启动、失败、完成时清空锚点累计和锁定目标丢失状态。
+- `HuayanScheduler::setGrabOffset(..., contextSelectedAnchorX, contextSelectedAnchorY)`：视觉选中后更新锁定目标锚点并清零连续丢失帧数。
+
+**新增宏：**
+
+```cpp
+// 锁定目标连续丢失帧数上限；达到后阶段一失败，避免视觉飘到旁边工位后继续追踪。
+#define VISION_LOCK_MAX_MISSING_FRAMES 3
+
+// 闭环候选离锁定目标锚点位置的最大允许距离，单位 mm；超过则认为不是同一个箱子。
+#define VISION_LOCK_TRACK_RADIUS_MM 260.0
+
+// 目标锁定模式下的同层 Z 容差，单位 mm；用于把同一层两个箱子归为同层候选。
+#define VISION_LOCK_SAME_LAYER_Z_TOL_MM 80.0
+
+// 同层固定侧选择使用 Y 轴；现场若确认应按 X 轴区分，可新增 X 轴宏并切换。
+#define VISION_LOCK_FIXED_SIDE_AXIS_Y 1
+
+// 固定侧选择是否取较小坐标值；1 表示取 Y 最小，0 表示取 Y 最大。
+#define VISION_LOCK_FIXED_SIDE_PICK_MIN 1
+```
+
+- [x] **步骤 1：增加目标锁定纯逻辑测试**
+
+新增 `tests/test_locked_target_selection.cpp`，覆盖以下场景：
+
+1. 初始帧先过滤锚点距离过远目标，再在可信目标中选最高层。
+2. 最高层同层有两个候选时，按固定侧规则选择，不按锚点最近摇摆。
+3. 闭环帧存在锁定目标附近候选时，继续选锁定目标附近候选。
+4. 闭环帧只识别到旁边工位目标时，返回“锁定目标暂时丢失”，不返回普通目标。
+5. 连续丢失未达到 `VISION_LOCK_MAX_MISSING_FRAMES` 时，不下发运动但不立即切换目标。
+6. 连续丢失达到 `VISION_LOCK_MAX_MISSING_FRAMES` 时，返回阶段失败原因。
+7. 日志必须包含锁定目标锚点、候选到锁定目标距离、丢失帧数和拒绝切换原因。
+
+预期红灯：
+
+```bash
+cmake --build build-field-fixes --target locked_target_selection_tests -j2
+```
+
+构建失败或测试失败，因为目标锁定接口尚不存在。
+
+- [x] **步骤 2：注册测试目标**
+
+修改 `tests/CMakeLists.txt`，增加 `locked_target_selection_tests`，链接 Qt Core/Gui/Network，并加入 CTest。
+
+预期：
+
+```bash
+ctest --test-dir build-field-fixes -R '^locked_target_selection_tests$' --output-on-failure
+```
+
+测试目标能被 CTest 发现，且在实现前保持失败。
+
+- [x] **步骤 3：在视觉客户端增加锁定上下文和选择结果**
+
+修改 `src/visionclient.h`：
+
+1. 增加目标锁定宏，并为每个宏写明单位、业务含义和现场调参方式。
+2. 扩展 `TargetSelectionContext`，字段注释必须说明生命周期：
+   - 是否处于锁定模式。
+   - 是否已有锁定目标。
+   - 锁定目标锚点 X/Y。
+   - 连续丢失帧数。
+   - 最大丢失帧数。
+   - 跟踪半径。
+   - 同层 Z 容差。
+   - 固定侧轴和固定侧方向。
+3. 扩展 `TargetSelection`，字段注释必须说明调度器如何使用：
+   - 是否选中目标。
+   - 是否锁定目标暂时丢失。
+   - 是否达到丢失上限。
+   - 本帧最新丢失帧数。
+   - 最近候选到锁定目标的距离。
+   - 单行日志摘要。
+
+预期：头文件能清楚表达“锁定后不允许自动切换”的业务规则。
+
+- [x] **步骤 4：实现初始锁定选择**
+
+修改 `src/visionclient.cpp`：
+
+1. 复用现有候选解析、工具系换算和锚点坐标计算。
+2. 初始未锁定时，先排除 `anchorDistance > VISION_ANCHOR_MAX_TRUST_XY_MM` 的候选。
+3. 在可信候选中选择最高层。
+4. 最高层同层多个候选时，使用固定侧规则选择：
+   - `VISION_LOCK_FIXED_SIDE_AXIS_Y == 1` 时按候选 raw `y` 比较。
+   - `VISION_LOCK_FIXED_SIDE_PICK_MIN == 1` 时取较小值，否则取较大值。
+5. 选中后返回锁定目标锚点坐标，供调度器保存。
+
+预期：旁边工位目标即使 Z 更高，只要锚点距离不可信，就不能参与初始锁定。
+
+- [x] **步骤 5：实现闭环锁定跟踪**
+
+修改 `src/visionclient.cpp`：
+
+1. 已有锁定目标时，不执行全局最高 Z 重新选择。
+2. 计算每个候选到锁定目标锚点的距离。
+3. 只保留距离小于等于 `VISION_LOCK_TRACK_RADIUS_MM` 的候选。
+4. 如果存在锁定范围内候选，在这些候选里按最高层和固定侧规则选择。
+5. 如果不存在锁定范围内候选，返回“锁定目标暂时丢失”，并给出最新丢失帧数。
+6. 丢失达到上限时，返回“锁定目标连续丢失达到上限”。
+
+预期：视觉某帧只识别到旁边工位目标时，程序不切换目标、不下发运动。
+
+- [x] **步骤 6：调度器维护目标锁定状态**
+
+修改 `src/huayanScheduler.h/.cpp`：
+
+1. 阶段一开始、失败、完成时调用 `resetVisionAnchorTracking()`。
+2. 第一次视觉选中后记录锁定目标锚点。
+3. 闭环视觉选中后更新锁定目标锚点并清零丢失帧数。
+4. 锁定目标暂时丢失时增加丢失帧数，本帧不下发 `MoveRelL`。
+5. 连续丢失达到上限时，调用阶段失败流程，不进入普通无目标搜索下移。
+6. 日志写清楚：
+   - 当前工位。
+   - 锁定目标锚点。
+   - 丢失帧数。
+   - 本帧候选摘要。
+   - 是否拒绝切换旁边工位目标。
+
+预期：机械臂闭环过程中不会因为视觉不稳定漂到其他工位。
+
+- [x] **步骤 7：保留并强化运动保护**
+
+确认 `HUAYAN_MAX_SINGLE_XY_ADJUST_MM` 继续在下发 `MoveRelL` 前生效。
+
+要求：
+
+1. 目标锁定策略减少 380mm 以上大幅错误微调。
+2. 如果仍出现大幅微调，单次 XY 上限继续 fail-closed 拒绝下发。
+3. 不继续通过放大 `HUAYAN_MAX_SINGLE_XY_ADJUST_MM` 来绕过 40961/49601；250mm 是当前现场验证值。
+
+预期：40961/49601 风险降低，但不承诺由上位机彻底根治控制器安全空间拒绝。
+
+- [x] **步骤 8：更新文档和日志说明**
+
+更新 `docs/superpowers/specs/2026-07-18-anchor-vision-target-trust-design.md` 和本计划：
+
+1. 写明第一版锚点策略的现场问题。
+2. 写明目标锁定策略替代“每帧全局重新选择”的原因。
+3. 写明新增宏、接口、日志字段和验收标准。
+4. 所有正文说明使用中文。
+
+预期：文档和代码保持一致。
+
+- [x] **步骤 9：验证**
+
+运行：
+
+```bash
+cmake --build build-field-fixes --target \
+  locked_target_selection_tests \
+  anchor_target_selection_tests \
+  vision_target_selection_tests \
+  huayan_scheduler_contract_tests \
+  wh-robot-visual \
+  -j2
+
+ctest --test-dir build-field-fixes \
+  -R '^(locked_target_selection_tests|anchor_target_selection_tests|vision_target_selection_tests|huayan_scheduler_contract_tests)$' \
+  --output-on-failure
+
+cmake --build build-field-fixes -j2
+ctest --test-dir build-field-fixes --output-on-failure
+```
+
+预期：
+
+- 新增锁定目标测试通过。
+- 旧锚点选择测试继续通过。
+- 调度器契约测试继续通过。
+- 主程序构建通过。
+- 全量 CTest 通过。
+
+- [x] **步骤 10：提交前检查**
+
+运行：
+
+```bash
+git diff --check
+git status --short
+git diff --stat
+```
+
+确认：
+
+- 未推送。
+- 未暂存用户未跟踪 JSON 文件。
+- 日志文件不加入提交。
+- 目标锁定代码、测试、spec 和 plan 一起作为一个功能提交。
+
+### 任务 5 本地与现场验证记录
+
+2026-07-18 本地 `build-field-fixes` 验证：
+
+- `locked_target_selection_tests`：构建通过，CTest 通过。
+- `anchor_target_selection_tests`：构建通过，CTest 通过。
+- `vision_target_selection_tests`：构建通过，CTest 通过。
+- `huayan_scheduler_contract_tests`：构建通过，CTest 通过。
+- `wh-robot-visual`：构建通过。
+
+2026-07-18 现场验证：
+
+- 目标锁定选择效果良好，未再选择到旁边工位目标。
+- 底层目标可正常选择。
+- 方法依赖工位料箱摆放准确性和拍照点位接近当前工位中心。
+- `HUAYAN_MAX_SINGLE_XY_ADJUST_MM` 同步现场验证值 `250.0mm`。
+- 华研 `40961` 仍需向厂家确认；此前日志同类问题曾记录为 `49601（Target orientation exceeded cartesian safety space）`。
+
+提交状态：
+
+- 本次按用户要求未提交、未推送。
+- `test-events.jsonl`、`test-state.backup.json`、`test-state.json` 保持未跟踪，未暂存。

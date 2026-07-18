@@ -140,6 +140,8 @@ int main()
                     && header.contains(QStringLiteral("makeVisionTargetSelectionContext() const"))
                     && header.contains(QStringLiteral("recordCompletedGrabMove(const RelMove &move)")),
                 "HuayanScheduler 必须声明锚点清零、上下文生成和已完成微调累计接口");
+    requireTrue(header.contains(QStringLiteral("m_anchorMissingFrames")),
+                "HuayanScheduler 必须维护锁定目标连续丢失帧数，避免视觉丢帧时切换旁站目标");
 
     const QString startStageOneBody = requireBracedScopeAfter(
         source, QStringLiteral("void HuayanScheduler::startStageOne()"),
@@ -160,6 +162,9 @@ int main()
         {QStringLiteral("m_visionClient->setTargetSelectionContext(makeVisionTargetSelectionContext())"),
          QStringLiteral("emit surveyReady();")},
         "每次进入 WaitForVision 发起推理前必须在 surveyReady 前注入固定拍照锚点上下文");
+    requireTrue(source.contains(QStringLiteral("context.lockEnabled = true"))
+                    && source.contains(QStringLiteral("context.lockMissingFrames = m_anchorMissingFrames")),
+                "阶段一视觉上下文必须启用目标锁定，并把连续丢失帧数传给 VisionHttpClient");
 
     const QString onPollTickBody = requireBracedScopeAfter(
         source, QStringLiteral("void HuayanScheduler::onPollTick()"),
@@ -246,6 +251,10 @@ int main()
     requireTrue(source.contains(QStringLiteral("m_anchorHasPreviousTarget = true"))
                     && source.contains(QStringLiteral("m_anchorPreviousTargetX = contextSelectedAnchorX")),
                 "收到可信视觉结果后必须记录上一帧锚点目标用于跳变保护");
+    requireTrue(source.contains(QStringLiteral("m_anchorMissingFrames = 0"))
+                    && source.contains(QStringLiteral("锁定目标暂时丢失"))
+                    && source.contains(QStringLiteral("拒绝切换旁边工位目标")),
+                "锁定目标选中后必须清零丢失帧数；锁定目标丢失时必须等待下一帧或失败，不能切换旁站目标");
     const QString visionHeader =
         readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/visionclient.h"));
     const QString visionSource =

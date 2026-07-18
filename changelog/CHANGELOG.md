@@ -5,6 +5,33 @@
 
 ---
 
+## 2026-07-18 | v0.2.4 | 阶段一视觉目标锁定现场确认与华研 40961 记录
+
+### 变更
+- 将阶段一视觉目标选择确定为“初始拍照锚点锁定 + 闭环只跟踪锁定目标”策略；现场验证选择效果良好，可避免抓取旁边工位目标。
+- README 增加视觉目标锁定方法说明，明确该方法依赖工位料箱摆放准确性和 `Func_captureN` 拍照点位接近当前工位中心。
+- 将阶段一单次 X/Y 微调硬上限 `HUAYAN_MAX_SINGLE_XY_ADJUST_MM` 同步为现场验证值 `250.0mm`。
+- 记录华研控制器 `40961` 仍待厂家确认；此前诊断日志中同类安全空间问题曾出现 `49601 Target orientation exceeded cartesian safety space`，后续需向华研确认错误码含义和触发条件。
+
+### 验证
+- 现场验证：目标锁定策略不会选择旁边工位，底层目标也可稳定选择；剩余主要问题为华研控制器 40961。
+- 本地验证：`locked_target_selection_tests`、`anchor_target_selection_tests`、`vision_target_selection_tests`、`huayan_scheduler_contract_tests` 和全量 CTest 通过。
+
+### 文件
+- `src/visionclient.h`
+- `src/visionclient.cpp`
+- `src/huayanScheduler.h`
+- `src/huayanScheduler.cpp`
+- `tests/CMakeLists.txt`
+- `tests/test_locked_target_selection.cpp`
+- `tests/test_huayan_scheduler_contract.cpp`
+- `README.md`
+- `docs/superpowers/specs/2026-07-18-anchor-vision-target-trust-design.md`
+- `docs/superpowers/plans/2026-07-18-anchor-vision-target-trust.md`
+- `changelog/CHANGELOG.md`
+
+---
+
 ## 2026-07-08 | v0.2.4 | 工位12取料站点对齐、抓取余量修正与 AGV 步骤超时调整
 
 ### 变更

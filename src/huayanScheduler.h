@@ -472,6 +472,7 @@ private:
     bool m_anchorHasPreviousTarget = false; ///< 是否已有上一帧可信目标用于闭环跳变保护。
     double m_anchorPreviousTargetX = 0.0; ///< 上一帧可信目标相对初始拍照锚点 X(mm)。
     double m_anchorPreviousTargetY = 0.0; ///< 上一帧可信目标相对初始拍照锚点 Y(mm)。
+    int m_anchorMissingFrames = 0; ///< 锁定目标连续丢失帧数；达到 VISION_LOCK_MAX_MISSING_FRAMES 后阶段一失败。
     Pose m_pickupPose;
     Pose m_pickupLiftPose;
     Pose m_unloadPose;

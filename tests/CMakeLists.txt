@@ -151,6 +151,24 @@ target_link_libraries(anchor_target_selection_tests PRIVATE
 add_test(NAME anchor_target_selection_tests
          COMMAND anchor_target_selection_tests)
 
+add_executable(locked_target_selection_tests
+    test_locked_target_selection.cpp
+    ../src/visionclient.cpp
+)
+
+target_include_directories(locked_target_selection_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(locked_target_selection_tests PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Network
+)
+
+add_test(NAME locked_target_selection_tests
+         COMMAND locked_target_selection_tests)
+
 add_executable(standalone_pickup_contract_tests
     test_standalone_pickup_contract.cpp
 )

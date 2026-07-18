@@ -50,6 +50,21 @@
 // 闭环过程中本帧目标相对上一帧锚点位置的最大可信跳变，单位 mm。
 #define VISION_ANCHOR_SWITCH_MAX_XY_MM 220.0
 
+// 锁定目标连续丢失帧数上限；达到后阶段一失败，避免视觉飘到旁边工位后继续追踪。
+#define VISION_LOCK_MAX_MISSING_FRAMES 3
+
+// 闭环候选离锁定目标锚点位置的最大允许距离，单位 mm；超过则认为不是同一个箱子。
+#define VISION_LOCK_TRACK_RADIUS_MM 260.0
+
+// 目标锁定模式下的同层 Z 容差，单位 mm；用于把同一层两个箱子归为同层候选。
+#define VISION_LOCK_SAME_LAYER_Z_TOL_MM 80.0
+
+// 同层固定侧选择使用 Y 轴；现场若确认应按 X 轴区分，可新增 X 轴宏并切换。
+#define VISION_LOCK_FIXED_SIDE_AXIS_Y 1
+
+// 固定侧选择是否取较小坐标值；1 表示取 Y 最小，0 表示取 Y 最大。
+#define VISION_LOCK_FIXED_SIDE_PICK_MIN 1
+
 class VisionHttpClient : public QObject
 {
     Q_OBJECT
@@ -74,20 +89,33 @@ public:
         AnchorHighestLayer,     ///< 锚点逻辑：可信范围内只有一个最高层候选。
         AnchorSameLayerNearest, ///< 锚点逻辑：可信最高层有多个候选，按锚点 XY 最近选择。
         AnchorDistanceTooFar,   ///< 最高层候选离初始拍照锚点过远，目标不可信。
-        AnchorTargetJumpTooFar  ///< 闭环目标相对上一帧锚点位置跳变过大，目标不可信。
+        AnchorTargetJumpTooFar, ///< 闭环目标相对上一帧锚点位置跳变过大，目标不可信。
+        LockInitialHighestLayer, ///< 目标锁定：初始帧在可信候选中选中唯一最高层目标。
+        LockInitialFixedSide,    ///< 目标锁定：初始帧最高同层多目标按固定侧选择。
+        LockTrackingTarget,      ///< 目标锁定：闭环帧继续跟踪锁定目标附近候选。
+        LockTrackingFixedSide,   ///< 目标锁定：闭环帧锁定范围内同层多目标按固定侧选择。
+        LockTargetMissing,       ///< 目标锁定：本帧未找到锁定目标，暂不切换目标。
+        LockTargetLost           ///< 目标锁定：锁定目标连续丢失达到上限，阶段应失败。
     };
 
     /// 阶段一固定拍照锚点选择上下文；由 HuayanScheduler 在每次推理前注入。
     struct TargetSelectionContext {
         bool anchorEnabled = false; ///< false 时使用兼容旧选择逻辑。
+        bool lockEnabled = false; ///< true 时启用“初始锁定 + 闭环只跟踪锁定目标”策略。
         double accumulatedToolX = 0.0; ///< 初始拍照位到当前相机位置的已完成工具系 X 位移(mm)。
         double accumulatedToolY = 0.0; ///< 初始拍照位到当前相机位置的已完成工具系 Y 位移(mm)。
-        bool hasPreviousAnchorTarget = false; ///< 是否有上一帧可信目标用于跳变保护。
-        double previousAnchorX = 0.0; ///< 上一帧可信目标相对初始拍照锚点的 X(mm)。
-        double previousAnchorY = 0.0; ///< 上一帧可信目标相对初始拍照锚点的 Y(mm)。
+        bool hasPreviousAnchorTarget = false; ///< 是否已有锁定/上一帧可信目标；锁定模式下表示闭环已锁定。
+        double previousAnchorX = 0.0; ///< 锁定/上一帧可信目标相对初始拍照锚点的 X(mm)。
+        double previousAnchorY = 0.0; ///< 锁定/上一帧可信目标相对初始拍照锚点的 Y(mm)。
         double maxTrustDistance = VISION_ANCHOR_MAX_TRUST_XY_MM; ///< 目标可信最大锚点距离(mm)。
         double sameLayerZTol = VISION_ANCHOR_SAME_LAYER_Z_TOL_MM; ///< 同层 Z 容差(mm)。
         double maxSwitchDistance = VISION_ANCHOR_SWITCH_MAX_XY_MM; ///< 闭环目标最大跳变(mm)。
+        int lockMissingFrames = 0; ///< 锁定目标已经连续丢失的帧数；由调度器跨帧维护。
+        int maxLockMissingFrames = VISION_LOCK_MAX_MISSING_FRAMES; ///< 锁定目标连续丢失失败上限，单位 帧。
+        double lockTrackRadius = VISION_LOCK_TRACK_RADIUS_MM; ///< 闭环候选离锁定目标的最大允许距离(mm)。
+        double lockSameLayerZTol = VISION_LOCK_SAME_LAYER_Z_TOL_MM; ///< 锁定模式同层 Z 容差(mm)。
+        bool lockFixedSideAxisY = VISION_LOCK_FIXED_SIDE_AXIS_Y != 0; ///< true 按 raw Y 固定侧选择，false 按 raw X。
+        bool lockFixedSidePickMin = VISION_LOCK_FIXED_SIDE_PICK_MIN != 0; ///< true 取较小坐标，false 取较大坐标。
     };
 
     /// 单个视觉候选；坐标仍处于视觉 API 的原始 offset/depth 空间，单位均为 mm。
@@ -110,6 +138,7 @@ public:
         double anchorX = 0.0;         ///< 候选相对初始拍照锚点的 X(mm)。
         double anchorY = 0.0;         ///< 候选相对初始拍照锚点的 Y(mm)。
         double anchorDistance = 0.0;  ///< 候选离初始拍照锚点的 XY 距离(mm)。
+        double lockDistance = 0.0;    ///< 候选离当前锁定目标锚点位置的 XY 距离(mm)，仅锁定闭环模式有意义。
         bool trusted = true;          ///< 锚点逻辑下候选是否通过最终可信检查。
     };
 
@@ -118,6 +147,14 @@ public:
         QList<TargetCandidate> candidates; ///< 保留所有原始候选的解析/ROI 状态，供单行日志使用。
         int selectedCandidateIndex = -1;   ///< 最终候选在 candidates 中的下标；-1 表示无目标。
         TargetSelectionReason reason = TargetSelectionReason::None; ///< 最终选择规则。
+        bool lockContextActive = false; ///< 本次选择是否启用了目标锁定模式，用于日志区分普通锚点逻辑。
+        bool hasLockTarget = false;     ///< 本次是否已有锁定目标；false 表示初始锁定帧。
+        double lockAnchorX = 0.0;       ///< 当前锁定目标相对初始拍照锚点的 X(mm)，日志用。
+        double lockAnchorY = 0.0;       ///< 当前锁定目标相对初始拍照锚点的 Y(mm)，日志用。
+        int lockMissingFrames = 0;      ///< 本次选择后的连续丢失帧数，调度器据此决定等待或失败。
+        int maxLockMissingFrames = VISION_LOCK_MAX_MISSING_FRAMES; ///< 连续丢失失败上限，单位 帧。
+        double nearestLockDistance = 0.0; ///< 本帧最近候选离锁定目标的距离(mm)，无候选时为 0。
+        bool hasNearestLockDistance = false; ///< true 表示 nearestLockDistance 有实际候选数据。
 
         bool hasTarget() const
         {

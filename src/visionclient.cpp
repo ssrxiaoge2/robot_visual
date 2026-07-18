@@ -204,6 +204,66 @@ double distanceSq(double x, double y)
     return x * x + y * y;
 }
 
+double lockSideValue(const VisionHttpClient::TargetCandidate &candidate,
+                     const VisionHttpClient::TargetSelectionContext &context)
+{
+    return context.lockFixedSideAxisY ? candidate.y : candidate.x;
+}
+
+bool isBetterFixedSideCandidate(const VisionHttpClient::TargetCandidate &candidate,
+                                const VisionHttpClient::TargetCandidate &best,
+                                const VisionHttpClient::TargetSelectionContext &context)
+{
+    const double candidateValue = lockSideValue(candidate, context);
+    const double bestValue = lockSideValue(best, context);
+    if (context.lockFixedSidePickMin) {
+        if (candidateValue < bestValue)
+            return true;
+        if (candidateValue > bestValue)
+            return false;
+    } else {
+        if (candidateValue > bestValue)
+            return true;
+        if (candidateValue < bestValue)
+            return false;
+    }
+    return candidate.sourceIndex < best.sourceIndex;
+}
+
+QList<int> sameLayerIndexesFor(const QList<VisionHttpClient::TargetCandidate> &candidates,
+                               const QList<int> &candidateIndexes,
+                               double sameLayerTol)
+{
+    QList<int> sameLayerIndexes;
+    if (candidateIndexes.isEmpty())
+        return sameLayerIndexes;
+
+    double highestDepth = candidates.at(candidateIndexes.first()).depth;
+    for (int candidateIndex : candidateIndexes)
+        highestDepth = qMin(highestDepth, candidates.at(candidateIndex).depth);
+
+    for (int candidateIndex : candidateIndexes) {
+        if (qAbs(candidates.at(candidateIndex).depth - highestDepth) <= sameLayerTol)
+            sameLayerIndexes.append(candidateIndex);
+    }
+    return sameLayerIndexes;
+}
+
+int chooseFixedSideCandidate(const QList<VisionHttpClient::TargetCandidate> &candidates,
+                             const QList<int> &candidateIndexes,
+                             const VisionHttpClient::TargetSelectionContext &context)
+{
+    int bestIndex = candidateIndexes.first();
+    for (int candidateIndex : candidateIndexes) {
+        if (isBetterFixedSideCandidate(candidates.at(candidateIndex),
+                                       candidates.at(bestIndex),
+                                       context)) {
+            bestIndex = candidateIndex;
+        }
+    }
+    return bestIndex;
+}
+
 struct ToolCoords {
     double x = 0.0;
     double y = 0.0;
@@ -261,6 +321,18 @@ QString selectionReasonText(VisionHttpClient::TargetSelectionReason reason)
         return QStringLiteral("最高目标离拍照锚点过远，目标不可信");
     case Reason::AnchorTargetJumpTooFar:
         return QStringLiteral("目标跳变过大，目标不可信");
+    case Reason::LockInitialHighestLayer:
+        return QStringLiteral("锁定初始最高层");
+    case Reason::LockInitialFixedSide:
+        return QStringLiteral("锁定初始同层固定侧");
+    case Reason::LockTrackingTarget:
+        return QStringLiteral("锁定目标连续");
+    case Reason::LockTrackingFixedSide:
+        return QStringLiteral("锁定同层固定侧");
+    case Reason::LockTargetMissing:
+        return QStringLiteral("锁定目标暂时丢失，拒绝切换旁站目标");
+    case Reason::LockTargetLost:
+        return QStringLiteral("锁定目标连续丢失达到上限，拒绝切换旁站目标");
     case Reason::None:
         return QStringLiteral("无目标");
     }
@@ -271,7 +343,9 @@ bool isAnchorTrustRejection(VisionHttpClient::TargetSelectionReason reason)
 {
     using Reason = VisionHttpClient::TargetSelectionReason;
     return reason == Reason::AnchorDistanceTooFar
-        || reason == Reason::AnchorTargetJumpTooFar;
+        || reason == Reason::AnchorTargetJumpTooFar
+        || reason == Reason::LockTargetMissing
+        || reason == Reason::LockTargetLost;
 }
 
 } // namespace
@@ -372,6 +446,12 @@ VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(
         return selectTarget(objects);
 
     TargetSelection selection;
+    selection.lockContextActive = context.lockEnabled;
+    selection.hasLockTarget = context.lockEnabled && context.hasPreviousAnchorTarget;
+    selection.lockAnchorX = context.previousAnchorX;
+    selection.lockAnchorY = context.previousAnchorY;
+    selection.lockMissingFrames = context.lockMissingFrames;
+    selection.maxLockMissingFrames = context.maxLockMissingFrames;
     QList<int> validIndexes;
 
     for (int sourceIndex = 0; sourceIndex < objects.size(); ++sourceIndex) {
@@ -419,13 +499,87 @@ VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(
         candidate.anchorY = context.accumulatedToolY + candidate.alignmentY;
         candidate.anchorDistance = std::sqrt(distanceSq(candidate.anchorX, candidate.anchorY));
         candidate.trusted = candidate.anchorDistance <= context.maxTrustDistance;
+        if (context.lockEnabled && context.hasPreviousAnchorTarget) {
+            candidate.lockDistance = std::sqrt(distanceSq(candidate.anchorX - context.previousAnchorX,
+                                                          candidate.anchorY - context.previousAnchorY));
+            if (!selection.hasNearestLockDistance
+                || candidate.lockDistance < selection.nearestLockDistance) {
+                selection.nearestLockDistance = candidate.lockDistance;
+                selection.hasNearestLockDistance = true;
+            }
+        }
         candidate.insideStationRoi = true;
         selection.candidates.append(candidate);
         validIndexes.append(selection.candidates.size() - 1);
     }
 
-    if (validIndexes.isEmpty())
+    if (validIndexes.isEmpty()) {
+        if (context.lockEnabled && context.hasPreviousAnchorTarget) {
+            const int nextMissingFrames = context.lockMissingFrames + 1;
+            selection.lockMissingFrames = nextMissingFrames;
+            selection.reason = nextMissingFrames >= context.maxLockMissingFrames
+                ? TargetSelectionReason::LockTargetLost
+                : TargetSelectionReason::LockTargetMissing;
+        }
         return selection;
+    }
+
+    if (context.lockEnabled) {
+        if (context.hasPreviousAnchorTarget) {
+            QList<int> lockedIndexes;
+            for (int candidateIndex : validIndexes) {
+                const TargetCandidate &candidate = selection.candidates.at(candidateIndex);
+                if (candidate.trusted && candidate.lockDistance <= context.lockTrackRadius)
+                    lockedIndexes.append(candidateIndex);
+                else
+                    selection.candidates[candidateIndex].trusted = false;
+            }
+
+            if (lockedIndexes.isEmpty()) {
+                const int nextMissingFrames = context.lockMissingFrames + 1;
+                selection.lockMissingFrames = nextMissingFrames;
+                selection.reason = nextMissingFrames >= context.maxLockMissingFrames
+                    ? TargetSelectionReason::LockTargetLost
+                    : TargetSelectionReason::LockTargetMissing;
+                return selection;
+            }
+
+            const QList<int> sameLayerIndexes =
+                sameLayerIndexesFor(selection.candidates, lockedIndexes, context.lockSameLayerZTol);
+            const int bestIndex = chooseFixedSideCandidate(selection.candidates, sameLayerIndexes, context);
+            selection.selectedCandidateIndex = bestIndex;
+            selection.lockMissingFrames = 0;
+            selection.lockAnchorX = selection.candidates.at(bestIndex).anchorX;
+            selection.lockAnchorY = selection.candidates.at(bestIndex).anchorY;
+            selection.reason = sameLayerIndexes.size() > 1
+                ? TargetSelectionReason::LockTrackingFixedSide
+                : TargetSelectionReason::LockTrackingTarget;
+            return selection;
+        }
+
+        QList<int> trustedIndexes;
+        for (int candidateIndex : validIndexes) {
+            if (selection.candidates.at(candidateIndex).trusted)
+                trustedIndexes.append(candidateIndex);
+        }
+
+        if (trustedIndexes.isEmpty()) {
+            selection.reason = TargetSelectionReason::AnchorDistanceTooFar;
+            return selection;
+        }
+
+        const QList<int> sameLayerIndexes =
+            sameLayerIndexesFor(selection.candidates, trustedIndexes, context.lockSameLayerZTol);
+        const int bestIndex = chooseFixedSideCandidate(selection.candidates, sameLayerIndexes, context);
+        selection.selectedCandidateIndex = bestIndex;
+        selection.lockMissingFrames = 0;
+        selection.lockAnchorX = selection.candidates.at(bestIndex).anchorX;
+        selection.lockAnchorY = selection.candidates.at(bestIndex).anchorY;
+        selection.reason = sameLayerIndexes.size() > 1
+            ? TargetSelectionReason::LockInitialFixedSide
+            : TargetSelectionReason::LockInitialHighestLayer;
+        return selection;
+    }
 
     double highestDepth = selection.candidates.at(validIndexes.first()).depth;
     for (int candidateIndex : validIndexes)
@@ -483,7 +637,13 @@ QString VisionHttpClient::formatTargetSelectionLog(const TargetSelection &select
     const bool includeAnchorText = selection.reason == Reason::AnchorHighestLayer
         || selection.reason == Reason::AnchorSameLayerNearest
         || selection.reason == Reason::AnchorDistanceTooFar
-        || selection.reason == Reason::AnchorTargetJumpTooFar;
+        || selection.reason == Reason::AnchorTargetJumpTooFar
+        || selection.reason == Reason::LockInitialHighestLayer
+        || selection.reason == Reason::LockInitialFixedSide
+        || selection.reason == Reason::LockTrackingTarget
+        || selection.reason == Reason::LockTrackingFixedSide
+        || selection.reason == Reason::LockTargetMissing
+        || selection.reason == Reason::LockTargetLost;
     for (const TargetCandidate &candidate : selection.candidates) {
         if (!candidate.valid) {
             candidateParts.append(QStringLiteral("#%1 非法(%2)")
@@ -493,16 +653,27 @@ QString VisionHttpClient::formatTargetSelectionLog(const TargetSelection &select
         }
         if (candidate.insideStationRoi)
             ++insideCount;
-        const QString anchorText = includeAnchorText
-            ? QStringLiteral(" tool=(%1,%2,%3) anchor=(%4,%5) dist=%6 %7")
-                  .arg(candidate.toolX, 0, 'f', 1)
-                  .arg(candidate.toolY, 0, 'f', 1)
-                  .arg(candidate.toolZ, 0, 'f', 1)
-                  .arg(candidate.anchorX, 0, 'f', 1)
-                  .arg(candidate.anchorY, 0, 'f', 1)
-                  .arg(candidate.anchorDistance, 0, 'f', 1)
-                  .arg(candidate.trusted ? QStringLiteral("可信") : QStringLiteral("不可信"))
-            : QString();
+        QString anchorText;
+        if (includeAnchorText) {
+            anchorText = selection.lockContextActive
+                ? QStringLiteral(" tool=(%1,%2,%3) anchor=(%4,%5) dist=%6 lockdist=%7 %8")
+                      .arg(candidate.toolX, 0, 'f', 1)
+                      .arg(candidate.toolY, 0, 'f', 1)
+                      .arg(candidate.toolZ, 0, 'f', 1)
+                      .arg(candidate.anchorX, 0, 'f', 1)
+                      .arg(candidate.anchorY, 0, 'f', 1)
+                      .arg(candidate.anchorDistance, 0, 'f', 1)
+                      .arg(candidate.lockDistance, 0, 'f', 1)
+                      .arg(candidate.trusted ? QStringLiteral("可信") : QStringLiteral("不可信"))
+                : QStringLiteral(" tool=(%1,%2,%3) anchor=(%4,%5) dist=%6 %7")
+                      .arg(candidate.toolX, 0, 'f', 1)
+                      .arg(candidate.toolY, 0, 'f', 1)
+                      .arg(candidate.toolZ, 0, 'f', 1)
+                      .arg(candidate.anchorX, 0, 'f', 1)
+                      .arg(candidate.anchorY, 0, 'f', 1)
+                      .arg(candidate.anchorDistance, 0, 'f', 1)
+                      .arg(candidate.trusted ? QStringLiteral("可信") : QStringLiteral("不可信"));
+        }
         candidateParts.append(QStringLiteral("#%1 x=%2 y=%3 z=%4 %5%6")
                                   .arg(candidate.sourceIndex)
                                   .arg(candidate.x, 0, 'f', 1)
@@ -518,9 +689,22 @@ QString VisionHttpClient::formatTargetSelectionLog(const TargetSelection &select
         ? QStringLiteral("#%1")
               .arg(selection.candidates.at(selection.selectedCandidateIndex).sourceIndex)
         : QStringLiteral("无");
-    return QStringLiteral("[视觉选择] 候选数=%1 范围内=%2 [%3] 选中=%4 原因=%5")
+    QString lockText;
+    if (selection.lockContextActive) {
+        const QString nearestText = selection.hasNearestLockDistance
+            ? QString::number(selection.nearestLockDistance, 'f', 1)
+            : QStringLiteral("无候选");
+        lockText = QStringLiteral(" 锁定=(%1,%2) 最近锁定距离=%3 丢失=%4/%5")
+                       .arg(selection.lockAnchorX, 0, 'f', 1)
+                       .arg(selection.lockAnchorY, 0, 'f', 1)
+                       .arg(nearestText)
+                       .arg(selection.lockMissingFrames)
+                       .arg(selection.maxLockMissingFrames);
+    }
+    return QStringLiteral("[视觉选择] 候选数=%1 范围内=%2%3 [%4] 选中=%5 原因=%6")
         .arg(selection.candidates.size())
         .arg(insideCount)
+        .arg(lockText)
         .arg(candidateParts.join(QStringLiteral("; ")))
         .arg(selectedText)
         .arg(selectionReasonText(selection.reason));
