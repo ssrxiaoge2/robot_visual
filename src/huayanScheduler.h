@@ -10,6 +10,7 @@
 
 #include "lineconfig.h"
 #include "palletscheduler.h"
+#include "visionclient.h"
 
 class QTimer;
 
@@ -87,6 +88,8 @@ public:
     void setPalletFunctions(const PalletArmFunctions &funcs);
     /// 控制 StageOne 是否在夹紧前停住并请求扫码。
     void setPreGripScanEnabled(bool enabled);
+    /// 注入视觉客户端，仅用于阶段一发起推理前设置目标选择上下文；不拥有对象。
+    void setVisionClient(VisionHttpClient *client);
     /// 仅在 StageOne/WaitPreGripScan 生效，继续夹紧和抬升。
     void continueAfterPreGripScan();
     /// 扫码补救独立动作：工具坐标系 Rz 相对旋转 180°，不丢失暂停中的 StageOne。
@@ -200,7 +203,13 @@ public:
 
 public slots:
     void setGrabOffset(double x, double y, double z, double rz);
+    /// 接收带拍照锚点的视觉结果；anchor 单位 mm，生命周期为本轮阶段一闭环。
+    void setGrabOffset(double x, double y, double z, double rz,
+                       double contextSelectedAnchorX, double contextSelectedAnchorY);
     void onVisionNoObject();
+    /// 目标已被识别但因锚点距离/跳变可信规则拒绝；直接阶段失败，不能进入普通无目标搜索下移。
+    void onVisionTargetRejectedForPickup(VisionHttpClient::TargetSelectionReason reason,
+                                         const QString &msg);
     void onVisionErrorForPickup(const QString &msg);
 
 signals:
@@ -286,6 +295,14 @@ private:
     void advanceStep();
     void executeCurrentStep();
     bool executeNextGrabMove();
+    /// 阶段一相对运动下发前的上位机硬保护；单位为 mm，返回 false 表示已 fail-closed 记录错误并拒绝继续下发。
+    bool validateStageOneRelMoveBeforeDispatch(const RelMove &move);
+    /// 清零阶段一固定拍照锚点状态；每次 startStageOne() 必须调用一次。
+    void resetVisionAnchorTracking();
+    /// 生成下一次视觉推理使用的固定拍照锚点上下文。
+    VisionHttpClient::TargetSelectionContext makeVisionTargetSelectionContext() const;
+    /// 记录一条已经完成的阶段一 XY 微调；只能在控制器确认到位后调用。
+    void recordCompletedGrabMove(const RelMove &move);
     void proceedAction();
     void advanceActionStep();
     void startPalletPlaceInternal(const PalletPose &targetOffset,
@@ -450,6 +467,11 @@ private:
     bool m_waitingPreGripScan = false; ///< 已发扫码请求且尚未收到继续指令。
     double m_preGripScanSearchCurrentY = 0.0; ///< 当前夹紧前扫码搜索 Y 偏移(mm)。
     double m_preGripScanSearchTargetY = 0.0;  ///< 本轮夹紧前扫码搜索目标 Y 偏移(mm)。
+    double m_anchorAccumulatedToolX = 0.0; ///< 初始拍照位到当前相机位置已完成工具系 X 位移(mm)。
+    double m_anchorAccumulatedToolY = 0.0; ///< 初始拍照位到当前相机位置已完成工具系 Y 位移(mm)。
+    bool m_anchorHasPreviousTarget = false; ///< 是否已有上一帧可信目标用于闭环跳变保护。
+    double m_anchorPreviousTargetX = 0.0; ///< 上一帧可信目标相对初始拍照锚点 X(mm)。
+    double m_anchorPreviousTargetY = 0.0; ///< 上一帧可信目标相对初始拍照锚点 Y(mm)。
     Pose m_pickupPose;
     Pose m_pickupLiftPose;
     Pose m_unloadPose;
@@ -468,6 +490,7 @@ private:
     unsigned short m_port = 10003;      ///< 华研 SDK 固定服务端口。
     unsigned int m_boxID = 0;           ///< SDK 控制箱编号。
     unsigned int m_rbtID = 0;           ///< SDK 机器人组编号。
+    VisionHttpClient *m_visionClient = nullptr; ///< 非拥有指针；DeviceManager 创建并注入，仅设置推理上下文。
     bool m_connected = false;           ///< SDK 会话状态，不代表机器人无报警。
     int  m_speedPercent = 100;   // 运动速度倍率(%)，连接时应用，可经 UI 实时调整
 

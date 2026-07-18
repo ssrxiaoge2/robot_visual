@@ -41,6 +41,15 @@
 // 当前工位视觉候选矩形的 Y 半宽，单位 mm；只过滤原始 offset_mm.y，不参与机械臂运动限位。
 #define VISION_STATION_ROI_HALF_Y_MM 500.0
 
+// 最高层候选离初始拍照锚点的最大可信距离，单位 mm；现场根据正常 anchor distance 日志微调。
+#define VISION_ANCHOR_MAX_TRUST_XY_MM 450.0
+
+// 锚点选择的同层 Z 容差，单位 mm；必须远小于料箱层高，避免低层被当作同层。
+#define VISION_ANCHOR_SAME_LAYER_Z_TOL_MM 20.0
+
+// 闭环过程中本帧目标相对上一帧锚点位置的最大可信跳变，单位 mm。
+#define VISION_ANCHOR_SWITCH_MAX_XY_MM 220.0
+
 class VisionHttpClient : public QObject
 {
     Q_OBJECT
@@ -59,9 +68,26 @@ public:
     /// 视觉目标最终入选原因；用于测试和现场候选摘要，不改变坐标转换语义。
     enum class TargetSelectionReason {
         None,                   ///< 没有合法且位于当前工位矩形内的目标。
-        HighestLayer,           ///< 最高层分组中只有一个候选，按 Z 直接选中。
-        SameLayerNearestCenter, ///< 最高层有多个候选，按原始 XY 距离选择最近中心者。
-        StableSourceIndex       ///< 深度和 XY 距离完全相同时，按服务端原始下标稳定兜底。
+        HighestLayer,           ///< 兼容旧逻辑：最高层分组中只有一个候选。
+        SameLayerNearestCenter, ///< 兼容旧逻辑：最高层有多个候选，按当前中心择近。
+        StableSourceIndex,      ///< 深度和 XY 距离完全相同时，按服务端原始下标稳定兜底。
+        AnchorHighestLayer,     ///< 锚点逻辑：可信范围内只有一个最高层候选。
+        AnchorSameLayerNearest, ///< 锚点逻辑：可信最高层有多个候选，按锚点 XY 最近选择。
+        AnchorDistanceTooFar,   ///< 最高层候选离初始拍照锚点过远，目标不可信。
+        AnchorTargetJumpTooFar  ///< 闭环目标相对上一帧锚点位置跳变过大，目标不可信。
+    };
+
+    /// 阶段一固定拍照锚点选择上下文；由 HuayanScheduler 在每次推理前注入。
+    struct TargetSelectionContext {
+        bool anchorEnabled = false; ///< false 时使用兼容旧选择逻辑。
+        double accumulatedToolX = 0.0; ///< 初始拍照位到当前相机位置的已完成工具系 X 位移(mm)。
+        double accumulatedToolY = 0.0; ///< 初始拍照位到当前相机位置的已完成工具系 Y 位移(mm)。
+        bool hasPreviousAnchorTarget = false; ///< 是否有上一帧可信目标用于跳变保护。
+        double previousAnchorX = 0.0; ///< 上一帧可信目标相对初始拍照锚点的 X(mm)。
+        double previousAnchorY = 0.0; ///< 上一帧可信目标相对初始拍照锚点的 Y(mm)。
+        double maxTrustDistance = VISION_ANCHOR_MAX_TRUST_XY_MM; ///< 目标可信最大锚点距离(mm)。
+        double sameLayerZTol = VISION_ANCHOR_SAME_LAYER_Z_TOL_MM; ///< 同层 Z 容差(mm)。
+        double maxSwitchDistance = VISION_ANCHOR_SWITCH_MAX_XY_MM; ///< 闭环目标最大跳变(mm)。
     };
 
     /// 单个视觉候选；坐标仍处于视觉 API 的原始 offset/depth 空间，单位均为 mm。
@@ -75,6 +101,16 @@ public:
         bool valid = false;          ///< 所有抓取所需 JSON 字段均存在、为数值且有限。
         bool insideStationRoi = false; ///< 合法目标是否位于共用当前工位 XY 矩形内。
         QString rejectionReason;     ///< 非法目标的首个拒绝原因；合法目标为空。
+        double toolX = 0.0;           ///< 候选经手眼矩阵转换后的工具系 X 偏移(mm)。
+        double toolY = 0.0;           ///< 候选经手眼矩阵转换后的工具系 Y 偏移(mm)。
+        double toolZ = 0.0;           ///< 候选经手眼矩阵转换后的工具系 Z 深度(mm)。
+        double toolRz = 0.0;          ///< 候选经角度规范化后的工具系 Rz(deg)。
+        double alignmentX = 0.0;      ///< 为对准候选需要执行的工具系 X 位移(mm)。
+        double alignmentY = 0.0;      ///< 为对准候选需要执行的工具系 Y 位移(mm)，按阶段一 Y 取反规则计算。
+        double anchorX = 0.0;         ///< 候选相对初始拍照锚点的 X(mm)。
+        double anchorY = 0.0;         ///< 候选相对初始拍照锚点的 Y(mm)。
+        double anchorDistance = 0.0;  ///< 候选离初始拍照锚点的 XY 距离(mm)。
+        bool trusted = true;          ///< 锚点逻辑下候选是否通过最终可信检查。
     };
 
     /// 一次推理响应的完整选择结果；selectedCandidateIndex 指向 candidates，而非原 JSON。
@@ -92,6 +128,10 @@ public:
 
     /// 纯逻辑：先过滤当前工位 XY，再找最高层，最后在同层中选择最近中心目标。
     static TargetSelection selectTarget(const QJsonArray &objects);
+    /// 纯逻辑：按固定拍照锚点上下文选择目标；handEyeMatrix 为 4x4 行主序矩阵。
+    static TargetSelection selectTarget(const QJsonArray &objects,
+                                        const TargetSelectionContext &context,
+                                        const float handEyeMatrix[4][4]);
     /// 把一次选择的全部候选压缩为单行现场日志；不得包含换行符。
     static QString formatTargetSelectionLog(const TargetSelection &selection);
 
@@ -124,6 +164,9 @@ public:
 
     /// 设置 Ry 固定寄存器值（Holding 905，不随目标变化）
     void setBaseRy(qint32 baseRyReg);
+
+    /// 设置下一次 /inference 使用的目标选择上下文；由机械臂阶段一在发起推理前注入。
+    void setTargetSelectionContext(const TargetSelectionContext &context);
 
     bool    isConfigured() const { return !m_ip.isEmpty(); }
     QString ip()           const { return m_ip; }
@@ -165,10 +208,15 @@ signals:
     void statusChanged(bool available, QString msg);
     /// 本次推理未检测到任何目标
     void noObjectDetected();
+    /// 视觉检测到候选但被阶段一拍照锚点可信规则拒绝；reason 精确区分距离过远/跳变过大，不能当作普通无目标搜索下移。
+    void targetRejectedByTrustRule(TargetSelectionReason reason, QString message);
     /// 网络或 JSON 解析错误
     void errorOccurred(QString msg);
     /// 工具坐标系原始 mm 值（手眼变换后，未乘寄存器倍率）
     void rawCoordinatesReady(double x, double y, double z, double rz);
+    /// 工具坐标系原始 mm 值，并带回本次选中目标相对初始拍照锚点的 XY(mm)。
+    void rawCoordinatesReady(double x, double y, double z, double rz,
+                             double anchorX, double anchorY);
     /// 每次 /inference 响应最多发出一次候选选择摘要，由 DeviceManager 转发到现场日志。
     void selectionLogMessage(QString message);
 private:
@@ -199,6 +247,8 @@ private:
     qint32 m_baseRxReg = 0;
     qint32 m_baseRyReg = 0;
     qint32 m_baseRzReg = 0; ///< ⚠ 需联机调试后设置实际值
+
+    TargetSelectionContext m_targetSelectionContext; ///< 最近一次推理使用的选择上下文，生命周期到下一次 set 覆盖。
 };
 
 #endif // VISIONCLIENT_H

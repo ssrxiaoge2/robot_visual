@@ -158,13 +158,19 @@ DeviceManager::DeviceManager(QObject *parent)
             this, &DeviceManager::customSystemRequestFailed);
 
     m_huayanScheduler = new HuayanScheduler(this);
+    // HuayanScheduler 不拥有视觉客户端，只在每次阶段一拍照前注入目标选择上下文。
+    m_huayanScheduler->setVisionClient(m_visionClient);
 
     connect(m_huayanScheduler, &HuayanScheduler::surveyReady,
             m_visionClient,    &VisionHttpClient::fetchInference);
-    connect(m_visionClient,    &VisionHttpClient::rawCoordinatesReady,
-            m_huayanScheduler, &HuayanScheduler::setGrabOffset);
+    connect(m_visionClient,
+            qOverload<double, double, double, double, double, double>(&VisionHttpClient::rawCoordinatesReady),
+            m_huayanScheduler,
+            qOverload<double, double, double, double, double, double>(&HuayanScheduler::setGrabOffset));
     connect(m_visionClient, &VisionHttpClient::noObjectDetected,
             m_huayanScheduler, &HuayanScheduler::onVisionNoObject);
+    connect(m_visionClient, &VisionHttpClient::targetRejectedByTrustRule,
+            m_huayanScheduler, &HuayanScheduler::onVisionTargetRejectedForPickup);
     connect(m_visionClient, &VisionHttpClient::errorOccurred,
             m_huayanScheduler, &HuayanScheduler::onVisionErrorForPickup);
 

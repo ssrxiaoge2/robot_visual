@@ -1,7 +1,7 @@
 # 固定拍照锚点视觉目标可信选择设计
 
 **日期：** 2026-07-18
-**状态：** 已确认设计，等待实施计划执行
+**状态：** 已实施并完成自动化验证；阈值等待现场根据 anchor distance 日志微调
 **关联日志：** `log/2026-07-17+log.txt`
 **关联上一版设计：** `docs/superpowers/specs/2026-07-16-field-fault-diagnostics-and-workflow-isolation-design.md`
 
@@ -198,7 +198,7 @@
 即使视觉选择通过，也增加上位机运动保护：
 
 1. 阶段一单次 X 或 Y 微调距离超过 `HUAYAN_MAX_SINGLE_XY_ADJUST_MM` 时，不下发 `MoveRelL`，直接阶段失败。
-2. 阶段一 Z 下探计算结果超过 `HUAYAN_MAX_Z_DESCEND_MM` 时，不下发 `MoveRelL`，直接阶段失败。
+2. 阶段一 Z 下探先按未截断计划值 `plannedDescend = 视觉深度 - 工位余量` 判断；若 `plannedDescend > HUAYAN_MAX_Z_DESCEND_MM`，不调用 `calculateGrabDescend()` 截断、不下发 `MoveRelL`，直接阶段失败。
 3. 阶段失败日志必须包含：
    - 轴向
    - 计划运动距离
@@ -246,6 +246,27 @@
 3. `HUAYAN_MAX_SINGLE_XY_ADJUST_MM` 应小于控制器容易触发 49601 的大幅运动距离。
 4. `HUAYAN_MAX_Z_DESCEND_MM` 保持硬安全上限，不因临时调试被放大。
 
+### 6.9 最终实现接口
+
+本轮最终落地接口名如下：
+
+- `VisionHttpClient::TargetSelectionContext`：阶段一固定拍照锚点选择上下文。
+- `VisionHttpClient::setTargetSelectionContext(const TargetSelectionContext &context)`：每次 `/inference` 前由调度器注入上下文。
+- `VisionHttpClient::selectTarget(const QJsonArray &objects, const TargetSelectionContext &context, const float handEyeMatrix[4][4])`：锚点选择纯逻辑入口；无锚点时保留 `selectTarget(const QJsonArray &objects)` 兼容旧逻辑。
+- `VisionHttpClient::formatTargetSelectionLog(const TargetSelection &selection)`：输出单行候选/选择摘要。
+- `VisionHttpClient::rawCoordinatesReady(double x, double y, double z, double rz, double anchorX, double anchorY)`：视觉结果携带选中目标相对初始拍照锚点的 XY。
+- `VisionHttpClient::targetRejectedByTrustRule(TargetSelectionReason reason, QString message)`：仅在 `AnchorDistanceTooFar` / `AnchorTargetJumpTooFar` 时发出，表示“检测到候选但被锚点可信规则拒绝”，不能复用普通 `noObjectDetected()`。
+- `HuayanScheduler::setVisionClient(VisionHttpClient *client)`：注入非拥有视觉客户端指针。
+- `HuayanScheduler::makeVisionTargetSelectionContext() const`、`resetVisionAnchorTracking()`、`recordCompletedGrabMove(const RelMove &move)`：维护阶段一锚点累计和上一帧目标。
+- `HuayanScheduler::validateStageOneRelMoveBeforeDispatch(const RelMove &move)`：阶段一 XY 微调下发前硬保护。
+- `HuayanScheduler::onVisionTargetRejectedForPickup(VisionHttpClient::TargetSelectionReason reason, const QString &msg)`：锚点距离过远或闭环跳变过大时直接 `emitOperationError` 使阶段失败，不进入 `onVisionNoObject()` 的搜索下移。
+
+最终状态补充：
+
+- 普通“没有检测到目标”继续走 `noObjectDetected()`，保留原搜索下移兼容行为。
+- 锚点可信规则拒绝走独立拒绝信号，阶段一直接 fail-closed，避免旁边工位/跳变目标导致搜索下移或继续追踪。
+- Z 下探硬上限按未截断计划值（单位 mm）先判定；只有计划值未超过硬上限时，才用 `calculateGrabDescend(..., qMin(kMaxDescend, HUAYAN_MAX_Z_DESCEND_MM))` 计算实际下发距离。
+
 ## 7. 测试策略
 
 ### 7.1 视觉纯逻辑测试
@@ -267,7 +288,8 @@
 - 进入等待视觉前必须注入 `TargetSelectionContext`。
 - `MoveToGrab` 完成后必须更新锚点累计位移。
 - X/Y 单次微调超过上限时必须拒绝下发。
-- Z 下探必须使用硬安全上限。
+- Z 下探必须先按未截断计划值做硬安全上限 fail-closed，再计算实际下发值。
+- `AnchorDistanceTooFar` / `AnchorTargetJumpTooFar` 必须发锚点拒绝信号，由调度器直接阶段失败，不能走普通无目标搜索下移。
 
 ### 7.3 集成验证
 
@@ -284,8 +306,9 @@ ctest --test-dir build-field-fixes --output-on-failure
 
 - 多目标场景下，不再因为机械臂移动导致 ROI 漂移后切换目标。
 - 最高层目标若离初始拍照锚点过远，系统判定目标不可信，不下发大幅 XY 追踪。
+- 最高层目标离锚点过远或闭环目标跳变过大时，系统直接阶段失败，不进入“未检测到目标”的搜索下移。
 - 阶段一单次 XY 微调超限时，不下发 `MoveRelL`。
-- Z 下探不会超过 `HUAYAN_MAX_Z_DESCEND_MM`。
+- Z 下探按未截断计划值先判断，计划值超过 `HUAYAN_MAX_Z_DESCEND_MM` 时直接失败，不会通过截断后继续下发。
 - 视觉日志能显示锚点距离和选择原因，现场能据此微调阈值。
 - 49601 若仍发生，日志能区分是 SDK 拒绝正常范围内运动，还是上位机保护之前未覆盖的新异常。
 
@@ -305,3 +328,23 @@ ctest --test-dir build-field-fixes --output-on-failure
 - `sameLayerZTol`
 
 第一版不实现工位级配置，避免在样本不足时过度设计。
+
+## 11. 自动化验证结果
+
+2026-07-18 本地 `build-field-fixes` 验证结果：
+
+- `git diff --check`：通过。
+- `anchor_target_selection_tests`：构建通过，CTest 通过。
+- `vision_target_selection_tests`：构建通过，CTest 通过，兼容旧选择逻辑。
+- `huayan_scheduler_contract_tests`：构建通过，CTest 通过。
+- `station_pickup_config_tests`：因 `HuayanScheduler.h` 新增 `VisionHttpClient` 依赖补齐 Qt Gui/Network 链接，并同步旧静态契约到 Z 硬上限实现后通过。
+- `wh-robot-visual`：构建通过。
+- 全量构建：`cmake --build build-field-fixes -j2` 通过。
+- 全量 CTest：`ctest --test-dir build-field-fixes --output-on-failure` 11/11 通过。
+
+## 12. 现场复测重点
+
+- 多目标时日志中最高层目标的 `anchorDistance`。
+- 被拒绝目标是否确实来自旁边工位或明显远离拍照位。
+- 正常抓取的 `anchorDistance` 最大值，用于后续收紧 `VISION_ANCHOR_MAX_TRUST_XY_MM`。
+- 是否还出现 49601；若出现，检查对应命令是否已在上位机保护范围之外。

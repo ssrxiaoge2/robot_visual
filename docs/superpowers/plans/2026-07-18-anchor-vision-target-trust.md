@@ -1,14 +1,16 @@
-# 固定拍照锚点视觉目标可信选择 Implementation Plan
+# 固定拍照锚点视觉目标可信选择实施计划
 
-> **For agentic workers:** REQUIRED SUB-SKILL: Use superpowers:subagent-driven-development (recommended) or superpowers:executing-plans to implement this plan task-by-task. Steps use checkbox (`- [ ]`) syntax for tracking.
+> **给智能体执行者：** 必需子技能：使用 `superpowers:subagent-driven-development`（推荐）或 `superpowers:executing-plans` 按任务执行本计划；步骤使用复选框语法记录进度。
 
-**Goal:** 以阶段一最初拍照位作为固定锚点，在当前工位可信目标内按 Z 最高优先选择箱子，并在目标不可信、XY 微调过大或 Z 下探过大时提前 fail-closed，减少 49601 风险。
+**目标：** 以阶段一最初拍照位作为固定锚点，在当前工位可信目标内按 Z 最高优先选择箱子，并在目标不可信、XY 微调过大或 Z 下探过大时提前拒绝执行，减少 49601 风险。
 
-**Architecture:** `VisionHttpClient` 负责纯视觉候选解析、工具系换算、锚点选择和单行日志；`HuayanScheduler` 负责维护本轮拍照锚点上下文、累计已完成工具系 XY 位移，并在下发机械臂相对运动前做硬保护。测试先锁住纯选择规则和调度契约，再改生产代码。
+**实施状态（2026-07-18）：** 任务 1-4 已在本地实现；最终审查补丁要求的锚点拒绝执行通道与 Z 未截断计划值硬上限检查已同步到代码/契约/文档。本计划按“一个大功能一次提交”收口为单个本地提交，未推送，等待人工推送。
 
-**Tech Stack:** C++17、Qt 6.8.3 Core/Gui/Network/Test、CMake/CTest、华研 Robot SDK V1.0.15.0。
+**架构：** `VisionHttpClient` 负责纯视觉候选解析、工具系换算、锚点选择和单行日志；普通无目标继续发 `noObjectDetected()`，`AnchorDistanceTooFar` / `AnchorTargetJumpTooFar` 通过独立拒绝信号交给调度器直接阶段失败。`HuayanScheduler` 负责维护本轮拍照锚点上下文、累计已完成工具系 XY 位移，并在下发机械臂相对运动前做硬保护；Z 下探先按未截断 `plannedDescend = 视觉深度 - 工位余量` 与硬上限(mm)比较，未超限时才计算实际下发距离。测试先锁住纯选择规则和调度契约，再改生产代码。
 
-## Global Constraints
+**技术栈：** C++17、Qt 6.8.3 Core/Gui/Network/Test、CMake/CTest、华研 Robot SDK V1.0.15.0。
+
+## 全局约束
 
 - Qt 路径固定为 `Qt6_DIR=/opt/Qt/qt6.8/6.8.3/gcc_64/lib/cmake/Qt6`，`qt-cmake=/opt/Qt/qt6.8/6.8.3/gcc_64/bin/qt-cmake`。
 - 不修改视觉服务接口和识别模型。
@@ -17,36 +19,36 @@
 - 不移除上一版 `[华沿][MoveRelL诊断][命令=N]` 四行失败诊断日志。
 - Z 最高优先只在当前拍照锚点可信目标内成立；旁边工位的全局最高箱不应被抓取。
 - 阈值第一版使用全局保守值，并通过日志指导后续现场手动微调。
-- 新增或修改的宏、`enum class`、接口、参数、成员变量和非显然业务分支必须写明语义、单位、生命周期或 fail-closed 规则。
+- 新增或修改的宏、`enum class`、接口、参数、成员变量和非显然业务分支必须写明语义、单位、生命周期或拒绝执行规则。
 - 实际代码、测试、设计文档和本计划最终作为一个完整功能提交；任务之间不创建零散提交。
 - 不执行 `git push`；由现场人员人工推送。
 - 保留用户现有未跟踪文件 `test-events.jsonl`、`test-state.backup.json`、`test-state.json`，不得加入提交。
 
 ---
 
-## File Structure
+## 文件结构
 
-### Create
+### 新增
 
 - `tests/test_anchor_target_selection.cpp`
   纯逻辑测试：锚点坐标换算、Z 优先、同层锚点最近、目标距离过远、目标跳变过大、顺序稳定。
 
-### Modify
+### 修改
 
 - `src/visionclient.h`
-  增加锚点选择宏、上下文类型、候选工具系/锚点字段、目标不可信原因、`setTargetSelectionContext()` 和新选择接口。
+  增加锚点选择宏、上下文类型、候选工具系/锚点字段、目标不可信原因、`setTargetSelectionContext()`、新选择接口，以及区分锚点可信拒绝和普通无目标的拒绝信号。
 
 - `src/visionclient.cpp`
-  把候选先转换到工具系，再根据 `TargetSelectionContext` 计算锚点 XY；实现锚点可信选择和增强日志。
+  把候选先转换到工具系，再根据 `TargetSelectionContext` 计算锚点 XY；实现锚点可信选择和增强日志；锚点距离过远/跳变过大时发拒绝信号，不发 `noObjectDetected()`。
 
 - `src/huayanScheduler.h`
-  增加锚点累计状态、上一帧选中目标状态、选择摘要缓存、硬保护辅助函数声明。
+  增加锚点累计状态、上一帧选中目标状态、选择摘要缓存、硬保护辅助函数声明和锚点可信拒绝槽。
 
 - `src/huayanScheduler.cpp`
-  阶段一启动清零锚点；每次等待视觉前注入上下文；MoveToGrab 每个单轴完成后累计已完成工具系 XY；下发 XY/Z 相对运动前执行 fail-closed 保护。
+  阶段一启动清零锚点；每次等待视觉前注入上下文；MoveToGrab 每个单轴完成后累计已完成工具系 XY；下发 XY/Z 相对运动前执行拒绝下发保护；锚点可信拒绝直接阶段失败，不进入搜索下移；Z 下探硬上限在 `calculateGrabDescend()` 截断前用未截断计划值判断。
 
 - `src/devicemanager.cpp`
-  将 `VisionHttpClient` 非拥有指针注入 `HuayanScheduler`，并把携带锚点坐标的视觉结果信号连接到新的阶段一槽函数。
+  将 `VisionHttpClient` 非拥有指针注入 `HuayanScheduler`，把携带锚点坐标的视觉结果信号连接到新的阶段一槽函数，并连接锚点可信拒绝信号。
 
 - `tests/CMakeLists.txt`
   注册 `anchor_target_selection_tests`。
@@ -59,25 +61,25 @@
 
 ---
 
-### Task 1: 纯视觉锚点目标选择接口和测试
+### 任务 1： 纯视觉锚点目标选择接口和测试
 
-**Files:**
-- Create: `tests/test_anchor_target_selection.cpp`
-- Modify: `tests/CMakeLists.txt`
-- Modify: `src/visionclient.h`
-- Modify: `src/visionclient.cpp`
+**文件：**
+- 新增： `tests/test_anchor_target_selection.cpp`
+- 修改： `tests/CMakeLists.txt`
+- 修改： `src/visionclient.h`
+- 修改： `src/visionclient.cpp`
 
-**Interfaces:**
-- Consumes: existing `VisionHttpClient::transformToMm(float cx, float cy, float cz, float angleDeg)` and existing JSON fields `offset_mm.x/y`、`depth_compensated`、`angle`、`confidence`。
-- Produces:
+**接口：**
+- 依赖： 现有 `VisionHttpClient::transformToMm(float cx, float cy, float cz, float angleDeg)` 和现有 JSON 字段 `offset_mm.x/y`、`depth_compensated`、`angle`、`confidence`。
+- 产出：
   - `struct VisionHttpClient::TargetSelectionContext`
   - `void VisionHttpClient::setTargetSelectionContext(const TargetSelectionContext &context)`
   - `static TargetSelection selectTarget(const QJsonArray &objects, const TargetSelectionContext &context, const float handEyeMatrix[4][4])`
-  - expanded `TargetCandidate` fields: `toolX/toolY/toolZ/toolRz/alignmentX/alignmentY/anchorX/anchorY/anchorDistance/trusted`
+  - 扩展后的 `TargetCandidate` 字段： `toolX/toolY/toolZ/toolRz/alignmentX/alignmentY/anchorX/anchorY/anchorDistance/trusted`
 
-- [ ] **Step 1: Register the failing test target**
+- [x] **步骤 1：注册预期失败的测试目标**
 
-Edit `tests/CMakeLists.txt` and add after `vision_target_selection_tests`:
+编辑 `tests/CMakeLists.txt`，在 `vision_target_selection_tests` 后增加：
 
 ```cmake
 add_executable(anchor_target_selection_tests
@@ -99,9 +101,9 @@ add_test(NAME anchor_target_selection_tests
          COMMAND anchor_target_selection_tests)
 ```
 
-- [ ] **Step 2: Write the failing anchored-selection test**
+- [x] **步骤 2：编写预期失败的锚点选择测试**
 
-Create `tests/test_anchor_target_selection.cpp`:
+创建 `tests/test_anchor_target_selection.cpp`：
 
 ```cpp
 #include "visionclient.h"
@@ -205,7 +207,7 @@ int main()
         target(20.0, 0.0, 1000.0)
     }, farCtx, kIdentityHandEye);
     requireTrue(!farHighest.hasTarget(),
-                "最高层目标离初始锚点过远时必须 fail-closed，不允许改抓低层近目标");
+                "最高层目标离初始锚点过远时必须 失败关闭，不允许改抓低层近目标");
     requireTrue(farHighest.reason == Reason::AnchorDistanceTooFar,
                 "最高目标过远必须记录 AnchorDistanceTooFar");
 
@@ -218,7 +220,7 @@ int main()
         target(180.0, 0.0, 800.0)
     }, jumpCtx, kIdentityHandEye);
     requireTrue(!jump.hasTarget(),
-                "闭环目标相对上一帧锚点位置跳变过大时必须 fail-closed");
+                "闭环目标相对上一帧锚点位置跳变过大时必须 失败关闭");
     requireTrue(jump.reason == Reason::AnchorTargetJumpTooFar,
                 "目标跳变过大必须记录 AnchorTargetJumpTooFar");
 
@@ -234,22 +236,22 @@ int main()
 }
 ```
 
-- [ ] **Step 3: Run the new test and confirm red**
+- [x] **步骤 3：运行新测试并确认红灯失败**
 
-Run:
+运行：
 
 ```bash
 cmake --build build-field-fixes --target anchor_target_selection_tests -j2
 ```
 
-Expected: build fails because `TargetSelectionContext` and the overloaded `selectTarget()` do not exist.
+预期：构建失败，因为 `TargetSelectionContext` 和重载的 `selectTarget()` 尚不存在。
 
-- [ ] **Step 4: Add anchor constants, enum values, context and candidate fields**
+- [x] **步骤 4：增加锚点常量、枚举值、上下文和候选字段**
 
-Modify `src/visionclient.h` near the existing ROI macros:
+修改 `src/visionclient.h`，位置靠近现有 ROI 宏：
 
 ```cpp
-// 最高层候选离初始拍照锚点的最大可信距离，单位 mm；现场根据正常 anchor distance 日志微调。
+// 最高层候选离初始拍照锚点的最大可信距离，单位 mm；现场根据正常 锚点距离 日志微调。
 #define VISION_ANCHOR_MAX_TRUST_XY_MM 450.0
 
 // 锚点选择的同层 Z 容差，单位 mm；必须远小于料箱层高，避免低层被当作同层。
@@ -259,7 +261,7 @@ Modify `src/visionclient.h` near the existing ROI macros:
 #define VISION_ANCHOR_SWITCH_MAX_XY_MM 220.0
 ```
 
-Modify `TargetSelectionReason`:
+修改 `TargetSelectionReason`：
 
 ```cpp
     enum class TargetSelectionReason {
@@ -274,7 +276,7 @@ Modify `TargetSelectionReason`:
     };
 ```
 
-Add before `TargetCandidate`:
+在 `TargetCandidate` 前增加：
 
 ```cpp
     /// 阶段一固定拍照锚点选择上下文；由 HuayanScheduler 在每次推理前注入。
@@ -291,7 +293,7 @@ Add before `TargetCandidate`:
     };
 ```
 
-Expand `TargetCandidate`:
+扩展 `TargetCandidate`：
 
 ```cpp
         double toolX = 0.0;           ///< 候选经手眼矩阵转换后的工具系 X 偏移(mm)。
@@ -306,7 +308,7 @@ Expand `TargetCandidate`:
         bool trusted = true;          ///< 锚点逻辑下候选是否通过最终可信检查。
 ```
 
-Add public methods:
+增加公开方法：
 
 ```cpp
     /// 纯逻辑：按固定拍照锚点上下文选择目标；handEyeMatrix 为 4x4 行主序矩阵。
@@ -318,15 +320,15 @@ Add public methods:
     void setTargetSelectionContext(const TargetSelectionContext &context);
 ```
 
-Add private member:
+增加私有成员：
 
 ```cpp
     TargetSelectionContext m_targetSelectionContext; ///< 最近一次推理使用的选择上下文，生命周期到下一次 set 覆盖。
 ```
 
-- [ ] **Step 5: Implement anchored parsing and selection**
+- [x] **步骤 5：实现锚点解析和选择逻辑**
 
-Modify `src/visionclient.cpp`. Add helper functions near existing selection helpers:
+修改 `src/visionclient.cpp`，在现有选择辅助函数附近增加辅助函数：
 
 ```cpp
 double distanceSq(double x, double y)
@@ -374,7 +376,7 @@ ToolCoords transformWithMatrix(const float matrix[4][4],
 }
 ```
 
-Add setter:
+增加设置函数：
 
 ```cpp
 void VisionHttpClient::setTargetSelectionContext(const TargetSelectionContext &context)
@@ -383,7 +385,7 @@ void VisionHttpClient::setTargetSelectionContext(const TargetSelectionContext &c
 }
 ```
 
-Implement the overload:
+实现重载接口：
 
 ```cpp
 VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(
@@ -498,9 +500,9 @@ VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(
 }
 ```
 
-- [ ] **Step 6: Use the anchored overload during inference**
+- [x] **步骤 6：推理解析时使用锚点选择重载接口**
 
-Modify `VisionHttpClient::parseInferenceReply()`:
+修改 `VisionHttpClient::parseInferenceReply()`：
 
 ```cpp
     const QJsonArray objects = doc.object().value(QStringLiteral("objects")).toArray();
@@ -508,7 +510,7 @@ Modify `VisionHttpClient::parseInferenceReply()`:
     emit selectionLogMessage(formatTargetSelectionLog(selection));
 ```
 
-Keep the rest of the selected-candidate transform unchanged, but use the already transformed values when anchor mode is enabled:
+选中候选后的其余转换逻辑保持兼容；启用锚点模式时使用已经转换好的工具系值：
 
 ```cpp
     const TargetCandidate &candidate =
@@ -524,9 +526,9 @@ Keep the rest of the selected-candidate transform unchanged, but use the already
     }
 ```
 
-- [ ] **Step 7: Extend selection log formatting**
+- [x] **步骤 7：扩展选择日志格式**
 
-Modify `formatTargetSelectionLog()` so valid candidates include anchor fields when present:
+修改 `formatTargetSelectionLog()`，让有效候选在有锚点字段时输出锚点信息：
 
 ```cpp
         const QString anchorText = candidate.valid
@@ -541,7 +543,7 @@ Modify `formatTargetSelectionLog()` so valid candidates include anchor fields wh
             : QString();
 ```
 
-Keep the final returned string single-line. Add reason text for new enum values:
+最终返回字符串必须保持单行；同时为新增枚举值补充原因文本：
 
 ```cpp
     case VisionHttpClient::TargetSelectionReason::AnchorHighestLayer:
@@ -554,38 +556,38 @@ Keep the final returned string single-line. Add reason text for new enum values:
         return QStringLiteral("目标跳变过大，目标不可信");
 ```
 
-- [ ] **Step 8: Run anchored selection tests**
+- [x] **步骤 8：运行锚点选择测试**
 
-Run:
+运行：
 
 ```bash
 cmake --build build-field-fixes --target anchor_target_selection_tests vision_target_selection_tests -j2
 ctest --test-dir build-field-fixes -R '^(anchor_target_selection_tests|vision_target_selection_tests)$' --output-on-failure
 ```
 
-Expected: both tests pass.
+预期：两个测试均通过。
 
 ---
 
-### Task 2: HuayanScheduler 维护拍照锚点上下文
+### 任务 2： HuayanScheduler 维护拍照锚点上下文
 
-**Files:**
-- Modify: `src/huayanScheduler.h`
-- Modify: `src/huayanScheduler.cpp`
-- Modify: `src/devicemanager.cpp`
-- Modify: `src/visionclient.h`
-- Modify: `tests/test_huayan_scheduler_contract.cpp`
+**文件：**
+- 修改： `src/huayanScheduler.h`
+- 修改： `src/huayanScheduler.cpp`
+- 修改： `src/devicemanager.cpp`
+- 修改： `src/visionclient.h`
+- 修改： `tests/test_huayan_scheduler_contract.cpp`
 
-**Interfaces:**
-- Consumes: `VisionHttpClient::TargetSelectionContext` and `VisionHttpClient::setTargetSelectionContext(const TargetSelectionContext &context)` from Task 1.
-- Produces:
+**接口：**
+- 依赖： 任务 1 产出的 `VisionHttpClient::TargetSelectionContext` 和 `VisionHttpClient::setTargetSelectionContext(const TargetSelectionContext &context)`。
+- 产出：
   - `resetVisionAnchorTracking()`
   - `makeVisionTargetSelectionContext() const`
   - `recordCompletedGrabMove(const RelMove &move)`
 
-- [ ] **Step 1: Add failing scheduler contract assertions**
+- [x] **步骤 1：增加预期失败的调度器契约断言**
 
-Append these checks to `tests/test_huayan_scheduler_contract.cpp`:
+向 `tests/test_huayan_scheduler_contract.cpp` 追加这些检查：
 
 ```cpp
     requireTrue(schedulerHeader.contains(QStringLiteral("resetVisionAnchorTracking()"))
@@ -608,26 +610,26 @@ Append these checks to `tests/test_huayan_scheduler_contract.cpp`:
                 "收到可信视觉结果后必须记录上一帧锚点目标用于跳变保护");
 ```
 
-- [ ] **Step 2: Run scheduler contract test and confirm red**
+- [x] **步骤 2：运行调度器契约测试并确认红灯失败**
 
-Run:
+运行：
 
 ```bash
 cmake --build build-field-fixes --target huayan_scheduler_contract_tests -j2
 ctest --test-dir build-field-fixes -R '^huayan_scheduler_contract_tests$' --output-on-failure
 ```
 
-Expected: test fails because the anchor-tracking functions and source strings do not exist.
+预期：测试失败，因为锚点跟踪函数和源码字符串尚不存在。
 
-- [ ] **Step 3: Add HuayanScheduler members and helpers**
+- [x] **步骤 3：增加 HuayanScheduler 成员和辅助函数**
 
-Modify `src/huayanScheduler.h`. Include `visionclient.h` if not already visible:
+修改 `src/huayanScheduler.h`；如果尚未可见，则包含 `visionclient.h`：
 
 ```cpp
 #include "visionclient.h"
 ```
 
-Add private helper declarations:
+增加私有辅助函数声明：
 
 ```cpp
     /// 清零阶段一固定拍照锚点状态；每次 startStageOne() 必须调用一次。
@@ -638,7 +640,7 @@ Add private helper declarations:
     void recordCompletedGrabMove(const RelMove &move);
 ```
 
-Add private members:
+增加私有成员：
 
 ```cpp
     double m_anchorAccumulatedToolX = 0.0; ///< 初始拍照位到当前相机位置已完成工具系 X 位移(mm)。
@@ -648,9 +650,9 @@ Add private members:
     double m_anchorPreviousTargetY = 0.0; ///< 上一帧可信目标相对初始拍照锚点 Y(mm)。
 ```
 
-- [ ] **Step 4: Implement reset/context/accumulation helpers**
+- [x] **步骤 4：实现重置、上下文生成和累计辅助函数**
 
-Modify `src/huayanScheduler.cpp`:
+修改 `src/huayanScheduler.cpp`：
 
 ```cpp
 void HuayanScheduler::resetVisionAnchorTracking()
@@ -684,19 +686,19 @@ void HuayanScheduler::recordCompletedGrabMove(const RelMove &move)
 }
 ```
 
-- [ ] **Step 5: Reset anchor tracking when stage one starts**
+- [x] **步骤 5：阶段一启动时重置锚点跟踪状态**
 
-Modify `HuayanScheduler::startStageOne()` near other per-stage resets:
+修改 `HuayanScheduler::startStageOne()`，放在其他阶段级重置逻辑附近：
 
 ```cpp
     resetVisionAnchorTracking();
 ```
 
-Expected context: the method already resets stage state, search counters and vision iteration state. Place anchor reset with those resets.
+预期上下文：该方法已经重置阶段状态、搜索计数和视觉迭代状态；锚点重置应与这些重置放在一起。
 
-- [ ] **Step 6: Inject context before inference**
+- [x] **步骤 6：推理前注入选择上下文**
 
-Modify `executeCurrentStep()` in `StageStep::WaitForVision`:
+修改 `executeCurrentStep()` 中的 `StageStep::WaitForVision` 分支：
 
 ```cpp
         case StageStep::WaitForVision:
@@ -719,7 +721,7 @@ private:
     VisionHttpClient *m_visionClient = nullptr; ///< 非拥有指针；DeviceManager 创建并注入。
 ```
 
-Implementation:
+实现：
 
 ```cpp
 void HuayanScheduler::setVisionClient(VisionHttpClient *client)
@@ -728,15 +730,15 @@ void HuayanScheduler::setVisionClient(VisionHttpClient *client)
 }
 ```
 
-In `DeviceManager` after `m_visionClient` and `m_huayanScheduler` are constructed:
+在 `DeviceManager` 中，`m_visionClient` 和 `m_huayanScheduler` 构造完成后增加：
 
 ```cpp
     m_huayanScheduler->setVisionClient(m_visionClient);
 ```
 
-- [ ] **Step 7: Accumulate completed XY moves before incrementing index**
+- [x] **步骤 7：移动索引递增前累计已完成的 XY 位移**
 
-Modify `onPollTick()` in the `MoveToGrab` completion branch:
+修改 `onPollTick()` 中 `MoveToGrab` 完成分支：
 
 ```cpp
         if (m_stage == Stage::StageOne && m_stageStep == StageStep::MoveToGrab) {
@@ -755,27 +757,27 @@ Modify `onPollTick()` in the `MoveToGrab` completion branch:
         }
 ```
 
-- [ ] **Step 8: Record previous trusted anchor target after vision result**
+- [x] **步骤 8：视觉结果返回后记录上一帧可信锚点目标**
 
-Modify `setGrabOffset()` signature only if Task 1 adds anchor coordinates to the emitted signal. Preferred minimal interface:
+只有在任务 1 给发出的信号增加锚点坐标时，才修改 `setGrabOffset()` 签名。推荐的最小接口：
 
-In `VisionHttpClient`, add signal:
+在 `VisionHttpClient` 中增加信号：
 
 ```cpp
     void rawCoordinatesReady(double x, double y, double z, double rz,
                              double anchorX, double anchorY);
 ```
 
-Keep the existing 4-argument signal for compatibility if current connections use it elsewhere. In `parseInferenceReply()` emit the 6-argument signal when anchor mode is enabled.
+保留现有 4 参数信号以兼容其他连接；在 `parseInferenceReply()` 中，启用锚点模式时发出 6 参数信号。
 
-In `HuayanScheduler`, add overload:
+在 `HuayanScheduler` 中增加重载：
 
 ```cpp
     void setGrabOffset(double x, double y, double z, double rz,
                        double contextSelectedAnchorX, double contextSelectedAnchorY);
 ```
 
-Implementation starts by recording the selected anchor target:
+实现开始时先记录本次选中的锚点目标：
 
 ```cpp
 void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz,
@@ -788,39 +790,39 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz,
 }
 ```
 
-Update the `DeviceManager` connection to connect the 6-argument signal to the 6-argument slot.
+更新 `DeviceManager` 连接，把 6 参数信号连接到 6 参数槽。
 
-- [ ] **Step 9: Run scheduler contract and build**
+- [x] **步骤 9：运行调度器契约测试并构建应用目标**
 
-Run:
+运行：
 
 ```bash
 cmake --build build-field-fixes --target huayan_scheduler_contract_tests wh-robot-visual -j2
 ctest --test-dir build-field-fixes -R '^huayan_scheduler_contract_tests$' --output-on-failure
 ```
 
-Expected: test passes and app target builds.
+预期：测试通过，应用目标构建通过。
 
 ---
 
-### Task 3: 阶段一 XY/Z 运动硬保护
+### 任务 3： 阶段一 XY/Z 运动硬保护
 
-**Files:**
-- Modify: `src/huayanScheduler.cpp`
-- Modify: `src/huayanScheduler.h`
-- Modify: `tests/test_huayan_scheduler_contract.cpp`
+**文件：**
+- 修改： `src/huayanScheduler.cpp`
+- 修改： `src/huayanScheduler.h`
+- 修改： `tests/test_huayan_scheduler_contract.cpp`
 
-**Interfaces:**
-- Consumes: existing `RelMove` and `calculateGrabDescend()`。
-- Produces:
+**接口：**
+- 依赖： 现有 `RelMove` 和 `calculateGrabDescend()`。
+- 产出：
   - `HUAYAN_MAX_SINGLE_XY_ADJUST_MM`
   - `HUAYAN_MAX_Z_DESCEND_MM`
   - `bool validateStageOneRelMoveBeforeDispatch(const RelMove &move) const`
-  - hard-fail logs before `MoveRelL` dispatch.
+  - 下发前的硬保护失败日志，位置在 `MoveRelL` 下发前。
 
-- [ ] **Step 1: Add failing contract assertions for motion guards**
+- [x] **步骤 1：增加运动保护的预期失败契约断言**
 
-Append to `tests/test_huayan_scheduler_contract.cpp`:
+追加到 `tests/test_huayan_scheduler_contract.cpp`：
 
 ```cpp
     requireTrue(schedulerSource.contains(QStringLiteral("HUAYAN_MAX_SINGLE_XY_ADJUST_MM"))
@@ -830,42 +832,42 @@ Append to `tests/test_huayan_scheduler_contract.cpp`:
     requireTrue(schedulerSource.contains(QStringLiteral("validateStageOneRelMoveBeforeDispatch"))
                     && schedulerSource.contains(QStringLiteral("目标不可信：计划"))
                     && schedulerSource.contains(QStringLiteral("拒绝下发 MoveRelL")),
-                "阶段一相对运动下发前必须执行 fail-closed 保护并记录原因");
+                "阶段一相对运动下发前必须执行拒绝下发保护并记录原因");
 
     requireTrue(schedulerSource.contains(QStringLiteral("qMin(kMaxDescend, HUAYAN_MAX_Z_DESCEND_MM)")),
                 "Z 下探计算必须同时受原有 kMaxDescend 和新的硬保护上限约束");
 ```
 
-- [ ] **Step 2: Run contract test and confirm red**
+- [x] **步骤 2：运行契约测试并确认红灯失败**
 
-Run:
+运行：
 
 ```bash
 cmake --build build-field-fixes --target huayan_scheduler_contract_tests -j2
 ctest --test-dir build-field-fixes -R '^huayan_scheduler_contract_tests$' --output-on-failure
 ```
 
-Expected: fails because the guard constants and helper do not exist.
+预期：测试失败，因为保护常量和辅助函数尚不存在。
 
-- [ ] **Step 3: Add guard constants**
+- [x] **步骤 3：增加保护常量**
 
-Modify `src/huayanScheduler.cpp` near existing `kMaxDescend`:
+修改 `src/huayanScheduler.cpp`，位置靠近现有 `kMaxDescend`：
 
 ```cpp
-static constexpr double HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 220.0; ///< 阶段一单次 XY 微调上限(mm)，现场按 anchor 日志微调。
+static constexpr double HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 220.0; ///< 阶段一单次 XY 微调上限(mm)，现场按 锚点日志微调。
 static constexpr double HUAYAN_MAX_Z_DESCEND_MM = 1078.0;       ///< 阶段一 Z 下探硬上限(mm)，不得因临时调试放大。
 ```
 
-- [ ] **Step 4: Add motion validation helper**
+- [x] **步骤 4：增加运动校验辅助函数**
 
-Declare in `src/huayanScheduler.h`:
+在 `src/huayanScheduler.h` 中声明：
 
 ```cpp
     /// 阶段一相对运动下发前的上位机硬保护；返回 false 时必须已经记录错误并停止阶段。
     bool validateStageOneRelMoveBeforeDispatch(const RelMove &move) const;
 ```
 
-Implement in `src/huayanScheduler.cpp`:
+在 `src/huayanScheduler.cpp` 中实现：
 
 ```cpp
 bool HuayanScheduler::validateStageOneRelMoveBeforeDispatch(const RelMove &move) const
@@ -887,17 +889,17 @@ bool HuayanScheduler::validateStageOneRelMoveBeforeDispatch(const RelMove &move)
 }
 ```
 
-If avoiding `const_cast`, make the helper non-const:
+如果要避免 `const_cast`，则把辅助函数改为非 const：
 
 ```cpp
 bool validateStageOneRelMoveBeforeDispatch(const RelMove &move);
 ```
 
-and emit directly.
+并直接发出错误。
 
-- [ ] **Step 5: Call guard before each XY/Rz grab move dispatch**
+- [x] **步骤 5：每次下发 XY/Rz 抓取微调前调用保护函数**
 
-Modify `executeNextGrabMove()` before logging and creating `PendingCommand`:
+修改 `executeNextGrabMove()`，在记录日志和创建 `PendingCommand` 前增加：
 
 ```cpp
     const RelMove &mv = m_grabMoves.at(m_grabMoveIdx);
@@ -905,63 +907,60 @@ Modify `executeNextGrabMove()` before logging and creating `PendingCommand`:
         return false;
 ```
 
-- [ ] **Step 6: Apply hard Z upper bound**
+- [x] **步骤 6：应用 Z 下探硬上限**
 
-Modify `StageStep::DescendZ`:
+修改 `StageStep::DescendZ`：
 
 ```cpp
+            const double plannedDescend = m_grabOffset.z - m_grabZClearance;
+            if (plannedDescend > HUAYAN_MAX_Z_DESCEND_MM) {
+                emitOperationError(QStringLiteral("[阶段一] 目标不可信：计划 Z 下探 %1mm 超过硬上限 %2mm，拒绝下发 MoveRelL")
+                                       .arg(plannedDescend, 0, 'f', 1)
+                                       .arg(HUAYAN_MAX_Z_DESCEND_MM, 0, 'f', 1));
+                return;
+            }
+
             const double descend = calculateGrabDescend(
                 m_grabOffset.z,
                 m_grabZClearance,
                 qMin(kMaxDescend, HUAYAN_MAX_Z_DESCEND_MM));
 ```
 
-Before creating `PendingCommand`, add explicit fail-closed guard:
+先用未截断的计划下探值做硬保护；只有计划值未超过硬上限时，才允许进入 `calculateGrabDescend()` 计算实际下发距离。
 
-```cpp
-            if (descend > HUAYAN_MAX_Z_DESCEND_MM) {
-                emitOperationError(QStringLiteral("[阶段一] 目标不可信：计划 Z 下探 %1mm 超过硬上限 %2mm，拒绝下发 MoveRelL")
-                                       .arg(descend, 0, 'f', 1)
-                                       .arg(HUAYAN_MAX_Z_DESCEND_MM, 0, 'f', 1));
-                break;
-            }
-```
+- [x] **步骤 7：运行保护测试并构建应用目标**
 
-This branch should not normally trigger because `calculateGrabDescend()` clamps to the same bound; it remains as a readable business guard.
-
-- [ ] **Step 7: Run guard tests and app build**
-
-Run:
+运行：
 
 ```bash
 cmake --build build-field-fixes --target huayan_scheduler_contract_tests wh-robot-visual -j2
 ctest --test-dir build-field-fixes -R '^huayan_scheduler_contract_tests$' --output-on-failure
 ```
 
-Expected: test passes and app target builds.
+预期：测试通过，应用目标构建通过。
 
 ---
 
-### Task 4: 文档同步、完整验证和唯一功能提交
+### 任务 4： 文档同步、完整验证和唯一功能提交
 
-**Files:**
-- Modify: `docs/superpowers/specs/2026-07-18-anchor-vision-target-trust-design.md`
-- Modify: `docs/superpowers/plans/2026-07-18-anchor-vision-target-trust.md`
-- Modify: all files touched by Tasks 1-3
+**文件：**
+- 修改： `docs/superpowers/specs/2026-07-18-anchor-vision-target-trust-design.md`
+- 修改： `docs/superpowers/plans/2026-07-18-anchor-vision-target-trust.md`
+- 修改： 任务 1-3 修改过的所有文件
 
-**Interfaces:**
-- Consumes: Tasks 1-3 completed implementation.
-- Produces: one local commit containing code, tests and docs; no push.
+**接口：**
+- 依赖：任务 1-3 已完成的实现。
+- 产出：一个包含代码、测试和文档的本地提交；不推送。
 
-- [ ] **Step 1: Update design document implementation status**
+- [x] **步骤 1：更新设计文档实施状态**
 
-Edit `docs/superpowers/specs/2026-07-18-anchor-vision-target-trust-design.md`:
+编辑 `docs/superpowers/specs/2026-07-18-anchor-vision-target-trust-design.md`：
 
 ```markdown
-**状态：** 已实施并完成自动化验证；阈值等待现场根据 anchor distance 日志微调
+**状态：** 已实施并完成自动化验证；阈值等待现场根据 锚点距离 日志微调
 ```
 
-Add verification section:
+增加验证结果章节：
 
 ```markdown
 ## 11. 自动化验证结果
@@ -980,9 +979,9 @@ Add verification section:
 - 是否还出现 49601；若出现，检查对应命令是否已在上位机保护范围之外。
 ```
 
-- [ ] **Step 2: Run whitespace and placeholder checks**
+- [x] **步骤 2：运行空白字符和占位符检查**
 
-Run:
+运行：
 
 ```bash
 git diff --check
@@ -993,14 +992,14 @@ rg -n "TB[D]|TO[D]O|implement[ ]later|fill[ ]in[ ]details|适当处[理]|类似[
   tests/test_anchor_target_selection.cpp tests/test_huayan_scheduler_contract.cpp
 ```
 
-Expected:
+预期：
 
-- `git diff --check` exits 0.
-- `rg` exits 1 with no matches.
+- `git diff --check` 退出码为 0。
+- `rg` 退出码为 1，且没有匹配。
 
-- [ ] **Step 3: Build and run focused tests**
+- [x] **步骤 3：构建并运行重点测试**
 
-Run:
+运行：
 
 ```bash
 cmake --build build-field-fixes --target \
@@ -1015,25 +1014,25 @@ ctest --test-dir build-field-fixes \
   --output-on-failure
 ```
 
-Expected:
+预期：
 
-- All four targets build.
-- Three focused tests pass.
+- 四个目标均构建通过。
+- 三个重点测试均通过。
 
-- [ ] **Step 4: Run full verification**
+- [x] **步骤 4：运行完整验证**
 
-Run:
+运行：
 
 ```bash
 cmake --build build-field-fixes -j2
 ctest --test-dir build-field-fixes --output-on-failure
 ```
 
-Expected: all tests pass.
+预期：所有测试通过。
 
-- [ ] **Step 5: Review final diff for forbidden changes**
+- [x] **步骤 5：检查最终差异，确认没有禁止修改**
 
-Run:
+运行：
 
 ```bash
 git status --short
@@ -1041,16 +1040,16 @@ git diff --stat
 git diff -- src/visionclient.h src/visionclient.cpp src/huayanScheduler.h src/huayanScheduler.cpp
 ```
 
-Verify manually:
+人工确认：
 
-- No changes to visual service Python API.
-- No changes to示教器函数名配置 unless explicitly required by tests.
-- No deletion of `[华沿][MoveRelL诊断][命令=%1]` logs.
-- `test-events.jsonl`、`test-state.backup.json`、`test-state.json` remain untracked and unstaged.
+- 未修改视觉服务 Python 接口。
+- 未修改示教器函数名配置，除非测试明确要求。
+- 未删除 `[华沿][MoveRelL诊断][命令=%1]` 日志。
+- `test-events.jsonl`、`test-state.backup.json`、`test-state.json` 保持未跟踪且未暂存。
 
-- [ ] **Step 6: Create the single local implementation commit**
+- [x] **步骤 6：创建唯一的本地实现提交**
 
-Stage only task files:
+仅暂存任务相关文件：
 
 ```bash
 git add \
@@ -1067,37 +1066,37 @@ git add \
 
 git diff --cached --check
 git status --short
-git commit -m "fix: add anchored vision target trust guard"
+git commit -m "fix: add ancho红灯失败 vision target trust guard"
 ```
 
-Expected:
+预期：
 
-- Only task files are staged.
-- The three user JSON files are not staged.
-- One local commit is created.
+- 只暂存任务相关文件。
+- 三个用户 JSON 文件没有被暂存。
+- 创建一个本地提交。
 
-- [ ] **Step 7: Confirm no push was performed**
+- [x] **步骤 7：确认没有执行推送**
 
-Run:
+运行：
 
 ```bash
 git status --short
 git log -2 --oneline
 ```
 
-Expected:
+预期：
 
-- No task-related unstaged changes remain.
-- It is acceptable for these user files to remain untracked:
+- 没有任务相关的未暂存修改。
+- 以下用户文件保持未跟踪是允许的：
   - `test-events.jsonl`
   - `test-state.backup.json`
   - `test-state.json`
-- Do not run `git push`.
+- 不执行 `git push`。
 
 ---
 
-## Self-Review Notes
+## 自查记录
 
-- Spec coverage: Tasks 1-3 cover anchored selection, target distrust, motion guards and logging; Task 4 covers docs, verification and single local commit.
-- Placeholder scan: this plan intentionally contains no forbidden placeholder markers.
-- Type consistency: `TargetSelectionContext` is defined in Task 1, consumed by Task 2; motion guard helpers are defined and consumed inside Task 3.
+- 规格覆盖：任务 1-3 覆盖锚点选择、目标不可信、运动保护和日志；任务 4 覆盖文档、验证和单个本地提交。
+- 占位符扫描：本计划不包含禁止的占位符标记。
+- 类型一致性：`TargetSelectionContext` 在任务 1 定义、任务 2 使用；运动保护辅助函数在任务 3 定义并使用。

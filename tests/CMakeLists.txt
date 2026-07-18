@@ -10,6 +10,8 @@ target_include_directories(station_pickup_config_tests PRIVATE
 
 target_link_libraries(station_pickup_config_tests PRIVATE
     Qt6::Core
+    Qt6::Gui
+    Qt6::Network
 )
 
 add_test(NAME station_pickup_config_tests
@@ -75,6 +77,8 @@ target_include_directories(huayan_scheduler_contract_tests PRIVATE
 
 target_link_libraries(huayan_scheduler_contract_tests PRIVATE
     Qt6::Core
+    Qt6::Gui
+    Qt6::Network
     Qt6::Test
 )
 
@@ -128,6 +132,24 @@ target_link_libraries(vision_target_selection_tests PRIVATE
 
 add_test(NAME vision_target_selection_tests
          COMMAND vision_target_selection_tests)
+
+add_executable(anchor_target_selection_tests
+    test_anchor_target_selection.cpp
+    ../src/visionclient.cpp
+)
+
+target_include_directories(anchor_target_selection_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(anchor_target_selection_tests PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Network
+)
+
+add_test(NAME anchor_target_selection_tests
+         COMMAND anchor_target_selection_tests)
 
 add_executable(standalone_pickup_contract_tests
     test_standalone_pickup_contract.cpp

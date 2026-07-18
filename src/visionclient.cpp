@@ -30,6 +30,8 @@
 #include <QStringList>
 #include <QtMath>
 
+#include <cmath>
+
 // ── 默认手眼变换矩阵（T_tool_cam，行主序）──────────────────────
 //
 // 来源：hand-eye/calibration_output/handeye_matrix.txt
@@ -78,6 +80,11 @@ void VisionHttpClient::setHandEyeMatrix(const float m[16])
 void VisionHttpClient::setBaseRz(qint32 baseRzReg) { m_baseRzReg = baseRzReg; }
 void VisionHttpClient::setBaseRx(qint32 baseRxReg) { m_baseRxReg = baseRxReg; }
 void VisionHttpClient::setBaseRy(qint32 baseRyReg) { m_baseRyReg = baseRyReg; }
+
+void VisionHttpClient::setTargetSelectionContext(const TargetSelectionContext &context)
+{
+    m_targetSelectionContext = context;
+}
 
 // ── 公开请求接口 ─────────────────────────────────────────────
 
@@ -192,6 +199,50 @@ double centerDistSq(const VisionHttpClient::TargetCandidate &candidate)
     return candidate.x * candidate.x + candidate.y * candidate.y;
 }
 
+double distanceSq(double x, double y)
+{
+    return x * x + y * y;
+}
+
+struct ToolCoords {
+    double x = 0.0;
+    double y = 0.0;
+    double z = 0.0;
+    double rz = 0.0;
+};
+
+ToolCoords transformWithMatrix(const float matrix[4][4],
+                               double cx,
+                               double cy,
+                               double cz,
+                               double angleDeg)
+{
+    const float in[4] = {
+        static_cast<float>(cx),
+        static_cast<float>(cy),
+        static_cast<float>(cz),
+        1.0f
+    };
+    float out[4] = {0.0f, 0.0f, 0.0f, 0.0f};
+    for (int r = 0; r < 4; ++r) {
+        for (int c = 0; c < 4; ++c)
+            out[r] += matrix[r][c] * in[c];
+    }
+
+    float normAngle = std::fmod(static_cast<float>(angleDeg), 180.0f);
+    if (normAngle < 0.0f)
+        normAngle += 180.0f;
+    if (normAngle > 90.0f)
+        normAngle -= 180.0f;
+
+    return {
+        static_cast<double>(out[0]),
+        static_cast<double>(out[1]),
+        static_cast<double>(out[2]),
+        static_cast<double>(normAngle)
+    };
+}
+
 QString selectionReasonText(VisionHttpClient::TargetSelectionReason reason)
 {
     using Reason = VisionHttpClient::TargetSelectionReason;
@@ -202,10 +253,25 @@ QString selectionReasonText(VisionHttpClient::TargetSelectionReason reason)
         return QStringLiteral("同层最近中心");
     case Reason::StableSourceIndex:
         return QStringLiteral("原始下标稳定兜底");
+    case Reason::AnchorHighestLayer:
+        return QStringLiteral("锚点最高层");
+    case Reason::AnchorSameLayerNearest:
+        return QStringLiteral("锚点同层最近");
+    case Reason::AnchorDistanceTooFar:
+        return QStringLiteral("最高目标离拍照锚点过远，目标不可信");
+    case Reason::AnchorTargetJumpTooFar:
+        return QStringLiteral("目标跳变过大，目标不可信");
     case Reason::None:
         return QStringLiteral("无目标");
     }
     return QStringLiteral("无目标");
+}
+
+bool isAnchorTrustRejection(VisionHttpClient::TargetSelectionReason reason)
+{
+    using Reason = VisionHttpClient::TargetSelectionReason;
+    return reason == Reason::AnchorDistanceTooFar
+        || reason == Reason::AnchorTargetJumpTooFar;
 }
 
 } // namespace
@@ -297,10 +363,127 @@ VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(const QJsonArra
     return selection;
 }
 
+VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(
+    const QJsonArray &objects,
+    const TargetSelectionContext &context,
+    const float handEyeMatrix[4][4])
+{
+    if (!context.anchorEnabled)
+        return selectTarget(objects);
+
+    TargetSelection selection;
+    QList<int> validIndexes;
+
+    for (int sourceIndex = 0; sourceIndex < objects.size(); ++sourceIndex) {
+        TargetCandidate candidate;
+        candidate.sourceIndex = sourceIndex;
+        const QJsonValue entry = objects.at(sourceIndex);
+        if (!entry.isObject()) {
+            candidate.rejectionReason = QStringLiteral("目标不是JSON对象");
+            selection.candidates.append(candidate);
+            continue;
+        }
+
+        const QJsonObject object = entry.toObject();
+        const QJsonValue offsetValue = object.value(QStringLiteral("offset_mm"));
+        if (!offsetValue.isObject()) {
+            candidate.rejectionReason = QStringLiteral("offset_mm不是对象");
+            selection.candidates.append(candidate);
+            continue;
+        }
+
+        const QJsonObject offset = offsetValue.toObject();
+        if (!readFiniteNumber(offset.value(QStringLiteral("x")), &candidate.x)
+            || !readFiniteNumber(offset.value(QStringLiteral("y")), &candidate.y)
+            || !readFiniteNumber(object.value(QStringLiteral("depth_compensated")), &candidate.depth)
+            || !readFiniteNumber(object.value(QStringLiteral("angle")), &candidate.angle)
+            || !readFiniteNumber(object.value(QStringLiteral("confidence")), &candidate.confidence)) {
+            candidate.rejectionReason = QStringLiteral("字段缺失或不是有限数值");
+            selection.candidates.append(candidate);
+            continue;
+        }
+
+        const ToolCoords raw = transformWithMatrix(handEyeMatrix,
+                                                   candidate.x,
+                                                   candidate.y,
+                                                   candidate.depth,
+                                                   candidate.angle);
+        candidate.valid = true;
+        candidate.toolX = raw.x;
+        candidate.toolY = raw.y;
+        candidate.toolZ = raw.z;
+        candidate.toolRz = raw.rz;
+        candidate.alignmentX = candidate.toolX;
+        candidate.alignmentY = -candidate.toolY;
+        candidate.anchorX = context.accumulatedToolX + candidate.alignmentX;
+        candidate.anchorY = context.accumulatedToolY + candidate.alignmentY;
+        candidate.anchorDistance = std::sqrt(distanceSq(candidate.anchorX, candidate.anchorY));
+        candidate.trusted = candidate.anchorDistance <= context.maxTrustDistance;
+        candidate.insideStationRoi = true;
+        selection.candidates.append(candidate);
+        validIndexes.append(selection.candidates.size() - 1);
+    }
+
+    if (validIndexes.isEmpty())
+        return selection;
+
+    double highestDepth = selection.candidates.at(validIndexes.first()).depth;
+    for (int candidateIndex : validIndexes)
+        highestDepth = qMin(highestDepth, selection.candidates.at(candidateIndex).depth);
+
+    QList<int> sameLayerIndexes;
+    for (int candidateIndex : validIndexes) {
+        if (qAbs(selection.candidates.at(candidateIndex).depth - highestDepth)
+            <= context.sameLayerZTol) {
+            sameLayerIndexes.append(candidateIndex);
+        }
+    }
+
+    int bestIndex = sameLayerIndexes.first();
+    for (int candidateIndex : sameLayerIndexes) {
+        const TargetCandidate &candidate = selection.candidates.at(candidateIndex);
+        const TargetCandidate &best = selection.candidates.at(bestIndex);
+        if (candidate.anchorDistance < best.anchorDistance) {
+            bestIndex = candidateIndex;
+        } else if (qFuzzyCompare(candidate.anchorDistance + 1.0, best.anchorDistance + 1.0)
+                   && candidate.sourceIndex < best.sourceIndex) {
+            bestIndex = candidateIndex;
+        }
+    }
+
+    TargetCandidate &best = selection.candidates[bestIndex];
+    if (best.anchorDistance > context.maxTrustDistance) {
+        best.trusted = false;
+        selection.reason = TargetSelectionReason::AnchorDistanceTooFar;
+        return selection;
+    }
+
+    if (context.hasPreviousAnchorTarget) {
+        const double jump = std::sqrt(distanceSq(best.anchorX - context.previousAnchorX,
+                                                 best.anchorY - context.previousAnchorY));
+        if (jump > context.maxSwitchDistance) {
+            best.trusted = false;
+            selection.reason = TargetSelectionReason::AnchorTargetJumpTooFar;
+            return selection;
+        }
+    }
+
+    selection.selectedCandidateIndex = bestIndex;
+    selection.reason = sameLayerIndexes.size() > 1
+        ? TargetSelectionReason::AnchorSameLayerNearest
+        : TargetSelectionReason::AnchorHighestLayer;
+    return selection;
+}
+
 QString VisionHttpClient::formatTargetSelectionLog(const TargetSelection &selection)
 {
     QStringList candidateParts;
     int insideCount = 0;
+    using Reason = VisionHttpClient::TargetSelectionReason;
+    const bool includeAnchorText = selection.reason == Reason::AnchorHighestLayer
+        || selection.reason == Reason::AnchorSameLayerNearest
+        || selection.reason == Reason::AnchorDistanceTooFar
+        || selection.reason == Reason::AnchorTargetJumpTooFar;
     for (const TargetCandidate &candidate : selection.candidates) {
         if (!candidate.valid) {
             candidateParts.append(QStringLiteral("#%1 非法(%2)")
@@ -310,14 +493,25 @@ QString VisionHttpClient::formatTargetSelectionLog(const TargetSelection &select
         }
         if (candidate.insideStationRoi)
             ++insideCount;
-        candidateParts.append(QStringLiteral("#%1 x=%2 y=%3 z=%4 %5")
+        const QString anchorText = includeAnchorText
+            ? QStringLiteral(" tool=(%1,%2,%3) anchor=(%4,%5) dist=%6 %7")
+                  .arg(candidate.toolX, 0, 'f', 1)
+                  .arg(candidate.toolY, 0, 'f', 1)
+                  .arg(candidate.toolZ, 0, 'f', 1)
+                  .arg(candidate.anchorX, 0, 'f', 1)
+                  .arg(candidate.anchorY, 0, 'f', 1)
+                  .arg(candidate.anchorDistance, 0, 'f', 1)
+                  .arg(candidate.trusted ? QStringLiteral("可信") : QStringLiteral("不可信"))
+            : QString();
+        candidateParts.append(QStringLiteral("#%1 x=%2 y=%3 z=%4 %5%6")
                                   .arg(candidate.sourceIndex)
                                   .arg(candidate.x, 0, 'f', 1)
                                   .arg(candidate.y, 0, 'f', 1)
                                   .arg(candidate.depth, 0, 'f', 1)
                                   .arg(candidate.insideStationRoi
                                            ? QStringLiteral("范围内")
-                                           : QStringLiteral("范围外")));
+                                           : QStringLiteral("范围外"))
+                                  .arg(anchorText));
     }
 
     const QString selectedText = selection.hasTarget()
@@ -363,9 +557,16 @@ void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
     }
 
     const QJsonArray objects = doc.object().value(QStringLiteral("objects")).toArray();
-    const TargetSelection selection = selectTarget(objects);
+    const TargetSelection selection = selectTarget(objects, m_targetSelectionContext, m_T);
     emit selectionLogMessage(formatTargetSelectionLog(selection));
     if (!selection.hasTarget()) {
+        if (isAnchorTrustRejection(selection.reason)) {
+            // 检测到目标但被锚点可信规则拒绝，不能复用普通无目标信号，否则调度器会搜索下移。
+            emit targetRejectedByTrustRule(selection.reason,
+                QStringLiteral("[视觉] 目标被拍照锚点可信规则拒绝：%1")
+                    .arg(selectionReasonText(selection.reason)));
+            return;
+        }
         emit noObjectDetected();
         return;
     }
@@ -379,8 +580,18 @@ void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
     const float conf = static_cast<float>(candidate.confidence); // 仅记录，不新增置信度阈值。
     Q_UNUSED(conf)
 
-    const RawCoords raw = transformToMm(cx, cy, cz, angle);
+    RawCoords raw;
+    if (m_targetSelectionContext.anchorEnabled) {
+        raw = {candidate.toolX, candidate.toolY, candidate.toolZ, candidate.toolRz};
+    } else {
+        raw = transformToMm(cx, cy, cz, angle);
+    }
     emit rawCoordinatesReady(raw.x, raw.y, raw.z, raw.rz);
+    if (m_targetSelectionContext.anchorEnabled) {
+        // 锚点坐标为相对阶段一初始拍照位的工具系 XY(mm)，供调度器闭环累计上一帧目标。
+        emit rawCoordinatesReady(raw.x, raw.y, raw.z, raw.rz,
+                                 candidate.anchorX, candidate.anchorY);
+    }
 
     const qint32 regX  = qRound(raw.x * kCoordScale);
     const qint32 regY  = qRound(raw.y * kCoordScale);

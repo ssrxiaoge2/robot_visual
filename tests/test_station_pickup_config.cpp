@@ -178,8 +178,10 @@ int main()
                 "视觉稳定回调必须使用 nextCallbackSeq()");
     requireTrue(schedulerSource.contains(QStringLiteral("const quint64 seq = nextCallbackSeq();\n    QTimer::singleShot(1500, this, [this, seq] {")),
                 "setGripper() 的 1500ms 回调必须使用 nextCallbackSeq()");
-    requireTrue(schedulerSource.contains(QStringLiteral("calculateGrabDescend(m_grabOffset.z, m_grabZClearance, kMaxDescend)")),
-                "DescendZ 必须使用按工位注入的 Z 余量");
+    requireTrue(schedulerSource.contains(QStringLiteral("calculateGrabDescend("))
+                    && schedulerSource.contains(QStringLiteral("m_grabZClearance"))
+                    && schedulerSource.contains(QStringLiteral("qMin(kMaxDescend, HUAYAN_MAX_Z_DESCEND_MM)")),
+                "DescendZ 必须使用按工位注入的 Z 余量，并受阶段一 Z 下探硬上限保护");
     requireTrue(schedulerSource.contains(QStringLiteral("const QString afterGripFunc = resolveAfterGripFunction(")),
                 "LiftLoad 必须按 AfterGripMode 解析夹后函数");
     requireTrue(schedulerSource.contains(QStringLiteral("夹紧后配置为不回安全位，直接完成取料阶段")),

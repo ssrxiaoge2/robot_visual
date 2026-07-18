@@ -31,10 +31,12 @@ static constexpr double kMaxSearchDescend  = 80.0; // 搜索累计安全上限(m
 // 复位后立即下发 RunFunc 会撞 20018，须等控制器状态切换。机器人空闲时无此延迟需求。
 static constexpr int    kResetSettleMs     = 1000;
 
-// Z 下探参数：下探量 = 视觉深度 - grabZClearance，受 kMaxDescend 上限约束
+// Z 下探参数：下探量 = 视觉深度 - grabZClearance，受 kMaxDescend 和现场硬保护上限共同约束
 // grabZClearance 标定法：固定一物体，记视觉深度 D 和能夹到的下探量 H，则 = D - H
 //   （本例 D=1048, H=640 → 408）。此值对不同深度通用，视觉深度变化时下探量自动适应。
 static constexpr double kMaxDescend     = 1078.0;  // 下探安全上限(mm)，正常不应触发截断
+static constexpr double HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 220.0; // 阶段一单次 X/Y 微调硬上限(mm)，超过即 fail-closed 拒绝下发 MoveRelL。
+static constexpr double HUAYAN_MAX_Z_DESCEND_MM = 1078.0; // 阶段一 Z 下探硬上限(mm)，不得因临时调试放大，超过即 fail-closed。
 static constexpr bool   kZDescendInvert = false;   // Z 下探方向；若实际朝反方向，改 true
 static constexpr double kGrabXCompensation = 30.0; // Z 下探到物料箱位置后的工具系 X 补偿(mm)
 static constexpr double kGrabYCompensation = -17.0; // X 补偿后的工具系 Y 补偿(mm)
@@ -306,6 +308,12 @@ void HuayanScheduler::setPreGripScanEnabled(bool enabled)
         m_waitingPreGripScan = false;
 }
 
+void HuayanScheduler::setVisionClient(VisionHttpClient *client)
+{
+    // 非拥有指针：DeviceManager 管理 VisionHttpClient 生命周期，本调度器只在拍照前写入上下文。
+    m_visionClient = client;
+}
+
 void HuayanScheduler::continueAfterPreGripScan()
 {
     // 扫码结果可能在 Stop/状态切换后迟到，必须同时核对阶段、步骤和等待标志。
@@ -495,6 +503,7 @@ void HuayanScheduler::startStageOne()
     m_waitingPreGripScan = false;
     m_preGripScanSearchCurrentY = 0.0;
     m_preGripScanSearchTargetY = 0.0;
+    resetVisionAnchorTracking();
 
     emit stageStarted(stageName(m_stage));
     resetAndProceed();
@@ -766,6 +775,7 @@ void HuayanScheduler::onPollTick()
         }
         // MoveToGrab 是多次 MoveRelL 串联，单次到位后继续下一个偏移分量
         if (m_stage == Stage::StageOne && m_stageStep == StageStep::MoveToGrab) {
+            recordCompletedGrabMove(m_grabMoves.at(m_grabMoveIdx));
             m_grabMoveIdx++;
             // 运动结束后机器人状态切换有滞后(nMovingState=0 但仍 RobotInMoving)，
             // 高速下稍等再发下一轴，避免 20018 RobotInMoving
@@ -890,6 +900,8 @@ void HuayanScheduler::executeCurrentStep()
             break;
         case StageStep::WaitForVision:
             emit logMessage(QStringLiteral("[阶段一] 已到拍照位，等待视觉推理结果"));
+            if (m_visionClient)
+                m_visionClient->setTargetSelectionContext(makeVisionTargetSelectionContext());
             emit surveyReady();
             m_timeoutTimer->start(10000);
             break;
@@ -899,16 +911,31 @@ void HuayanScheduler::executeCurrentStep()
             executeNextGrabMove();
             break;
         case StageStep::DescendZ: {
-            const double descend = calculateGrabDescend(m_grabOffset.z, m_grabZClearance, kMaxDescend);
+            const double plannedDescend = m_grabOffset.z - m_grabZClearance;
+            if (plannedDescend > HUAYAN_MAX_Z_DESCEND_MM) {
+                // 先按未截断计划下探量(mm)做硬保护；超过即 fail-closed，禁止把异常深度截断后继续下发 MoveRelL。
+                emitOperationError(QStringLiteral("[阶段一] 目标不可信：计划 Z 下探 %1mm 超过硬上限 %2mm，拒绝下发 MoveRelL")
+                                       .arg(plannedDescend, 0, 'f', 1)
+                                       .arg(HUAYAN_MAX_Z_DESCEND_MM, 0, 'f', 1));
+                return;
+            }
+            const double descend = calculateGrabDescend(
+                m_grabOffset.z,
+                m_grabZClearance,
+                qMin(kMaxDescend, HUAYAN_MAX_Z_DESCEND_MM));
             if (descend < 1.0) {
                 emit logMessage(QStringLiteral("[阶段一] 无需 Z 下探，已到扫码/夹取前位置"));
                 m_stageStep = m_preGripScanEnabled ? StageStep::WaitPreGripScan : StageStep::CloseGripper;
                 proceedStage();
                 break;
             }
-            emit logMessage(QStringLiteral("[阶段一] Z 下探 %1mm（视觉深度 %2 - 余量 %3，上限 %4）")
-                                .arg(descend, 0, 'f', 1).arg(m_grabOffset.z, 0, 'f', 1)
-                                .arg(m_grabZClearance, 0, 'f', 1).arg(kMaxDescend, 0, 'f', 1));
+            emit logMessage(QStringLiteral("[阶段一] Z 下探 %1mm（未截断计划 %2mm = 视觉深度 %3mm - 余量 %4mm，下发上限 %5mm，硬上限 %6mm）")
+                                .arg(descend, 0, 'f', 1)
+                                .arg(plannedDescend, 0, 'f', 1)
+                                .arg(m_grabOffset.z, 0, 'f', 1)
+                                .arg(m_grabZClearance, 0, 'f', 1)
+                                .arg(qMin(kMaxDescend, HUAYAN_MAX_Z_DESCEND_MM), 0, 'f', 1)
+                                .arg(HUAYAN_MAX_Z_DESCEND_MM, 0, 'f', 1));
             PendingCommand cmd;
             cmd.kind = PendingCommandKind::MoveRelTool;
             cmd.label = QStringLiteral("Z 下探");
@@ -1045,6 +1072,37 @@ void HuayanScheduler::executeCurrentStep()
     default:
         break;
     }
+}
+
+void HuayanScheduler::resetVisionAnchorTracking()
+{
+    m_anchorAccumulatedToolX = 0.0;
+    m_anchorAccumulatedToolY = 0.0;
+    m_anchorHasPreviousTarget = false;
+    m_anchorPreviousTargetX = 0.0;
+    m_anchorPreviousTargetY = 0.0;
+}
+
+VisionHttpClient::TargetSelectionContext HuayanScheduler::makeVisionTargetSelectionContext() const
+{
+    VisionHttpClient::TargetSelectionContext context;
+    context.anchorEnabled = m_stage == Stage::StageOne;
+    context.accumulatedToolX = m_anchorAccumulatedToolX;
+    context.accumulatedToolY = m_anchorAccumulatedToolY;
+    context.hasPreviousAnchorTarget = m_anchorHasPreviousTarget;
+    context.previousAnchorX = m_anchorPreviousTargetX;
+    context.previousAnchorY = m_anchorPreviousTargetY;
+    return context;
+}
+
+void HuayanScheduler::recordCompletedGrabMove(const RelMove &move)
+{
+    // 只累计阶段一闭环中已经实际到位的工具系 XY；Rz/Z 不改变拍照锚点平面位置。
+    const double signedDistance = move.direction ? move.distance : -move.distance;
+    if (move.poseId == 0)
+        m_anchorAccumulatedToolX += signedDistance;
+    else if (move.poseId == 1)
+        m_anchorAccumulatedToolY += signedDistance;
 }
 
 void HuayanScheduler::proceedAction()
@@ -1467,6 +1525,19 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
     proceedStage();
 }
 
+void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz,
+                                    double contextSelectedAnchorX, double contextSelectedAnchorY)
+{
+    if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision)
+        return;
+
+    // 视觉端只会在锚点模式选中可信目标时带回 anchor；记录值用于下一帧跳变保护。
+    m_anchorHasPreviousTarget = true;
+    m_anchorPreviousTargetX = contextSelectedAnchorX;
+    m_anchorPreviousTargetY = contextSelectedAnchorY;
+    setGrabOffset(x, y, z, rz);
+}
+
 void HuayanScheduler::onVisionNoObject()
 {
     if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision) {
@@ -1513,6 +1584,35 @@ void HuayanScheduler::onVisionNoObject()
     }
 }
 
+void HuayanScheduler::onVisionTargetRejectedForPickup(VisionHttpClient::TargetSelectionReason reason,
+                                                      const QString &msg)
+{
+    if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision) {
+        emit logMessage(QStringLiteral("[阶段一] 收到锚点可信拒绝，但当前不在等待视觉阶段，忽略：%1").arg(msg));
+        return;
+    }
+
+    stopVisionWaitTimeout();
+
+    QString reasonText;
+    using Reason = VisionHttpClient::TargetSelectionReason;
+    switch (reason) {
+    case Reason::AnchorDistanceTooFar:
+        reasonText = QStringLiteral("最高目标离拍照锚点过远");
+        break;
+    case Reason::AnchorTargetJumpTooFar:
+        reasonText = QStringLiteral("闭环目标相对上一帧跳变过大");
+        break;
+    default:
+        reasonText = QStringLiteral("锚点可信规则拒绝");
+        break;
+    }
+
+    // 这不是“未检测到目标”，继续搜索下移会把旁边工位/跳变目标风险放大，因此直接阶段失败。
+    emitOperationError(QStringLiteral("[阶段一] 视觉目标不可信：%1，%2，拒绝进入搜索下移")
+                           .arg(reasonText, msg));
+}
+
 void HuayanScheduler::onVisionErrorForPickup(const QString &msg)
 {
     if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision) {
@@ -1550,6 +1650,9 @@ bool HuayanScheduler::executeNextGrabMove()
         QStringLiteral("Rx"), QStringLiteral("Ry"), QStringLiteral("Rz")
     };
     const RelMove &mv = m_grabMoves.at(m_grabMoveIdx);
+    if (!validateStageOneRelMoveBeforeDispatch(mv))
+        return false;
+
     emit logMessage(QStringLiteral("[阶段一] 工具系微调 %1 %2 %3")
                         .arg(axisName[mv.poseId])
                         .arg(mv.direction ? QStringLiteral("正向") : QStringLiteral("负向"))
@@ -1562,6 +1665,24 @@ bool HuayanScheduler::executeNextGrabMove()
     cmd.direction = mv.direction;
     cmd.distance = mv.distance;
     return beginCommandWhenReady(cmd);
+}
+
+bool HuayanScheduler::validateStageOneRelMoveBeforeDispatch(const RelMove &move)
+{
+    if (m_stage != Stage::StageOne)
+        return true;
+
+    const bool isXY = move.poseId == 0 || move.poseId == 1;
+    if (isXY && move.distance > HUAYAN_MAX_SINGLE_XY_ADJUST_MM) {
+        const QString axis = move.poseId == 0 ? QStringLiteral("X") : QStringLiteral("Y");
+        emitOperationError(QStringLiteral("[阶段一] 目标不可信：计划 %1 微调 %2mm 超过单次上限 %3mm，拒绝下发 MoveRelL")
+                               .arg(axis)
+                               .arg(move.distance, 0, 'f', 1)
+                               .arg(HUAYAN_MAX_SINGLE_XY_ADJUST_MM, 0, 'f', 1));
+        return false;
+    }
+
+    return true;
 }
 
 void HuayanScheduler::setSurveyPose(const HuayanScheduler::Pose &p)
