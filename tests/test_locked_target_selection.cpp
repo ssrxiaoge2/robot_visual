@@ -97,6 +97,18 @@ int main()
     requireTrue(trackingKeepsLockedTarget.reason == Reason::LockTrackingTarget,
                 "闭环延续锁定目标必须记录 LockTrackingTarget");
 
+    const auto trackingPrefersNearestLockDistanceOverFixedSide = VisionHttpClient::selectTarget(QJsonArray{
+        target(52.7, 2.3, 1363.0),
+        target(9.1, 260.8, 1284.0),
+        target(-211.3, 20.4, 1472.0)
+    }, trackingContext(13.7, -232.7), kIdentityHandEye);
+    requireTrue(trackingPrefersNearestLockDistanceOverFixedSide.hasTarget(),
+                "闭环锁定帧必须在锁定范围内选出连续目标");
+    requireTrue(selected(trackingPrefersNearestLockDistanceOverFixedSide).sourceIndex == 1,
+                "闭环锁定后必须选择 lockdist 最小的候选，不能再被固定侧 Y 抢到另一个同层目标");
+    requireTrue(trackingPrefersNearestLockDistanceOverFixedSide.reason == Reason::LockTrackingTarget,
+                "闭环锁定后即使同层多目标，也必须记录 LockTrackingTarget");
+
     const auto trackingMissing = VisionHttpClient::selectTarget(QJsonArray{
         target(600.0, 0.0, 800.0)
     }, trackingContext(30.0, 50.0), kIdentityHandEye);

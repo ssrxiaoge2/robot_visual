@@ -544,16 +544,23 @@ VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(
                 return selection;
             }
 
-            const QList<int> sameLayerIndexes =
-                sameLayerIndexesFor(selection.candidates, lockedIndexes, context.lockSameLayerZTol);
-            const int bestIndex = chooseFixedSideCandidate(selection.candidates, sameLayerIndexes, context);
+            int bestIndex = lockedIndexes.first();
+            for (int candidateIndex : lockedIndexes) {
+                const TargetCandidate &candidate = selection.candidates.at(candidateIndex);
+                const TargetCandidate &best = selection.candidates.at(bestIndex);
+                if (candidate.lockDistance < best.lockDistance) {
+                    bestIndex = candidateIndex;
+                } else if (qFuzzyCompare(candidate.lockDistance + 1.0, best.lockDistance + 1.0)
+                           && candidate.sourceIndex < best.sourceIndex) {
+                    // 极少数距离完全相等时按原始下标稳定兜底，避免同一输入在不同平台上选择不稳定。
+                    bestIndex = candidateIndex;
+                }
+            }
             selection.selectedCandidateIndex = bestIndex;
             selection.lockMissingFrames = 0;
             selection.lockAnchorX = selection.candidates.at(bestIndex).anchorX;
             selection.lockAnchorY = selection.candidates.at(bestIndex).anchorY;
-            selection.reason = sameLayerIndexes.size() > 1
-                ? TargetSelectionReason::LockTrackingFixedSide
-                : TargetSelectionReason::LockTrackingTarget;
+            selection.reason = TargetSelectionReason::LockTrackingTarget;
             return selection;
         }
 

@@ -71,6 +71,26 @@ QString requireSegmentBetween(const QString &source, const QString &begin, const
     return source.mid(beginIdx, endIdx - beginIdx);
 }
 
+void requireStageOneLargeRzGuard(const QString &source)
+{
+    requireTrue(source.contains(QStringLiteral("HUAYAN_STAGE_ONE_MAX_LARGE_RZ_EXECUTIONS")),
+                "必须定义阶段一 Rz 大角度最大执行次数宏，避免 90 度重复旋转");
+    requireTrue(source.contains(QStringLiteral("m_stageOneLargeRzExecutionCount")),
+                "必须记录同一阶段一目标锁定周期内已执行的大角度 Rz 次数");
+    requireTrue(source.contains(QStringLiteral("已执行过 Rz 大角度修正")),
+                "重复出现 Rz 大角度时必须输出现场可读日志");
+    requireTrue(source.contains(QStringLiteral("疑似视觉旧帧或角度歧义")),
+                "重复 Rz 大角度日志必须说明可能是视觉旧帧或角度歧义");
+}
+
+void requireStageOneZDescendTimeout(const QString &source)
+{
+    requireTrue(source.contains(QStringLiteral("HUAYAN_STAGE_ONE_Z_DESCEND_TIMEOUT_MS")),
+                "必须定义阶段一 Z 下探专用到位等待超时");
+    requireTrue(source.contains(QStringLiteral("cmd.timeoutMs = HUAYAN_STAGE_ONE_Z_DESCEND_TIMEOUT_MS")),
+                "Z 下探 PendingCommand 必须使用专用超时，不能继续使用 30000ms 默认值");
+}
+
 } // namespace
 
 static_assert(std::is_same_v<decltype(&HuayanScheduler::startPalletPlace),
@@ -92,6 +112,9 @@ int main()
         readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/palletplacesequence.cpp"));
     const QString deviceManagerSource =
         readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/devicemanager.cpp"));
+
+    requireStageOneLargeRzGuard(source);
+    requireStageOneZDescendTimeout(source);
 
     requireTrue(header.contains(QStringLiteral("void schedulerStopped();")),
                 "HuayanScheduler 必须声明专用的 schedulerStopped 信号");

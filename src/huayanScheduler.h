@@ -463,6 +463,7 @@ private:
     double m_searchDescendedMm = 0.0;  // 找目标累计下移量(mm)，不是抓取 Z 下探量
     bool m_pendingLargeRzConfirmation = false; ///< 上一帧是否出现待确认的 Rz 大角度跳变。
     double m_pendingLargeRz = 0.0;             ///< 待确认的 Rz 大角度跳变值(deg)。
+    int m_stageOneLargeRzExecutionCount = 0; ///< 阶段一当前锁定目标已实际执行的 Rz 大角度次数；阶段启动/停止/锁定重置时清零，普通小角度 Rz 不计数。
     bool m_preGripScanEnabled = false; ///< 是否启用夹紧前扫码暂停。
     bool m_waitingPreGripScan = false; ///< 已发扫码请求且尚未收到继续指令。
     double m_preGripScanSearchCurrentY = 0.0; ///< 当前夹紧前扫码搜索 Y 偏移(mm)。

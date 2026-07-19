@@ -5,6 +5,38 @@
 
 ---
 
+## 2026-07-19 | v0.2.4 | 视觉锁定连续跟踪、Rz 大角度保护与 Z 下探超时修正
+
+### 修复
+- 修复阶段一视觉锁定后的同层目标摇摆：初始帧继续使用“最高层 + 固定侧 Y”定边，闭环帧改为按上一帧锁定目标的 `lockdist` 最近候选连续跟踪。
+- 增加阶段一 Rz 大角度累计保护：`abs(Rz) >= 80°` 仍需连续两帧确认，但同一锁定目标周期内最多实际执行一次，避免视觉旧帧或角度歧义导致 90° 重复累计旋转。
+- 将阶段一 Z 下探命令到位等待超时单独调整为 `120000ms`，避免 1 米级下探被 30 秒默认超时误杀。
+
+### 文档
+- 新增 2026-07-19 现场复测追溯设计和实施计划，记录 7.18 锚点锁定方案在闭环跟踪、Rz 和 Z 下探超时上的后续修正。
+- README 同步阶段一视觉锁定策略、Rz 大角度累计保护、Z 下探超时和华研 40961/49601 待确认说明。
+
+### 验证
+- `locked_target_selection_tests` 和 `huayan_scheduler_contract_tests` 通过。
+- 全量 CTest 通过：12/12。
+- 完整构建通过：`cmake --build build-field-fixes -j2`，目标 `wh-robot-visual` 构建成功。
+
+### 文件
+- `src/visionclient.h`
+- `src/visionclient.cpp`
+- `src/huayanScheduler.h`
+- `src/huayanScheduler.cpp`
+- `tests/test_locked_target_selection.cpp`
+- `tests/test_huayan_scheduler_contract.cpp`
+- `README.md`
+- `docs/superpowers/specs/2026-07-18-anchor-vision-target-trust-design.md`
+- `docs/superpowers/plans/2026-07-18-anchor-vision-target-trust.md`
+- `docs/superpowers/specs/2026-07-19-vision-lock-tracking-and-rz-guard-design.md`
+- `docs/superpowers/plans/2026-07-19-vision-lock-tracking-and-rz-guard.md`
+- `changelog/CHANGELOG.md`
+
+---
+
 ## 2026-07-18 | v0.2.4 | 阶段一视觉目标锁定现场确认与华研 40961 记录
 
 ### 变更

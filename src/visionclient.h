@@ -93,7 +93,7 @@ public:
         LockInitialHighestLayer, ///< 目标锁定：初始帧在可信候选中选中唯一最高层目标。
         LockInitialFixedSide,    ///< 目标锁定：初始帧最高同层多目标按固定侧选择。
         LockTrackingTarget,      ///< 目标锁定：闭环帧继续跟踪锁定目标附近候选。
-        LockTrackingFixedSide,   ///< 目标锁定：闭环帧锁定范围内同层多目标按固定侧选择。
+        LockTrackingFixedSide,   ///< 历史兼容原因；2026-07-19 起闭环帧不再按固定侧选择，改按 lockDistance 最近。
         LockTargetMissing,       ///< 目标锁定：本帧未找到锁定目标，暂不切换目标。
         LockTargetLost           ///< 目标锁定：锁定目标连续丢失达到上限，阶段应失败。
     };

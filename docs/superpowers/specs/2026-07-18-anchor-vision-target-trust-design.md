@@ -4,6 +4,7 @@
 **状态：** 已实施并完成自动化验证；2026-07-18 现场验证确认“目标锁定”策略有效，40961 待向华研厂家确认
 **关联日志：** `log/2026-07-17+log.txt`、`log/2026-07-18+log.txt`
 **关联上一版设计：** `docs/superpowers/specs/2026-07-16-field-fault-diagnostics-and-workflow-isolation-design.md`
+**2026-07-19 后续修正：** 现场复测发现闭环跟踪阶段继续使用固定侧规则会导致同层两个目标之间摇摆；后续修正见 `docs/superpowers/specs/2026-07-19-vision-lock-tracking-and-rz-guard-design.md`。
 
 ## 1. 背景
 

@@ -37,6 +37,7 @@ static constexpr int    kResetSettleMs     = 1000;
 static constexpr double kMaxDescend     = 1078.0;  // 下探安全上限(mm)，正常不应触发截断
 static constexpr double HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 250.0; // 阶段一单次 X/Y 微调硬上限(mm)，现场验证 250mm 可覆盖正常锁定目标微调；超过即 fail-closed 拒绝下发 MoveRelL。
 static constexpr double HUAYAN_MAX_Z_DESCEND_MM = 1078.0; // 阶段一 Z 下探硬上限(mm)，不得因临时调试放大，超过即 fail-closed。
+static constexpr int HUAYAN_STAGE_ONE_Z_DESCEND_TIMEOUT_MS = 120000; // 阶段一 Z 下探专用到位等待超时(ms)；1 米级下探可能超过 30s，普通 X/Y/Rz 微调仍使用默认超时。
 static constexpr bool   kZDescendInvert = false;   // Z 下探方向；若实际朝反方向，改 true
 static constexpr double kGrabXCompensation = 30.0; // Z 下探到物料箱位置后的工具系 X 补偿(mm)
 static constexpr double kGrabYCompensation = -17.0; // X 补偿后的工具系 Y 补偿(mm)
@@ -45,6 +46,7 @@ static constexpr double kOffsetIgnoreAngle = 0.5;    // 码垛旋转死区(deg)
 static constexpr double kRotateToolAngle = 180.0;    // 扫码补救的工具系 Rz 角(deg)
 static constexpr double kLargeRzJumpThreshold = 80.0; // Rz 大角度跳变确认阈值(deg)
 static constexpr double kLargeRzJumpDeltaTolerance = 15.0; // 连续两帧幅值接近阈值(deg)
+static constexpr int HUAYAN_STAGE_ONE_MAX_LARGE_RZ_EXECUTIONS = 1; // 同一阶段一锁定目标周期内允许实际执行的 Rz 大角度旋转次数；只统计 abs(Rz)>=kLargeRzJumpThreshold 的旋转，防止视觉旧帧导致 90° 重复累计。
 
 // 华研机器人默认 TCP/UCS 名称
 static const QString kTcpName = QStringLiteral("TCP");
@@ -500,6 +502,7 @@ void HuayanScheduler::startStageOne()
     m_searchDescendedMm = 0.0;
     m_pendingLargeRzConfirmation = false;
     m_pendingLargeRz = 0.0;
+    m_stageOneLargeRzExecutionCount = 0;
     m_waitingPreGripScan = false;
     m_preGripScanSearchCurrentY = 0.0;
     m_preGripScanSearchTargetY = 0.0;
@@ -634,6 +637,7 @@ void HuayanScheduler::stop(bool emitStoppedLog)
     m_searchDescendedMm = 0.0;
     m_pendingLargeRzConfirmation = false;
     m_pendingLargeRz = 0.0;
+    m_stageOneLargeRzExecutionCount = 0;
     m_waitingPreGripScan = false;
     m_preGripScanSearchCurrentY = 0.0;
     m_preGripScanSearchTargetY = 0.0;
@@ -929,19 +933,21 @@ void HuayanScheduler::executeCurrentStep()
                 proceedStage();
                 break;
             }
-            emit logMessage(QStringLiteral("[阶段一] Z 下探 %1mm（未截断计划 %2mm = 视觉深度 %3mm - 余量 %4mm，下发上限 %5mm，硬上限 %6mm）")
+            emit logMessage(QStringLiteral("[阶段一] Z 下探 %1mm（未截断计划 %2mm = 视觉深度 %3mm - 余量 %4mm，下发上限 %5mm，硬上限 %6mm，到位超时 %7ms）")
                                 .arg(descend, 0, 'f', 1)
                                 .arg(plannedDescend, 0, 'f', 1)
                                 .arg(m_grabOffset.z, 0, 'f', 1)
                                 .arg(m_grabZClearance, 0, 'f', 1)
                                 .arg(qMin(kMaxDescend, HUAYAN_MAX_Z_DESCEND_MM), 0, 'f', 1)
-                                .arg(HUAYAN_MAX_Z_DESCEND_MM, 0, 'f', 1));
+                                .arg(HUAYAN_MAX_Z_DESCEND_MM, 0, 'f', 1)
+                                .arg(HUAYAN_STAGE_ONE_Z_DESCEND_TIMEOUT_MS));
             PendingCommand cmd;
             cmd.kind = PendingCommandKind::MoveRelTool;
             cmd.label = QStringLiteral("Z 下探");
             cmd.poseId = 2;
             cmd.direction = kZDescendInvert ? 0 : 1;
             cmd.distance = descend;
+            cmd.timeoutMs = HUAYAN_STAGE_ONE_Z_DESCEND_TIMEOUT_MS;
             beginCommandWhenReady(cmd);
             break;
         }
@@ -1082,6 +1088,7 @@ void HuayanScheduler::resetVisionAnchorTracking()
     m_anchorPreviousTargetX = 0.0;
     m_anchorPreviousTargetY = 0.0;
     m_anchorMissingFrames = 0;
+    m_stageOneLargeRzExecutionCount = 0;
 }
 
 VisionHttpClient::TargetSelectionContext HuayanScheduler::makeVisionTargetSelectionContext() const
@@ -1460,7 +1467,15 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
     bool suppressLargeRzRotation = false;
     double effectiveRz = rz;
     if (isLargeRzJump) {
-        if (!m_pendingLargeRzConfirmation
+        if (m_stageOneLargeRzExecutionCount >= HUAYAN_STAGE_ONE_MAX_LARGE_RZ_EXECUTIONS) {
+            effectiveRz = 0.0;
+            m_pendingLargeRzConfirmation = false;
+            m_pendingLargeRz = 0.0;
+            emit logMessage(QStringLiteral("[阶段一] 已执行过 Rz 大角度修正 %1/%2，当前 Rz=%3 疑似视觉旧帧或角度歧义，本轮跳过 Rz 旋转")
+                                .arg(m_stageOneLargeRzExecutionCount)
+                                .arg(HUAYAN_STAGE_ONE_MAX_LARGE_RZ_EXECUTIONS)
+                                .arg(rz, 0, 'f', 1));
+        } else if (!m_pendingLargeRzConfirmation
             || !sameDirection(m_pendingLargeRz, rz)
             || qAbs(qAbs(m_pendingLargeRz) - qAbs(rz)) > kLargeRzJumpDeltaTolerance) {
             m_pendingLargeRzConfirmation = true;
@@ -1470,8 +1485,11 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
             emit logMessage(QStringLiteral("[阶段一] 检测到疑似 Rz 大角度跳变 Rz=%1，等待下一帧确认，本轮不执行 Rz 旋转")
                                 .arg(rz, 0, 'f', 1));
         } else {
-            emit logMessage(QStringLiteral("[阶段一] Rz 大角度跳变已连续确认 Rz=%1，允许执行旋转")
-                                .arg(rz, 0, 'f', 1));
+            ++m_stageOneLargeRzExecutionCount;
+            emit logMessage(QStringLiteral("[阶段一] Rz 大角度跳变已连续确认 Rz=%1，允许执行旋转（本目标大角度次数 %2/%3）")
+                                .arg(rz, 0, 'f', 1)
+                                .arg(m_stageOneLargeRzExecutionCount)
+                                .arg(HUAYAN_STAGE_ONE_MAX_LARGE_RZ_EXECUTIONS));
             m_pendingLargeRzConfirmation = false;
             m_pendingLargeRz = 0.0;
         }
