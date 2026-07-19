@@ -118,7 +118,7 @@ int main()
                 "anchorY 必须等于累计 Y + alignmentY");
 
     VisionHttpClient::TargetSelectionContext farCtx = context();
-    farCtx.maxTrustDistance = 200.0;
+    farCtx.maxTrustX = 200.0;
     const auto farHighest = VisionHttpClient::selectTarget(QJsonArray{
         target(350.0, 0.0, 800.0),
         target(20.0, 0.0, 1000.0)
@@ -159,7 +159,7 @@ int main()
                 "视觉选择摘要必须保持单行，避免现场日志刷屏");
 
     VisionHttpClient::TargetSelectionContext logCtx = context();
-    logCtx.maxTrustDistance = 100.0;
+    logCtx.maxTrustX = 100.0;
     const auto perCandidateTrustLog = VisionHttpClient::selectTarget(QJsonArray{
         target(10.0, 0.0, 900.0),
         target(150.0, 0.0, 1000.0)

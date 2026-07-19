@@ -41,8 +41,13 @@
 // 当前工位视觉候选矩形的 Y 半宽，单位 mm；只过滤原始 offset_mm.y，不参与机械臂运动限位。
 #define VISION_STATION_ROI_HALF_Y_MM 500.0
 
-// 最高层候选离初始拍照锚点的最大可信距离，单位 mm；现场根据正常 anchor distance 日志微调。
-#define VISION_ANCHOR_MAX_TRUST_XY_MM 450.0
+// 最高层候选相对初始拍照锚点的 X 最大可信偏移，单位 mm。
+// 2026-07-19 现场确认：旧圆形距离会放过斜向进入的旁站高箱，因此改为 X/Y 独立矩形范围。
+#define VISION_ANCHOR_MAX_TRUST_X_MM 300.0
+
+// 最高层候选相对初始拍照锚点的 Y 最大可信偏移，单位 mm。
+// 该值按当前推车长边方向预留较大余量；若现场轴向相反，可只调 X/Y 两个宏，不改算法。
+#define VISION_ANCHOR_MAX_TRUST_Y_MM 450.0
 
 // 锚点选择的同层 Z 容差，单位 mm；必须远小于料箱层高，避免低层被当作同层。
 #define VISION_ANCHOR_SAME_LAYER_Z_TOL_MM 20.0
@@ -88,7 +93,7 @@ public:
         StableSourceIndex,      ///< 深度和 XY 距离完全相同时，按服务端原始下标稳定兜底。
         AnchorHighestLayer,     ///< 锚点逻辑：可信范围内只有一个最高层候选。
         AnchorSameLayerNearest, ///< 锚点逻辑：可信最高层有多个候选，按锚点 XY 最近选择。
-        AnchorDistanceTooFar,   ///< 最高层候选离初始拍照锚点过远，目标不可信。
+        AnchorDistanceTooFar,   ///< 最高层候选超出初始拍照锚点 X/Y 矩形可信范围，目标不可信。
         AnchorTargetJumpTooFar, ///< 闭环目标相对上一帧锚点位置跳变过大，目标不可信。
         LockInitialHighestLayer, ///< 目标锁定：初始帧在可信候选中选中唯一最高层目标。
         LockInitialFixedSide,    ///< 目标锁定：初始帧最高同层多目标按固定侧选择。
@@ -107,7 +112,8 @@ public:
         bool hasPreviousAnchorTarget = false; ///< 是否已有锁定/上一帧可信目标；锁定模式下表示闭环已锁定。
         double previousAnchorX = 0.0; ///< 锁定/上一帧可信目标相对初始拍照锚点的 X(mm)。
         double previousAnchorY = 0.0; ///< 锁定/上一帧可信目标相对初始拍照锚点的 Y(mm)。
-        double maxTrustDistance = VISION_ANCHOR_MAX_TRUST_XY_MM; ///< 目标可信最大锚点距离(mm)。
+        double maxTrustX = VISION_ANCHOR_MAX_TRUST_X_MM; ///< 目标相对初始拍照锚点的 X 最大可信偏移(mm)。
+        double maxTrustY = VISION_ANCHOR_MAX_TRUST_Y_MM; ///< 目标相对初始拍照锚点的 Y 最大可信偏移(mm)。
         double sameLayerZTol = VISION_ANCHOR_SAME_LAYER_Z_TOL_MM; ///< 同层 Z 容差(mm)。
         double maxSwitchDistance = VISION_ANCHOR_SWITCH_MAX_XY_MM; ///< 闭环目标最大跳变(mm)。
         int lockMissingFrames = 0; ///< 锁定目标已经连续丢失的帧数；由调度器跨帧维护。

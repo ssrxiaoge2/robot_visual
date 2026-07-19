@@ -5,6 +5,30 @@
 
 ---
 
+## 2026-07-19 | v0.2.5 | 阶段一锚点可信范围改为 X/Y 矩形
+
+### 修复
+- 修复旧圆形锚点可信范围可能放过斜向旁站高箱的问题：原规则 `sqrt(anchorX² + anchorY²) <= 450mm` 会让部分 X/Y 单轴已偏出本工位外圈的高箱参与最高层竞争。
+- 将阶段一锚点可信判断改为 X/Y 独立矩形范围：默认 `VISION_ANCHOR_MAX_TRUST_X_MM = 300.0`、`VISION_ANCHOR_MAX_TRUST_Y_MM = 450.0`，现场可按推车轴向和正常目标日志微调。
+- 保留 7.19 已验证的目标锁定逻辑：初始锁定仍按“最高层 + 固定侧”定边，锁定后仍按上一帧目标 `lockdist` 最近连续跟踪。
+
+### 文档
+- README 同步锚点可信范围的矩形含义和现场调参说明。
+- 7.19 设计与计划文档追加“圆形范围泄漏”现场现象、原因和修正规则。
+
+### 文件
+- `src/visionclient.h`
+- `src/visionclient.cpp`
+- `src/huayanScheduler.cpp`
+- `tests/test_locked_target_selection.cpp`
+- `tests/test_anchor_target_selection.cpp`
+- `README.md`
+- `docs/superpowers/specs/2026-07-19-vision-lock-tracking-and-rz-guard-design.md`
+- `docs/superpowers/plans/2026-07-19-vision-lock-tracking-and-rz-guard.md`
+- `changelog/CHANGELOG.md`
+
+---
+
 ## 2026-07-19 | v0.2.4 | 视觉锁定连续跟踪、Rz 大角度保护与 Z 下探超时修正
 
 ### 修复

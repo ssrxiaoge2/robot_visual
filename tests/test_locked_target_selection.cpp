@@ -79,6 +79,17 @@ int main()
     requireTrue(initialFiltersOtherStationHighest.reason == Reason::LockInitialHighestLayer,
                 "初始锁定单个最高层可信目标必须记录 LockInitialHighestLayer");
 
+    const auto initialRejectsDiagonalCircleLeak = VisionHttpClient::selectTarget(QJsonArray{
+        target(30.0, 0.0, 1100.0),
+        target(320.0, -120.0, 800.0)
+    }, lockedContext(), kIdentityHandEye);
+    requireTrue(initialRejectsDiagonalCircleLeak.hasTarget(),
+                "圆形范围泄漏回归测试必须能在本工位候选中选出目标");
+    requireTrue(selected(initialRejectsDiagonalCircleLeak).sourceIndex == 0,
+                "斜向偏出但圆形距离仍小于旧阈值的旁站高箱，必须被 X/Y 矩形锚点可信范围过滤");
+    requireTrue(!initialRejectsDiagonalCircleLeak.candidates.at(1).trusted,
+                "超出矩形锚点可信范围的候选必须标记为不可信，便于现场日志追溯");
+
     const auto initialFixedSide = VisionHttpClient::selectTarget(QJsonArray{
         target(20.0, 120.0, 900.0),
         target(25.0, -160.0, 940.0)

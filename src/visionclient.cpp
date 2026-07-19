@@ -204,6 +204,15 @@ double distanceSq(double x, double y)
     return x * x + y * y;
 }
 
+bool isAnchorInsideRectTrust(const VisionHttpClient::TargetCandidate &candidate,
+                             const VisionHttpClient::TargetSelectionContext &context)
+{
+    // 阶段一锚点可信范围按“拍照点位为中心的物理矩形”判断。
+    // 不再使用圆形距离作为可信条件，避免旁站高箱沿斜向进入半径范围后抢目标。
+    return qAbs(candidate.anchorX) <= context.maxTrustX
+        && qAbs(candidate.anchorY) <= context.maxTrustY;
+}
+
 double lockSideValue(const VisionHttpClient::TargetCandidate &candidate,
                      const VisionHttpClient::TargetSelectionContext &context)
 {
@@ -318,7 +327,7 @@ QString selectionReasonText(VisionHttpClient::TargetSelectionReason reason)
     case Reason::AnchorSameLayerNearest:
         return QStringLiteral("锚点同层最近");
     case Reason::AnchorDistanceTooFar:
-        return QStringLiteral("最高目标离拍照锚点过远，目标不可信");
+        return QStringLiteral("最高目标超出拍照锚点矩形可信范围，目标不可信");
     case Reason::AnchorTargetJumpTooFar:
         return QStringLiteral("目标跳变过大，目标不可信");
     case Reason::LockInitialHighestLayer:
@@ -498,7 +507,7 @@ VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(
         candidate.anchorX = context.accumulatedToolX + candidate.alignmentX;
         candidate.anchorY = context.accumulatedToolY + candidate.alignmentY;
         candidate.anchorDistance = std::sqrt(distanceSq(candidate.anchorX, candidate.anchorY));
-        candidate.trusted = candidate.anchorDistance <= context.maxTrustDistance;
+        candidate.trusted = isAnchorInsideRectTrust(candidate, context);
         if (context.lockEnabled && context.hasPreviousAnchorTarget) {
             candidate.lockDistance = std::sqrt(distanceSq(candidate.anchorX - context.previousAnchorX,
                                                           candidate.anchorY - context.previousAnchorY));
@@ -613,7 +622,7 @@ VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(
     }
 
     TargetCandidate &best = selection.candidates[bestIndex];
-    if (best.anchorDistance > context.maxTrustDistance) {
+    if (!isAnchorInsideRectTrust(best, context)) {
         best.trusted = false;
         selection.reason = TargetSelectionReason::AnchorDistanceTooFar;
         return selection;

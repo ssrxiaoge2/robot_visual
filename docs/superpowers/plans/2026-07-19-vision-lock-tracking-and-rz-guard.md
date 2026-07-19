@@ -2,9 +2,9 @@
 
 > **给智能体执行者：** 必需子技能：使用 `superpowers:subagent-driven-development`（推荐，且本仓库要求串行、同一时间最多一个子代理）或 `superpowers:executing-plans` 按任务执行本计划；步骤使用复选框语法记录进度。
 
-**目标：** 修复 2026-07-19 现场发现的同层目标闭环摇摆、`Rz=90°` 重复累计旋转和 Z 下探 30 秒默认超时问题。
+**目标：** 修复 2026-07-19 现场发现的同层目标闭环摇摆、`Rz=90°` 重复累计旋转、Z 下探 30 秒默认超时，以及旧圆形锚点可信范围放过斜向旁站高箱的问题。
 
-**实施状态：** 任务 1-5 已完成；自动化测试和完整构建通过，等待现场复测。
+**实施状态：** 任务 1-5 已完成；2026-07-19 现场复测后追加任务 6，改为 X/Y 矩形锚点可信范围。
 
 **架构：** `VisionHttpClient` 继续负责纯视觉候选解析、锚点/锁定距离计算和目标选择；初始锁定帧保留“最高层 + 固定侧 Y”，闭环跟踪帧改为选择 `lockdist` 最小候选。`HuayanScheduler` 负责阶段一 Rz 大角度确认与累计执行次数保护，并在 Z 下探命令上单独设置更长到位等待超时。
 
@@ -18,6 +18,7 @@
 - 不重新标定手眼矩阵。
 - 不改变 `Func_captureN`、`Func_jiajin` 等示教器函数。
 - 不改变 7.18 已验证的初始目标选择策略：最高层优先，同层按固定侧 Y 定边。
+- 锚点可信范围从旧圆形半径改为 X/Y 独立矩形范围，只过滤明显偏出当前工位外圈的候选，不引入固定槽位。
 - 锁定后禁止使用固定侧 Y 抢目标，闭环只按上一帧锁定目标的 `lockdist` 连续跟踪。
 - `Rz` 大角度保护只统计 `abs(Rz) >= kLargeRzJumpThreshold` 且实际允许执行的旋转；普通小角度 Rz 不计数。
 - Z 下探只调整命令到位等待超时，不放大全局默认超时。
@@ -34,15 +35,18 @@
 - `src/visionclient.h`
   - 保留目标选择枚举和锁定上下文。
   - 更新 `LockTrackingFixedSide` 注释，说明该枚举仅为历史兼容或删除该枚举；闭环实现不再产出该原因。
+  - 新增 `VISION_ANCHOR_MAX_TRUST_X_MM` 与 `VISION_ANCHOR_MAX_TRUST_Y_MM`，替代旧圆形 `VISION_ANCHOR_MAX_TRUST_XY_MM`。
 
 - `src/visionclient.cpp`
   - 修改锁定闭环分支：`context.hasPreviousAnchorTarget == true` 时，候选通过可信范围和 `lockTrackRadius` 后，直接选择 `lockDistance` 最小者。
+  - 修改锚点可信判断：从 `sqrt(anchorX² + anchorY²) <= 半径` 改为 `abs(anchorX) <= X半宽 && abs(anchorY) <= Y半宽`。
   - 初始锁定分支继续使用 `chooseFixedSideCandidate()`。
   - 更新选择原因：闭环选中目标统一使用 `LockTrackingTarget`。
 
 - `tests/test_locked_target_selection.cpp`
   - 增加 2026-07-19 现场复现用例，证明闭环不会再因固定侧 Y 切到 `lockdist` 更远的同层目标。
   - 增加初始固定侧仍生效的回归测试，防止误删开局定边逻辑。
+  - 增加圆形范围泄漏回归测试，证明斜向偏出但旧圆形距离仍可信的旁站高箱会被矩形锚点范围过滤。
 
 - `src/huayanScheduler.h`
   - 增加阶段一大角度 Rz 已执行次数成员变量。
@@ -615,9 +619,92 @@ git commit -m "fix: stabilize locked vision tracking and rz guard"
 
 ---
 
+## 任务 6：追加锚点可信范围从圆形改为矩形
+
+**文件：**
+- 修改：`tests/test_locked_target_selection.cpp`
+- 修改：`src/visionclient.h`
+- 修改：`src/visionclient.cpp`
+- 修改：`src/huayanScheduler.cpp`
+- 修改：`README.md`
+- 修改：`docs/superpowers/specs/2026-07-19-vision-lock-tracking-and-rz-guard-design.md`
+- 修改：`docs/superpowers/plans/2026-07-19-vision-lock-tracking-and-rz-guard.md`
+- 修改：`changelog/CHANGELOG.md`
+
+**接口：**
+- 产出：
+  - `VISION_ANCHOR_MAX_TRUST_X_MM`
+  - `VISION_ANCHOR_MAX_TRUST_Y_MM`
+  - `TargetSelectionContext::maxTrustX`
+  - `TargetSelectionContext::maxTrustY`
+- 行为：
+  - 候选可信判断从圆形 `sqrt(anchorX² + anchorY²) <= 半径` 改为矩形 `abs(anchorX) <= maxTrustX && abs(anchorY) <= maxTrustY`。
+  - `anchorDistance` 继续保留为日志诊断值，不再作为可信条件。
+
+- [x] **步骤 1：增加圆形范围泄漏回归测试**
+
+在 `tests/test_locked_target_selection.cpp` 中增加用例：一个本工位低箱与一个斜向偏出的旁站高箱同时出现时，旁站高箱虽然满足旧圆形半径，但必须因 X/Y 矩形范围超界而标记为不可信，最终选择本工位候选。
+
+- [x] **步骤 2：确认旧实现测试失败**
+
+运行：
+
+```bash
+cmake --build build-field-fixes --target locked_target_selection_tests -j2
+./build-field-fixes/tests/locked_target_selection_tests
+```
+
+预期旧实现失败，失败信息包含：
+
+```text
+斜向偏出但圆形距离仍小于旧阈值的旁站高箱，必须被 X/Y 矩形锚点可信范围过滤
+```
+
+- [x] **步骤 3：修改锚点可信接口和实现**
+
+在 `src/visionclient.h` 中删除旧圆形阈值宏：
+
+```cpp
+VISION_ANCHOR_MAX_TRUST_XY_MM
+```
+
+改为：
+
+```cpp
+VISION_ANCHOR_MAX_TRUST_X_MM
+VISION_ANCHOR_MAX_TRUST_Y_MM
+```
+
+在 `TargetSelectionContext` 中将 `maxTrustDistance` 改为 `maxTrustX` 与 `maxTrustY`。
+
+在 `src/visionclient.cpp` 中新增矩形判断辅助函数，注释写明：该规则按初始拍照点位的物理 X/Y 外圈过滤旁站目标，不再使用圆形距离作为可信条件。
+
+- [x] **步骤 4：同步日志和文档文案**
+
+将“最高目标离拍照锚点过远”调整为“最高目标超出拍照锚点矩形可信范围”，并在 README 与本设计中记录：
+
+- 旧圆形半径会放过斜向进入的旁站高箱。
+- 新规则使用 X/Y 独立阈值。
+- 默认值为 `X=300mm`、`Y=450mm`，现场可按轴向和正常目标日志微调。
+
+- [x] **步骤 5：运行验证**
+
+运行：
+
+```bash
+cmake --build build-field-fixes --target locked_target_selection_tests anchor_target_selection_tests -j2
+./build-field-fixes/tests/locked_target_selection_tests
+./build-field-fixes/tests/anchor_target_selection_tests
+ctest --test-dir build-field-fixes --output-on-failure
+```
+
+预期：全部通过。
+
+---
+
 ## 自查清单
 
-- 规格覆盖：任务 1 覆盖目标锁定连续跟踪；任务 2 覆盖 Rz 大角度累计保护；任务 3 覆盖 Z 下探专用超时；任务 4 覆盖 README、changelog 和 7.18/7.19 追溯；任务 5 覆盖验证和本地提交。
+- 规格覆盖：任务 1 覆盖目标锁定连续跟踪；任务 2 覆盖 Rz 大角度累计保护；任务 3 覆盖 Z 下探专用超时；任务 4 覆盖 README、changelog 和 7.18/7.19 追溯；任务 5 覆盖验证和本地提交；任务 6 覆盖圆形锚点范围改为 X/Y 矩形范围。
 - 占位符检查：计划中没有常见占位符关键字或“类似任务 N”的占位描述。
 - 类型一致性：计划中使用的宏名、成员变量名、枚举值和文件路径在任务内均有定义或来自现有代码。
 - 中文规则：正文说明、步骤、预期结果和自查说明使用中文；代码标识符、命令、路径和 SDK 原文保持原样。

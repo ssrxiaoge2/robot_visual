@@ -1621,7 +1621,7 @@ void HuayanScheduler::onVisionTargetRejectedForPickup(VisionHttpClient::TargetSe
     using Reason = VisionHttpClient::TargetSelectionReason;
     switch (reason) {
     case Reason::AnchorDistanceTooFar:
-        reasonText = QStringLiteral("最高目标离拍照锚点过远");
+        reasonText = QStringLiteral("最高目标超出拍照锚点矩形可信范围");
         break;
     case Reason::AnchorTargetJumpTooFar:
         reasonText = QStringLiteral("闭环目标相对上一帧跳变过大");
