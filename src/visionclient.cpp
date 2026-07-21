@@ -553,14 +553,17 @@ VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(
                 return selection;
             }
 
-            int bestIndex = lockedIndexes.first();
-            for (int candidateIndex : lockedIndexes) {
+            const QList<int> sameLayerIndexes =
+                sameLayerIndexesFor(selection.candidates, lockedIndexes, context.lockSameLayerZTol);
+            int bestIndex = sameLayerIndexes.first();
+            for (int candidateIndex : sameLayerIndexes) {
                 const TargetCandidate &candidate = selection.candidates.at(candidateIndex);
                 const TargetCandidate &best = selection.candidates.at(bestIndex);
                 if (candidate.lockDistance < best.lockDistance) {
                     bestIndex = candidateIndex;
                 } else if (qFuzzyCompare(candidate.lockDistance + 1.0, best.lockDistance + 1.0)
                            && candidate.sourceIndex < best.sourceIndex) {
+                    // 闭环帧先按最高层过滤，再在同层内按 lockDistance 最近跟踪；
                     // 极少数距离完全相等时按原始下标稳定兜底，避免同一输入在不同平台上选择不稳定。
                     bestIndex = candidateIndex;
                 }

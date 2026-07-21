@@ -2,9 +2,9 @@
 
 > **给智能体执行者：** 必需子技能：使用 `superpowers:subagent-driven-development`（推荐，且本仓库要求串行、同一时间最多一个子代理）或 `superpowers:executing-plans` 按任务执行本计划；步骤使用复选框语法记录进度。
 
-**目标：** 修复 2026-07-19 现场发现的同层目标闭环摇摆、`Rz=90°` 重复累计旋转、Z 下探 30 秒默认超时，以及旧圆形锚点可信范围放过斜向旁站高箱的问题。
+**目标：** 修复 2026-07-19 现场发现的同层目标闭环摇摆、`Rz=90°` 重复累计旋转、Z 下探 30 秒默认超时、旧圆形锚点可信范围放过斜向旁站高箱，以及闭环阶段 `lockdist` 压过高层优先导致抓低层的问题。
 
-**实施状态：** 任务 1-5 已完成；2026-07-19 现场复测后追加任务 6，改为 X/Y 矩形锚点可信范围。
+**实施状态：** 任务 1-6 已完成；2026-07-20 根据 `2026-07-19+log (2).txt` 追加任务 7，恢复闭环阶段高层优先。
 
 **架构：** `VisionHttpClient` 继续负责纯视觉候选解析、锚点/锁定距离计算和目标选择；初始锁定帧保留“最高层 + 固定侧 Y”，闭环跟踪帧改为选择 `lockdist` 最小候选。`HuayanScheduler` 负责阶段一 Rz 大角度确认与累计执行次数保护，并在 Z 下探命令上单独设置更长到位等待超时。
 
@@ -20,6 +20,7 @@
 - 不改变 7.18 已验证的初始目标选择策略：最高层优先，同层按固定侧 Y 定边。
 - 锚点可信范围从旧圆形半径改为 X/Y 独立矩形范围，只过滤明显偏出当前工位外圈的候选，不引入固定槽位。
 - 锁定后禁止使用固定侧 Y 抢目标，闭环只按上一帧锁定目标的 `lockdist` 连续跟踪。
+- 闭环阶段仍必须高层优先；`lockdist` 只用于最高层同层候选之间的连续跟踪。
 - `Rz` 大角度保护只统计 `abs(Rz) >= kLargeRzJumpThreshold` 且实际允许执行的旋转；普通小角度 Rz 不计数。
 - Z 下探只调整命令到位等待超时，不放大全局默认超时。
 - 新增或修改的宏、`enum class`、接口、参数、成员变量和非显然业务分支必须写明语义、单位、生命周期或拒绝执行规则。
@@ -40,6 +41,7 @@
 - `src/visionclient.cpp`
   - 修改锁定闭环分支：`context.hasPreviousAnchorTarget == true` 时，候选通过可信范围和 `lockTrackRadius` 后，直接选择 `lockDistance` 最小者。
   - 修改锚点可信判断：从 `sqrt(anchorX² + anchorY²) <= 半径` 改为 `abs(anchorX) <= X半宽 && abs(anchorY) <= Y半宽`。
+  - 追加闭环高层优先修正：锁定闭环分支先筛选最高层候选，再在同层候选中按 `lockDistance` 最小选择。
   - 初始锁定分支继续使用 `chooseFixedSideCandidate()`。
   - 更新选择原因：闭环选中目标统一使用 `LockTrackingTarget`。
 
@@ -47,6 +49,7 @@
   - 增加 2026-07-19 现场复现用例，证明闭环不会再因固定侧 Y 切到 `lockdist` 更远的同层目标。
   - 增加初始固定侧仍生效的回归测试，防止误删开局定边逻辑。
   - 增加圆形范围泄漏回归测试，证明斜向偏出但旧圆形距离仍可信的旁站高箱会被矩形锚点范围过滤。
+  - 增加闭环高层优先回归测试，证明较低层候选即使 `lockdist` 更近，也不能抢过更高层候选。
 
 - `src/huayanScheduler.h`
   - 增加阶段一大角度 Rz 已执行次数成员变量。
@@ -702,9 +705,94 @@ ctest --test-dir build-field-fixes --output-on-failure
 
 ---
 
+## 任务 7：恢复闭环阶段高层优先
+
+**文件：**
+- 修改：`tests/test_locked_target_selection.cpp`
+- 修改：`src/visionclient.cpp`
+- 修改：`README.md`
+- 修改：`docs/superpowers/specs/2026-07-19-vision-lock-tracking-and-rz-guard-design.md`
+- 修改：`docs/superpowers/plans/2026-07-19-vision-lock-tracking-and-rz-guard.md`
+- 修改：`changelog/CHANGELOG.md`
+
+**接口：**
+- 依赖：
+  - `sameLayerIndexesFor(const QList<TargetCandidate> &, const QList<int> &, double)`
+  - `TargetSelectionContext::lockSameLayerZTol`
+  - `TargetCandidate::depth`
+  - `TargetCandidate::lockDistance`
+- 行为：
+  - 锁定闭环候选先通过矩形可信范围和 `lockTrackRadius`。
+  - 在通过候选中先按最高层筛选；`depth_compensated` 越小表示越高。
+  - 只有最高层同层候选之间才按 `lockDistance` 最近选择。
+
+- [x] **步骤 1：增加闭环低层误抓回归测试**
+
+在 `tests/test_locked_target_selection.cpp` 中增加用例：低层候选 `lockdist=5mm`，高层候选 `lockdist=200mm`，两者都可信且都在锁定半径内，必须选择高层候选。
+
+- [x] **步骤 2：确认旧实现测试失败**
+
+运行：
+
+```bash
+cmake --build build-field-fixes --target locked_target_selection_tests -j2
+./build-field-fixes/tests/locked_target_selection_tests
+```
+
+旧实现预期失败，失败信息包含：
+
+```text
+闭环帧仍必须最高层优先，不能因为较低层目标 lockdist 更近就抓低层箱子
+```
+
+- [x] **步骤 3：修改闭环选择实现**
+
+在 `src/visionclient.cpp` 的锁定闭环分支中，将 `lockedIndexes` 直接按 `lockDistance` 选择，改为：
+
+```cpp
+const QList<int> sameLayerIndexes =
+    sameLayerIndexesFor(selection.candidates, lockedIndexes, context.lockSameLayerZTol);
+int bestIndex = sameLayerIndexes.first();
+for (int candidateIndex : sameLayerIndexes) {
+    const TargetCandidate &candidate = selection.candidates.at(candidateIndex);
+    const TargetCandidate &best = selection.candidates.at(bestIndex);
+    if (candidate.lockDistance < best.lockDistance) {
+        bestIndex = candidateIndex;
+    } else if (qFuzzyCompare(candidate.lockDistance + 1.0, best.lockDistance + 1.0)
+               && candidate.sourceIndex < best.sourceIndex) {
+        // 闭环帧先按最高层过滤，再在同层内按 lockDistance 最近跟踪；
+        // 极少数距离完全相等时按原始下标稳定兜底，避免同一输入在不同平台上选择不稳定。
+        bestIndex = candidateIndex;
+    }
+}
+```
+
+- [x] **步骤 4：同步文档**
+
+更新 README、7.19 设计、7.19 计划和 changelog，明确：
+
+- `log/2026-07-19+log (2).txt` 中 `17:15` 附近暴露了闭环低层误抓风险。
+- `lockdist` 连续性不能压过高层优先。
+- 修正后闭环帧优先级为：矩形可信范围和锁定半径过滤 → 最高层 → 同层 `lockdist` 最近。
+
+- [x] **步骤 5：运行验证**
+
+运行：
+
+```bash
+cmake --build build-field-fixes --target locked_target_selection_tests -j2
+./build-field-fixes/tests/locked_target_selection_tests
+ctest --test-dir build-field-fixes --output-on-failure
+cmake --build build-field-fixes -j2
+```
+
+预期：目标测试、全量测试和完整构建均通过。
+
+---
+
 ## 自查清单
 
-- 规格覆盖：任务 1 覆盖目标锁定连续跟踪；任务 2 覆盖 Rz 大角度累计保护；任务 3 覆盖 Z 下探专用超时；任务 4 覆盖 README、changelog 和 7.18/7.19 追溯；任务 5 覆盖验证和本地提交；任务 6 覆盖圆形锚点范围改为 X/Y 矩形范围。
+- 规格覆盖：任务 1 覆盖目标锁定连续跟踪；任务 2 覆盖 Rz 大角度累计保护；任务 3 覆盖 Z 下探专用超时；任务 4 覆盖 README、changelog 和 7.18/7.19 追溯；任务 5 覆盖验证和本地提交；任务 6 覆盖圆形锚点范围改为 X/Y 矩形范围；任务 7 覆盖闭环阶段高层优先。
 - 占位符检查：计划中没有常见占位符关键字或“类似任务 N”的占位描述。
 - 类型一致性：计划中使用的宏名、成员变量名、枚举值和文件路径在任务内均有定义或来自现有代码。
 - 中文规则：正文说明、步骤、预期结果和自查说明使用中文；代码标识符、命令、路径和 SDK 原文保持原样。

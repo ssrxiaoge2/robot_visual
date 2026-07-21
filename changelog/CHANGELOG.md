@@ -5,6 +5,26 @@
 
 ---
 
+## 2026-07-20 | v0.2.6 | 恢复阶段一闭环高层优先
+
+### 修复
+- 修复阶段一目标锁定后闭环阶段只按 `lockdist` 最近选择，可能抓取较低层箱子的问题。
+- 根据 `log/2026-07-19+log (2).txt` 中 `17:15` 附近现场复测日志，确认较低层目标 `lockdist` 更近时会压过更高层目标；现改为闭环候选先按最高层筛选，再在同层内按 `lockdist` 最近选择。
+- 保留此前同层防摇摆修正：只有最高层同层多个候选时，才使用 `lockdist` 连续性，不再使用固定侧 Y 抢目标。
+
+### 文档
+- README、7.19 设计文档和计划文档同步新的闭环优先级：矩形可信范围和锁定半径过滤 → 最高层 → 同层 `lockdist` 最近。
+
+### 文件
+- `src/visionclient.cpp`
+- `tests/test_locked_target_selection.cpp`
+- `README.md`
+- `docs/superpowers/specs/2026-07-19-vision-lock-tracking-and-rz-guard-design.md`
+- `docs/superpowers/plans/2026-07-19-vision-lock-tracking-and-rz-guard.md`
+- `changelog/CHANGELOG.md`
+
+---
+
 ## 2026-07-19 | v0.2.5 | 阶段一锚点可信范围改为 X/Y 矩形
 
 ### 修复

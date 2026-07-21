@@ -108,6 +108,17 @@ int main()
     requireTrue(trackingKeepsLockedTarget.reason == Reason::LockTrackingTarget,
                 "闭环延续锁定目标必须记录 LockTrackingTarget");
 
+    const auto trackingStillPrefersHighestLayer = VisionHttpClient::selectTarget(QJsonArray{
+        target(5.0, 0.0, 930.0),
+        target(200.0, 0.0, 820.0)
+    }, trackingContext(0.0, 0.0), kIdentityHandEye);
+    requireTrue(trackingStillPrefersHighestLayer.hasTarget(),
+                "闭环帧必须能在锁定范围内选出目标");
+    requireTrue(selected(trackingStillPrefersHighestLayer).sourceIndex == 1,
+                "闭环帧仍必须最高层优先，不能因为较低层目标 lockdist 更近就抓低层箱子");
+    requireTrue(trackingStillPrefersHighestLayer.reason == Reason::LockTrackingTarget,
+                "闭环最高层优先后仍应记录 LockTrackingTarget，保持现场日志语义稳定");
+
     const auto trackingPrefersNearestLockDistanceOverFixedSide = VisionHttpClient::selectTarget(QJsonArray{
         target(52.7, 2.3, 1363.0),
         target(9.1, 260.8, 1284.0),
