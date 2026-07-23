@@ -127,6 +127,16 @@ int main()
                 "无目标搜索步长必须来自运行设置快照");
     requireTrue(source.contains(QStringLiteral("m_runtimeSettings.safety.maxSingleXyAdjustMm")),
                 "单次 XY 安全上限必须来自运行设置快照");
+    requireTrue(source.contains(
+                    QStringLiteral("m_runtimeSettings.pickup.grabXCompensationMm")),
+                "抓取 X 补偿必须来自运行时设置快照");
+    requireTrue(source.contains(
+                    QStringLiteral("m_runtimeSettings.pickup.grabYCompensationMm")),
+                "抓取 Y 补偿必须来自运行时设置快照");
+    requireTrue(!source.contains(QStringLiteral("kGrabXCompensation")),
+                "抓取 X 补偿不得继续使用编译期常量");
+    requireTrue(!source.contains(QStringLiteral("kGrabYCompensation")),
+                "抓取 Y 补偿不得继续使用编译期常量");
 
     requireTrue(header.contains(QStringLiteral("void schedulerStopped();")),
                 "HuayanScheduler 必须声明专用的 schedulerStopped 信号");

@@ -39,8 +39,6 @@ static constexpr double HUAYAN_MAX_SINGLE_XY_ADJUST_MM = 250.0; // 阶段一单�
 static constexpr double HUAYAN_MAX_Z_DESCEND_MM = 1078.0; // 阶段一 Z 下探硬上限(mm)，不得因临时调试放大，超过即 fail-closed。
 static constexpr int HUAYAN_STAGE_ONE_Z_DESCEND_TIMEOUT_MS = 120000; // 阶段一 Z 下探专用到位等待超时(ms)；1 米级下探可能超过 30s，普通 X/Y/Rz 微调仍使用默认超时。
 static constexpr bool   kZDescendInvert = false;   // Z 下探方向；若实际朝反方向，改 true
-static constexpr double kGrabXCompensation = 30.0; // Z 下探到物料箱位置后的工具系 X 补偿(mm)
-static constexpr double kGrabYCompensation = -17.0; // X 补偿后的工具系 Y 补偿(mm)
 static constexpr double kOffsetIgnoreDistance = 0.5; // 码垛平移死区(mm)
 static constexpr double kOffsetIgnoreAngle = 0.5;    // 码垛旋转死区(deg)
 static constexpr double kRotateToolAngle = 180.0;    // 扫码补救的工具系 Rz 角(deg)
@@ -793,27 +791,32 @@ void HuayanScheduler::onPollTick()
             });
             return;
         }
-        if (completedGrabZDescend && qAbs(kGrabXCompensation) >= kOffsetIgnoreDistance) {
+        const double grabXCompensation =
+            m_runtimeSettings.pickup.grabXCompensationMm;
+        const double grabYCompensation =
+            m_runtimeSettings.pickup.grabYCompensationMm;
+        if (completedGrabZDescend && qAbs(grabXCompensation) >= kOffsetIgnoreDistance) {
             emit logMessage(QStringLiteral("[阶段一] Z 下探到位，执行 X 补偿 %1mm")
-                                .arg(kGrabXCompensation, 0, 'f', 1));
+                                .arg(grabXCompensation, 0, 'f', 1));
             PendingCommand cmd;
             cmd.kind = PendingCommandKind::MoveRelTool;
             cmd.label = QStringLiteral("X 补偿");
             cmd.poseId = 0;
-            cmd.direction = kGrabXCompensation >= 0.0 ? 1 : 0;
-            cmd.distance = qAbs(kGrabXCompensation);
+            cmd.direction = grabXCompensation >= 0.0 ? 1 : 0;
+            cmd.distance = qAbs(grabXCompensation);
             beginCommandWhenReady(cmd);
             return;
         }
-        if ((completedGrabZDescend || completedGrabXCompensation) && qAbs(kGrabYCompensation) >= kOffsetIgnoreDistance) {
+        if ((completedGrabZDescend || completedGrabXCompensation)
+            && qAbs(grabYCompensation) >= kOffsetIgnoreDistance) {
             emit logMessage(QStringLiteral("[阶段一] 执行 Y 补偿 %1mm")
-                                .arg(kGrabYCompensation, 0, 'f', 1));
+                                .arg(grabYCompensation, 0, 'f', 1));
             PendingCommand cmd;
             cmd.kind = PendingCommandKind::MoveRelTool;
             cmd.label = QStringLiteral("Y 补偿");
             cmd.poseId = 1;
-            cmd.direction = kGrabYCompensation >= 0.0 ? 1 : 0;
-            cmd.distance = qAbs(kGrabYCompensation);
+            cmd.direction = grabYCompensation >= 0.0 ? 1 : 0;
+            cmd.distance = qAbs(grabYCompensation);
             beginCommandWhenReady(cmd);
             return;
         }
