@@ -247,6 +247,7 @@ private:
         MoveToSurvey,            ///< 调用拍照位示教函数。
         WaitForVision,           ///< 机械臂静止，等待视觉成功/无目标/错误回调。
         SearchDescend,           ///< 无目标时沿 Z 搜索下移。
+        DepthDescent,            ///< 视觉深度过大时自动下探并重新检测。
         MoveToGrab,              ///< 按 X/Y/Rz 分轴执行视觉闭环偏移。
         DescendZ,                ///< 根据视觉深度向夹取高度下探。
         WaitPreGripScan,         ///< 夹紧前安全暂停，等待扫码决策。
@@ -301,6 +302,9 @@ private:
     bool validateStageOneRelMoveBeforeDispatch(const RelMove &move);
     /// 清零阶段一固定拍照锚点状态；每次 startStageOne() 必须调用一次。
     void resetVisionAnchorTracking();
+    void resetDepthDescentState();
+    bool handleExcessiveVisionDepth(double depthMm);
+    void executeDepthDescent(double moveMm);
     /// 生成下一次视觉推理使用的固定拍照锚点上下文。
     VisionHttpClient::TargetSelectionContext makeVisionTargetSelectionContext() const;
     /// 记录一条已经完成的阶段一 XY 微调；只能在控制器确认到位后调用。
@@ -464,6 +468,8 @@ private:
     int m_grabIterations = 0;   // 闭环视觉矫正的迭代计数
     int m_searchDescendCount = 0;   // 找目标保护搜索的次数，不参与抓取闭环迭代
     double m_searchDescendedMm = 0.0;  // 找目标累计下移量(mm)，不是抓取 Z 下探量
+    double m_depthDescentAccumulatedMm = 0.0; ///< 深度过大自动下探的已完成累计量。
+    double m_pendingDepthDescentMm = 0.0;     ///< 已下发但尚未确认到位的下探量。
     bool m_pendingLargeRzConfirmation = false; ///< 上一帧是否出现待确认的 Rz 大角度跳变。
     double m_pendingLargeRz = 0.0;             ///< 待确认的 Rz 大角度跳变值(deg)。
     int m_stageOneLargeRzExecutionCount = 0; ///< 阶段一当前锁定目标已实际执行的 Rz 大角度次数；阶段启动/停止/锁定重置时清零，普通小角度 Rz 不计数。

@@ -236,3 +236,22 @@ target_link_libraries(navigation_timeout_contract_tests PRIVATE
 
 add_test(NAME navigation_timeout_contract_tests
          COMMAND navigation_timeout_contract_tests)
+
+add_executable(depth_descent_contract_tests
+    test_depth_descent_contract.cpp
+)
+
+target_include_directories(depth_descent_contract_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_compile_definitions(depth_descent_contract_tests PRIVATE
+    PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_link_libraries(depth_descent_contract_tests PRIVATE
+    Qt6::Core
+)
+
+add_test(NAME depth_descent_contract_tests
+         COMMAND depth_descent_contract_tests)

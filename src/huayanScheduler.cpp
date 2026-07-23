@@ -513,6 +513,7 @@ void HuayanScheduler::startStageOne()
     m_grabIterations = 0;
     m_searchDescendCount = 0;
     m_searchDescendedMm = 0.0;
+    resetDepthDescentState();
     m_pendingLargeRzConfirmation = false;
     m_pendingLargeRz = 0.0;
     m_stageOneLargeRzExecutionCount = 0;
@@ -648,6 +649,7 @@ void HuayanScheduler::stop(bool emitStoppedLog)
     clearActionState();
     m_searchDescendCount = 0;
     m_searchDescendedMm = 0.0;
+    resetDepthDescentState();
     m_pendingLargeRzConfirmation = false;
     m_pendingLargeRz = 0.0;
     m_stageOneLargeRzExecutionCount = 0;
@@ -728,6 +730,11 @@ void HuayanScheduler::onPollTick()
             && m_stageStep == StageStep::DescendZ
             && m_activeCommandKind == PendingCommandKind::MoveRelTool
             && m_activeCommandLabel == QStringLiteral("X 补偿");
+        const bool completedDepthDescent =
+            m_stage == Stage::StageOne
+            && m_stageStep == StageStep::DepthDescent
+            && m_activeCommandKind == PendingCommandKind::MoveRelTool
+            && m_activeCommandLabel == QStringLiteral("深度自动下探");
         m_activeCommandKind = PendingCommandKind::None;
         m_activeCommandLabel.clear();
         m_loggedRunFuncScriptRunning = false;
@@ -763,6 +770,26 @@ void HuayanScheduler::onPollTick()
                     && m_stage == Stage::StageOne
                     && m_stageStep == StageStep::WaitForVision)
                     proceedStage();
+            });
+            return;
+        }
+        if (completedDepthDescent) {
+            m_depthDescentAccumulatedMm += m_pendingDepthDescentMm;
+            m_pendingDepthDescentMm = 0.0;
+            emit logMessage(QStringLiteral("[深度下探] 移动到位，累计下探 %1/%2mm，等待视觉稳定后重新检测")
+                                .arg(m_depthDescentAccumulatedMm, 0, 'f', 1)
+                                .arg(m_runtimeSettings.depthDescent.maxAccumulatedMm, 0, 'f', 1));
+            m_stageStep = StageStep::WaitForVision;
+            const quint64 seq = nextCallbackSeq();
+            QTimer::singleShot(m_runtimeSettings.vision.settleMs, this, [this, seq] {
+                if (seq == m_commandSeq
+                    && m_stage == Stage::StageOne
+                    && m_stageStep == StageStep::WaitForVision) {
+                    if (m_visionClient)
+                        m_visionClient->setTargetSelectionContext(makeVisionTargetSelectionContext());
+                    emit surveyReady();
+                    m_timeoutTimer->start(10000);
+                }
             });
             return;
         }
@@ -887,6 +914,7 @@ int HuayanScheduler::stepIndexFor(StageStep step)
     case StageStep::MoveToSurvey:
     case StageStep::WaitForVision:
     case StageStep::SearchDescend:           return 0;
+    case StageStep::DepthDescent:            return 0;
     case StageStep::MoveToGrab:
     case StageStep::DescendZ:
     case StageStep::WaitPreGripScan:
@@ -923,6 +951,7 @@ void HuayanScheduler::executeCurrentStep()
             m_timeoutTimer->start(10000);
             break;
         case StageStep::SearchDescend:
+        case StageStep::DepthDescent:
             break;
         case StageStep::MoveToGrab:
             executeNextGrabMove();
@@ -1473,12 +1502,81 @@ bool HuayanScheduler::executeMoveJ(double x, double y, double z,
     return beginCommandWhenReady(cmd);
 }
 
+void HuayanScheduler::resetDepthDescentState()
+{
+    m_depthDescentAccumulatedMm = 0.0;
+    m_pendingDepthDescentMm = 0.0;
+}
+
+bool HuayanScheduler::handleExcessiveVisionDepth(double depthMm)
+{
+    const DepthDescentDecision decision =
+        decideDepthDescent(depthMm, m_depthDescentAccumulatedMm,
+                           m_runtimeSettings.depthDescent);
+    if (decision.action == DepthDescentDecision::Action::ContinuePickup)
+        return false;
+
+    if (decision.action == DepthDescentDecision::Action::FailLimitReached) {
+        emitOperationError(
+            QStringLiteral("[深度下探] depth=%1mm 仍大于阈值 %2mm，累计下探已达上限 %3mm，任务失败")
+                .arg(depthMm, 0, 'f', 1)
+                .arg(m_runtimeSettings.depthDescent.triggerDepthMm, 0, 'f', 1)
+                .arg(m_runtimeSettings.depthDescent.maxAccumulatedMm, 0, 'f', 1));
+        return true;
+    }
+
+    const double totalAfterMove =
+        m_depthDescentAccumulatedMm + decision.moveMm;
+    if (decision.moveMm <= 0.0
+        || totalAfterMove > m_runtimeSettings.safety.maxZDescendMm) {
+        emitOperationError(
+            QStringLiteral("[深度下探] 计划累计下探 %1mm 超过 Z 安全上限 %2mm，拒绝执行")
+                .arg(totalAfterMove, 0, 'f', 1)
+                .arg(m_runtimeSettings.safety.maxZDescendMm, 0, 'f', 1));
+        return true;
+    }
+
+    emit logMessage(
+        QStringLiteral("[深度下探] depth=%1mm > threshold=%2mm，本次下探 %3mm，累计 %4/%5mm")
+            .arg(depthMm, 0, 'f', 1)
+            .arg(m_runtimeSettings.depthDescent.triggerDepthMm, 0, 'f', 1)
+            .arg(decision.moveMm, 0, 'f', 1)
+            .arg(totalAfterMove, 0, 'f', 1)
+            .arg(m_runtimeSettings.depthDescent.maxAccumulatedMm, 0, 'f', 1));
+    executeDepthDescent(decision.moveMm);
+    return true;
+}
+
+void HuayanScheduler::executeDepthDescent(double moveMm)
+{
+    if (!ensureConnected())
+        return;
+
+    m_stageStep = StageStep::DepthDescent;
+    PendingCommand cmd;
+    cmd.kind = PendingCommandKind::MoveRelTool;
+    cmd.label = QStringLiteral("深度自动下探");
+    cmd.poseId = 2;
+    cmd.direction = m_runtimeSettings.pickup.zDescendInvert ? 0 : 1;
+    cmd.distance = moveMm;
+    cmd.timeoutMs = m_runtimeSettings.safety.longZMotionTimeoutMs;
+    if (beginCommandWhenReady(cmd)) {
+        m_pendingDepthDescentMm = moveMm;
+    } else if (m_stage == Stage::StageOne
+               && m_stageStep == StageStep::DepthDescent) {
+        m_stageStep = StageStep::WaitForVision;
+    }
+}
+
 void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 {
     if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision)
         return;
 
     stopVisionWaitTimeout();
+
+    if (handleExcessiveVisionDepth(z))
+        return;
 
     auto sameDirection = [](double a, double b) {
         return (a >= 0.0 && b >= 0.0) || (a < 0.0 && b < 0.0);
