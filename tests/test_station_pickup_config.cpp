@@ -57,8 +57,24 @@ int main()
     for (int station = 1; station <= 11; ++station) {
         const StationTaskConfig *cfg = stationConfig(station);
         requireTrue(cfg != nullptr, "工位1-11配置必须存在");
-        requireNear(cfg->grabZClearance, 412.0, 0.001, "工位1-11篮筐余量必须保持当前生产值 412.0");
+        requireNear(cfg->grabZClearance, 417.0, 0.001, "工位1-11篮筐余量默认值必须为 417.0");
     }
+    requireNear(s12->grabZClearance, 380.0, 0.001,
+                "工位12紫篮筐余量默认值必须为 380.0");
+
+    RuntimeSettings overriddenSettings;
+    overriddenSettings.pickup.largeBasketGrabZClearanceMm = 430.0;
+    overriddenSettings.pickup.purpleBasketGrabZClearanceMm = 390.0;
+    const auto overriddenS1 = stationTaskConfig(1, overriddenSettings);
+    const auto overriddenS12 = stationTaskConfig(12, overriddenSettings);
+    requireTrue(overriddenS1.has_value() && overriddenS12.has_value(),
+                "运行时覆盖必须返回工位配置副本");
+    requireNear(overriddenS1->grabZClearance, 430.0, 0.001,
+                "工位1-11必须使用大篮筐运行时余量");
+    requireNear(overriddenS12->grabZClearance, 390.0, 0.001,
+                "工位12必须使用紫篮筐运行时余量");
+    requireNear(stationConfig(1)->grabZClearance, 417.0, 0.001,
+                "运行时覆盖不得修改静态工位配置表");
     for (int station = 1; station <= 12; ++station) {
         const StationTaskConfig *cfg = stationConfig(station);
         requireTrue(cfg != nullptr, "12工位配置必须完整");
