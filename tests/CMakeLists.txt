@@ -1,5 +1,22 @@
 find_package(Qt6 REQUIRED COMPONENTS Core Test Network Gui)
 
+add_executable(runtime_settings_tests
+    test_runtime_settings.cpp
+    ../src/runtimesettings.cpp
+)
+
+target_include_directories(runtime_settings_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(runtime_settings_tests PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+
+add_test(NAME runtime_settings_tests
+         COMMAND runtime_settings_tests)
+
 add_executable(station_pickup_config_tests
     test_station_pickup_config.cpp
 )
