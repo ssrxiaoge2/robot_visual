@@ -25,6 +25,7 @@
 #include "./ui_mainwindow.h"
 #include "camerawindow.h"
 #include "customSysScheduler.h"
+#include "settingsdialog.h"
 
 #include <QAbstractItemView>
 #include <QDate>
@@ -478,9 +479,11 @@ void MainWindow::initUI()
     m_btnStart = new QPushButton(QStringLiteral("▶  开始运行"));
     m_btnStop  = new QPushButton(QStringLiteral("■  停止"));
     m_btnReset = new QPushButton(QStringLiteral("复位"));
+    m_btnSettings = new QPushButton(QStringLiteral("⚙  设置"));
     m_btnStart->setFixedHeight(32);
     m_btnStop ->setFixedHeight(32);
     m_btnReset->setFixedHeight(32);
+    m_btnSettings->setFixedHeight(32);
     m_btnReset->setObjectName("btnReset");
     m_btnStop ->setEnabled(false);  // 初始状态：停止按钮不可用
 
@@ -497,6 +500,7 @@ void MainWindow::initUI()
     toolbar->addWidget(m_btnStart);
     toolbar->addWidget(m_btnStop);
     toolbar->addWidget(m_btnReset);
+    toolbar->addWidget(m_btnSettings);
     toolbar->addSpacing(30);
     toolbar->addWidget(new QLabel(QStringLiteral("循环:")));
     toolbar->addWidget(m_lblCycle);
@@ -581,6 +585,22 @@ void MainWindow::initUI()
     connect(m_btnStart,          &QPushButton::clicked, this, &MainWindow::onStart);
     connect(m_btnStop,           &QPushButton::clicked, this, &MainWindow::onStop);
     connect(m_btnReset,          &QPushButton::clicked, this, &MainWindow::onReset);
+    connect(m_btnSettings, &QPushButton::clicked, this, [this] {
+        SettingsDialog dialog(m_devMgr->runtimeSettings(),
+                              m_devMgr->runtimeSettingsLocked(), this);
+        connect(&dialog, &SettingsDialog::saveRequested,
+                this, [this, &dialog](const RuntimeSettings &candidate) {
+            QString error;
+            if (!m_devMgr->applyRuntimeSettingsCandidate(candidate, &error)) {
+                QMessageBox::warning(&dialog,
+                                     QStringLiteral("设置保存失败"),
+                                     error);
+                return;
+            }
+            dialog.accept();
+        });
+        dialog.exec();
+    });
     connect(m_btnLight,          &QPushButton::clicked, this, &MainWindow::onLightToggle);
     connect(m_btnApply,          &QPushButton::clicked, this, &MainWindow::onApplyConfig);
     connect(m_btnTestRobot,      &QPushButton::clicked, this, &MainWindow::onTestRobot);

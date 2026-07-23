@@ -6,13 +6,16 @@
 #include "lineorchestrator.h"
 #include "nscanscheduler.h"
 #include "palletscheduler.h"
+#include "settingsmanager.h"
 #include "visionclient.h"
 
 #include <QDebug>
+#include <QDir>
 #include <QMutexLocker>
 #include <QSettings>
 #include <QTcpSocket>
 #include <QThread>
+#include <QStandardPaths>
 
 #include <utility>
 #ifdef Q_OS_LINUX
@@ -85,6 +88,14 @@ DeviceManager::DeviceManager(QObject *parent)
     qRegisterMetaType<Task>("Task");
     qRegisterMetaType<QList<Task>>("QList<Task>");
     qRegisterMetaType<LineSystemState>("LineSystemState");
+
+    QString settingsDir =
+        QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
+    if (settingsDir.isEmpty())
+        settingsDir = QDir::currentPath() + QStringLiteral("/config");
+    QDir().mkpath(settingsDir);
+    m_settingsManager = new SettingsManager(
+        settingsDir + QStringLiteral("/runtime-settings.ini"), this);
 
     // UI 测试扫码使用独立线程；空闲时仅等待事件，不轮询、不消耗 CPU。
     auto *nscanThread = new QThread;
@@ -256,7 +267,58 @@ DeviceManager::DeviceManager(QObject *parent)
         emit logMessage(QStringLiteral("[整线错误] %1").arg(msg));
     });
 
+    const SettingsLoadResult loaded = m_settingsManager->load();
+    m_huayanScheduler->applyRuntimeSettings(loaded.settings);
+    m_lineManager->applyRuntimeSettings(loaded.settings);
+    for (const QString &warning : loaded.warnings)
+        qWarning().noquote() << QStringLiteral("[运行参数] %1").arg(warning);
+
     loadStationMap();
+}
+
+const RuntimeSettings &DeviceManager::runtimeSettings() const
+{
+    return m_settingsManager->current();
+}
+
+bool DeviceManager::runtimeSettingsLocked() const
+{
+    return (m_huayanScheduler && m_huayanScheduler->isBusy())
+        || (m_lineManager
+            && (m_lineManager->state() != LineSystemState::Idle
+                || m_lineManager->currentTask().taskId != 0))
+        || (m_lineOrch && m_lineOrch->isRunning());
+}
+
+bool DeviceManager::applyRuntimeSettingsCandidate(
+    const RuntimeSettings &candidate, QString *error)
+{
+    const SettingsValidation validation = validateRuntimeSettings(candidate);
+    if (!validation.ok) {
+        if (error)
+            *error = validation.errors.join(QStringLiteral("；"));
+        return false;
+    }
+    if (runtimeSettingsLocked()) {
+        if (error)
+            *error = QStringLiteral("任务运行中，不能修改运行参数");
+        return false;
+    }
+    if (!m_settingsManager->stageCandidate(candidate, error))
+        return false;
+
+    const RuntimeSettings previous = m_settingsManager->current();
+    m_huayanScheduler->applyRuntimeSettings(candidate);
+    m_lineManager->applyRuntimeSettings(candidate);
+    if (!m_settingsManager->commitStaged(candidate, error)) {
+        m_huayanScheduler->applyRuntimeSettings(previous);
+        m_lineManager->applyRuntimeSettings(previous);
+        m_settingsManager->discardStaged();
+        return false;
+    }
+
+    emit logMessage(QStringLiteral("[运行参数] 已保存并应用"));
+    return true;
 }
 
 DeviceManager::~DeviceManager()
@@ -285,8 +347,9 @@ DeviceManager::~DeviceManager()
 
 bool DeviceManager::startStandaloneStageOne(int stationId)
 {
-    const StationTaskConfig *config = stationConfig(stationId);
-    if (!config) {
+    const std::optional<StationTaskConfig> configured =
+        stationTaskConfig(stationId, runtimeSettings());
+    if (!configured) {
         emit logMessage(QStringLiteral("[华沿测试] 工位号无效或配置缺失：%1").arg(stationId));
         return false;
     }
@@ -309,6 +372,7 @@ bool DeviceManager::startStandaloneStageOne(int stationId)
         return false;
     }
 
+    const StationTaskConfig *config = &*configured;
     HuayanScheduler::StationArmFunctions stationFuncs;
     stationFuncs.captureFunc = config->captureFunc;
     stationFuncs.afterGripMode = config->afterGripMode;

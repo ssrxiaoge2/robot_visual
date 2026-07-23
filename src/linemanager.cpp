@@ -72,6 +72,13 @@ Task LineManager::currentTask() const
     return m_currentTask;
 }
 
+void LineManager::applyRuntimeSettings(const RuntimeSettings &settings)
+{
+    Q_ASSERT(m_state == LineSystemState::Idle);
+    Q_ASSERT(!m_executor->isBusy());
+    m_executor->applyRuntimeSettings(settings);
+}
+
 void LineManager::setExternalWorkflowRunning(std::function<bool()> predicate)
 {
     m_externalWorkflowRunning = std::move(predicate);

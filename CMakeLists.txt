@@ -47,6 +47,10 @@ set(PROJECT_SOURCES
         src/visionclient.h
         src/runtimesettings.cpp
         src/runtimesettings.h
+        src/settingsmanager.cpp
+        src/settingsmanager.h
+        src/settingsdialog.cpp
+        src/settingsdialog.h
         src/camerawindow.cpp
         src/camerawindow.h
         src/handeyedialog.cpp

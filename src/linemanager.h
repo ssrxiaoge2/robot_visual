@@ -35,6 +35,7 @@ public:
     LineSystemState state() const;
     QList<Task> queueSnapshot() const;
     Task currentTask() const;
+    void applyRuntimeSettings(const RuntimeSettings &settings);
     /// 注入兼容旧整线是否运行的只读判定；用于拒绝两个顶层调度同时控制 AGV/机械臂。
     void setExternalWorkflowRunning(std::function<bool()> predicate);
 

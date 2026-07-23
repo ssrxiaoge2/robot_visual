@@ -69,6 +69,13 @@ bool TaskExecutor::isBusy() const
     return m_state != ExecState::Idle;
 }
 
+void TaskExecutor::applyRuntimeSettings(const RuntimeSettings &settings)
+{
+    Q_ASSERT(!isBusy());
+    Q_ASSERT(validateRuntimeSettings(settings).ok);
+    m_runtimeSettings = settings;
+}
+
 Task TaskExecutor::currentTask() const
 {
     return m_task;
@@ -602,11 +609,14 @@ bool TaskExecutor::isPickupCompletionState(ExecState state) const
 
 bool TaskExecutor::resolveTaskConfigs()
 {
-    m_stationCfg = stationConfig(m_task.stationId);
-    if (!m_stationCfg) {
+    const std::optional<StationTaskConfig> configured =
+        stationTaskConfig(m_task.stationId, m_runtimeSettings);
+    if (!configured) {
         raiseSystemError(QStringLiteral("工位 %1 缺少 StationTaskConfig").arg(m_task.stationId));
         return false;
     }
+    m_stationCfgValue = *configured;
+    m_stationCfg = &m_stationCfgValue;
 
     m_palletCfg = palletAreaConfig(m_stationCfg->palletArea);
     if (!m_palletCfg) {

@@ -14,6 +14,7 @@
 #include "lineconfig.h"
 #include "linemanager.h"
 #include "nscanscheduler.h"
+#include "runtimesettings.h"
 
 class AgvController;
 class VisionHttpClient;
@@ -21,6 +22,7 @@ class HuayanScheduler;
 class LineOrchestrator;
 class PalletScheduler;
 class QThread;
+class SettingsManager;
 
 Q_DECLARE_METATYPE(NScanScheduler::ScanResult)
 Q_DECLARE_METATYPE(NScanScheduler::ScanOptions)
@@ -65,6 +67,10 @@ public:
     bool              lightIsOn()        const { return m_lightOn;      }
     bool              nscanTestRunning() const { return m_nscanTestRunning; }
     const Config     &config()           const { return m_cfg;          }
+    const RuntimeSettings &runtimeSettings() const;
+    bool runtimeSettingsLocked() const;
+    bool applyRuntimeSettingsCandidate(const RuntimeSettings &candidate,
+                                       QString *error);
 
     void setConfig(const Config &cfg) { m_cfg = cfg; }
 
@@ -147,6 +153,7 @@ private:
     bool              m_lightOn      = false;
     bool              m_nscanTestRunning = false;
     QHash<int, int>   m_stationMap;
+    SettingsManager  *m_settingsManager = nullptr;
 };
 
 #endif // DEVICEMANAGER_H

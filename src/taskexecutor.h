@@ -34,6 +34,7 @@ public:
 
     bool isBusy() const;       ///< ExecState 非 Idle 即表示有任务占用设备。
     Task currentTask() const;  ///< 返回当前任务快照，供 LineManager/UI 只读展示。
+    void applyRuntimeSettings(const RuntimeSettings &settings);
 
 public slots:
     /// 启动一个已出队任务；依赖或配置缺失会直接升级为系统级 ERROR。
@@ -149,7 +150,9 @@ private:
     QElapsedTimer m_agvNavigationElapsed; ///< 当前任务导航的单调时钟；仅用于超时诊断，不参与状态推进。
     Task m_task;                          ///< 当前任务的权威运行快照。
     ExecState m_state = ExecState::Idle;  ///< 当前单任务精细状态。
-    const StationTaskConfig *m_stationCfg = nullptr;   ///< 指向静态工位配置，任务结束时清空。
+    RuntimeSettings m_runtimeSettings = RuntimeSettings::defaults();
+    StationTaskConfig m_stationCfgValue;
+    const StationTaskConfig *m_stationCfg = nullptr;
     const PalletAreaTaskConfig *m_palletCfg = nullptr; ///< 指向静态码垛区配置。
     PalletPose m_pendingPalletOffset;                  ///< 本次放置尚未 commit 的相对偏移。
     int m_expectedLm = 0;                              ///< 当前 AGV 步骤必须到达的数字 LM。

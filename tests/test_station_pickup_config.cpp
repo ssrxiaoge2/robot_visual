@@ -190,7 +190,7 @@ int main()
                 "resetAndProceed() 应记录 GrpReset 失败日志");
     requireTrue(schedulerSource.contains(QStringLiteral("const quint64 seq = nextCallbackSeq();\n            QTimer::singleShot(300, this, [this, seq] {")),
                 "MoveToGrab/码垛 offset 的 300ms 回调必须使用 nextCallbackSeq()");
-    requireTrue(schedulerSource.contains(QStringLiteral("const quint64 seq = nextCallbackSeq();\n            QTimer::singleShot(kVisionSettleMs, this, [this, seq] {")),
+    requireTrue(schedulerSource.contains(QStringLiteral("const quint64 seq = nextCallbackSeq();\n            QTimer::singleShot(m_runtimeSettings.vision.settleMs, this, [this, seq] {")),
                 "视觉稳定回调必须使用 nextCallbackSeq()");
     requireTrue(schedulerSource.contains(QStringLiteral("const quint64 seq = nextCallbackSeq();\n    QTimer::singleShot(1500, this, [this, seq] {")),
                 "setGripper() 的 1500ms 回调必须使用 nextCallbackSeq()");

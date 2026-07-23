@@ -130,6 +130,7 @@ private:
     QPushButton *m_btnStart  = nullptr;
     QPushButton *m_btnStop   = nullptr;
     QPushButton *m_btnReset  = nullptr;
+    QPushButton *m_btnSettings = nullptr;
     QLabel      *m_lblCycle  = nullptr;
     QLabel      *m_lblStep   = nullptr;
     int          m_cycleCount = 0;
