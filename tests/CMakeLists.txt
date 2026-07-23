@@ -17,6 +17,24 @@ target_link_libraries(runtime_settings_tests PRIVATE
 add_test(NAME runtime_settings_tests
          COMMAND runtime_settings_tests)
 
+add_executable(settings_manager_tests
+    test_settings_manager.cpp
+    ../src/settingsmanager.cpp
+    ../src/runtimesettings.cpp
+)
+
+target_include_directories(settings_manager_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(settings_manager_tests PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+
+add_test(NAME settings_manager_tests
+         COMMAND settings_manager_tests)
+
 add_executable(station_pickup_config_tests
     test_station_pickup_config.cpp
 )
