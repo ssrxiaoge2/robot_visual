@@ -255,3 +255,22 @@ target_link_libraries(depth_descent_contract_tests PRIVATE
 
 add_test(NAME depth_descent_contract_tests
          COMMAND depth_descent_contract_tests)
+
+add_executable(settings_dialog_tests
+    test_settings_dialog.cpp
+    ../src/settingsdialog.cpp
+    ../src/runtimesettings.cpp
+)
+
+target_include_directories(settings_dialog_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(settings_dialog_tests PRIVATE
+    Qt6::Core
+    Qt6::Widgets
+    Qt6::Test
+)
+
+add_test(NAME settings_dialog_tests
+         COMMAND settings_dialog_tests)
