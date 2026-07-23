@@ -68,6 +68,15 @@ int main()
 {
     using Reason = VisionHttpClient::TargetSelectionReason;
 
+    VisionHttpClient::TargetSelectionContext narrowRoi = lockedContext();
+    narrowRoi.stationRoiHalfX = 20.0;
+    narrowRoi.stationRoiHalfY = 20.0;
+    const auto customRoiRejectsTarget = VisionHttpClient::selectTarget(QJsonArray{
+        target(30.0, 0.0, 1100.0)
+    }, narrowRoi, kIdentityHandEye);
+    requireTrue(!customRoiRejectsTarget.hasTarget(),
+                "自定义运行时 ROI 必须实际参与候选过滤");
+
     const auto initialFiltersOtherStationHighest = VisionHttpClient::selectTarget(QJsonArray{
         target(30.0, 0.0, 1100.0),
         target(700.0, 0.0, 800.0)

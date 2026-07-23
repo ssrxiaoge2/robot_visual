@@ -107,6 +107,17 @@ HuayanScheduler::HuayanScheduler(QObject *parent)
     m_emptyBoxPose.x = 2100.0; m_emptyBoxPose.y = 1100.0; m_emptyBoxPose.z = 1200.0;
 }
 
+void HuayanScheduler::applyRuntimeSettings(const RuntimeSettings &settings)
+{
+    Q_ASSERT(validateRuntimeSettings(settings).ok);
+    Q_ASSERT(!isBusy());
+    m_runtimeSettings = settings;
+    m_pollTimer->setInterval(settings.safety.pollIntervalMs);
+    m_commandReadyTimer->setInterval(settings.safety.pollIntervalMs);
+    if (m_visionClient)
+        m_visionClient->applyRuntimeSettings(settings);
+}
+
 HuayanScheduler::~HuayanScheduler()
 {
     disconnectRobot();
@@ -314,6 +325,8 @@ void HuayanScheduler::setVisionClient(VisionHttpClient *client)
 {
     // 非拥有指针：DeviceManager 管理 VisionHttpClient 生命周期，本调度器只在拍照前写入上下文。
     m_visionClient = client;
+    if (m_visionClient)
+        m_visionClient->applyRuntimeSettings(m_runtimeSettings);
 }
 
 void HuayanScheduler::continueAfterPreGripScan()
@@ -745,7 +758,7 @@ void HuayanScheduler::onPollTick()
             emit logMessage(QStringLiteral("[阶段一] 搜索下移完成，等待视觉稳定后重新检测"));
             m_stageStep = StageStep::WaitForVision;
             const quint64 seq = nextCallbackSeq();
-            QTimer::singleShot(kVisionSettleMs, this, [this, seq] {
+            QTimer::singleShot(m_runtimeSettings.vision.settleMs, this, [this, seq] {
                 if (seq == m_commandSeq
                     && m_stage == Stage::StageOne
                     && m_stageStep == StageStep::WaitForVision)
@@ -1096,13 +1109,21 @@ VisionHttpClient::TargetSelectionContext HuayanScheduler::makeVisionTargetSelect
     VisionHttpClient::TargetSelectionContext context;
     context.anchorEnabled = m_stage == Stage::StageOne;
     context.lockEnabled = true;
+    context.stationRoiHalfX = m_runtimeSettings.vision.stationRoiHalfXmm;
+    context.stationRoiHalfY = m_runtimeSettings.vision.stationRoiHalfYmm;
     context.accumulatedToolX = m_anchorAccumulatedToolX;
     context.accumulatedToolY = m_anchorAccumulatedToolY;
     context.hasPreviousAnchorTarget = m_anchorHasPreviousTarget;
     context.previousAnchorX = m_anchorPreviousTargetX;
     context.previousAnchorY = m_anchorPreviousTargetY;
     context.lockMissingFrames = m_anchorMissingFrames;
-    context.maxLockMissingFrames = VISION_LOCK_MAX_MISSING_FRAMES;
+    context.maxTrustX = m_runtimeSettings.vision.anchorMaxTrustXmm;
+    context.maxTrustY = m_runtimeSettings.vision.anchorMaxTrustYmm;
+    context.sameLayerZTol = m_runtimeSettings.vision.anchorSameLayerToleranceMm;
+    context.maxSwitchDistance = m_runtimeSettings.vision.anchorSwitchMaxXyMm;
+    context.maxLockMissingFrames = m_runtimeSettings.vision.lockMaxMissingFrames;
+    context.lockTrackRadius = m_runtimeSettings.vision.lockTrackRadiusMm;
+    context.lockSameLayerZTol = m_runtimeSettings.vision.lockSameLayerToleranceMm;
     return context;
 }
 
@@ -1463,21 +1484,24 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
         return (a >= 0.0 && b >= 0.0) || (a < 0.0 && b < 0.0);
     };
 
-    const bool isLargeRzJump = qAbs(rz) >= kLargeRzJumpThreshold;
+    const bool isLargeRzJump =
+        qAbs(rz) >= m_runtimeSettings.vision.largeRzJumpThresholdDeg;
     bool suppressLargeRzRotation = false;
     double effectiveRz = rz;
     if (isLargeRzJump) {
-        if (m_stageOneLargeRzExecutionCount >= HUAYAN_STAGE_ONE_MAX_LARGE_RZ_EXECUTIONS) {
+        if (m_stageOneLargeRzExecutionCount
+            >= m_runtimeSettings.vision.maxLargeRzExecutions) {
             effectiveRz = 0.0;
             m_pendingLargeRzConfirmation = false;
             m_pendingLargeRz = 0.0;
             emit logMessage(QStringLiteral("[阶段一] 已执行过 Rz 大角度修正 %1/%2，当前 Rz=%3 疑似视觉旧帧或角度歧义，本轮跳过 Rz 旋转")
                                 .arg(m_stageOneLargeRzExecutionCount)
-                                .arg(HUAYAN_STAGE_ONE_MAX_LARGE_RZ_EXECUTIONS)
+                                .arg(m_runtimeSettings.vision.maxLargeRzExecutions)
                                 .arg(rz, 0, 'f', 1));
         } else if (!m_pendingLargeRzConfirmation
             || !sameDirection(m_pendingLargeRz, rz)
-            || qAbs(qAbs(m_pendingLargeRz) - qAbs(rz)) > kLargeRzJumpDeltaTolerance) {
+            || qAbs(qAbs(m_pendingLargeRz) - qAbs(rz))
+                > m_runtimeSettings.vision.largeRzDeltaToleranceDeg) {
             m_pendingLargeRzConfirmation = true;
             m_pendingLargeRz = rz;
             suppressLargeRzRotation = true;
@@ -1489,7 +1513,7 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
             emit logMessage(QStringLiteral("[阶段一] Rz 大角度跳变已连续确认 Rz=%1，允许执行旋转（本目标大角度次数 %2/%3）")
                                 .arg(rz, 0, 'f', 1)
                                 .arg(m_stageOneLargeRzExecutionCount)
-                                .arg(HUAYAN_STAGE_ONE_MAX_LARGE_RZ_EXECUTIONS));
+                                .arg(m_runtimeSettings.vision.maxLargeRzExecutions));
             m_pendingLargeRzConfirmation = false;
             m_pendingLargeRz = 0.0;
         }
@@ -1505,8 +1529,8 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
                         .arg(m_grabIterations));
 
     const bool aligned = !suppressLargeRzRotation
-        && qAbs(x) < kGrabTolerance
-        && qAbs(y) < kGrabTolerance
+        && qAbs(x) < m_runtimeSettings.vision.xyToleranceMm
+        && qAbs(y) < m_runtimeSettings.vision.xyToleranceMm
         && qAbs(effectiveRz) < kRzTolerance;
 
     // 闭环收敛：只有 XY 平移与 Rz 旋转都达标才进入 Z 下探。
@@ -1518,13 +1542,13 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
         return;
     }
 
-    if (m_grabIterations >= kMaxGrabIterations) {
+    if (m_grabIterations >= m_runtimeSettings.vision.maxGrabIterations) {
         emitOperationError(QStringLiteral("[阶段一] 视觉闭环对准超限：迭代 %1 次后仍未收敛（X=%2 Y=%3 Rz=%4，阈值 XY<%5mm/Rz<%6°）")
                                .arg(m_grabIterations)
                                .arg(x, 0, 'f', 1)
                                .arg(y, 0, 'f', 1)
                                .arg(effectiveRz, 0, 'f', 1)
-                               .arg(kGrabTolerance, 0, 'f', 1)
+                               .arg(m_runtimeSettings.vision.xyToleranceMm, 0, 'f', 1)
                                .arg(kRzTolerance, 0, 'f', 1));
         return;
     }
@@ -1570,12 +1594,13 @@ void HuayanScheduler::onVisionNoObject()
 
     stopVisionWaitTimeout();
 
-    const double nextDescendMm = m_searchDescendedMm + kSearchDescendStep;
-    if (nextDescendMm > kMaxSearchDescend) {
+    const double searchStepMm = m_runtimeSettings.search.descendStepMm;
+    const double nextDescendMm = m_searchDescendedMm + searchStepMm;
+    if (nextDescendMm > m_runtimeSettings.search.maxAccumulatedMm) {
         // 80mm 是保守默认值，防止算法一直识别不到时机械臂持续下移触碰料箱。
         emitOperationError(QStringLiteral("[阶段一] 连续未检测到目标，搜索下移累计 %1mm 已达保守上限 %2mm，任务失败")
                                .arg(m_searchDescendedMm, 0, 'f', 1)
-                               .arg(kMaxSearchDescend, 0, 'f', 1));
+                               .arg(m_runtimeSettings.search.maxAccumulatedMm, 0, 'f', 1));
         return;
     }
 
@@ -1588,21 +1613,21 @@ void HuayanScheduler::onVisionNoObject()
     // 这里的搜索下移是“找目标”的保护搜索，不是抓取阶段依据深度做的 Z 下探。
     emit logMessage(QStringLiteral("[阶段一] 未检测到目标，执行第 %1 次搜索下移 %2mm（累计 %3/%4mm）")
                         .arg(m_searchDescendCount)
-                        .arg(kSearchDescendStep, 0, 'f', 1)
+                        .arg(searchStepMm, 0, 'f', 1)
                         .arg(m_searchDescendedMm, 0, 'f', 1)
-                        .arg(kMaxSearchDescend, 0, 'f', 1));
+                        .arg(m_runtimeSettings.search.maxAccumulatedMm, 0, 'f', 1));
 
     PendingCommand cmd;
     cmd.kind = PendingCommandKind::MoveRelTool;
     cmd.label = QStringLiteral("搜索下移");
     cmd.poseId = 2;
     cmd.direction = kZDescendInvert ? 0 : 1;
-    cmd.distance = kSearchDescendStep;
+    cmd.distance = searchStepMm;
     if (!beginCommandWhenReady(cmd)) {
         if (m_stage == Stage::StageOne && m_stageStep == StageStep::SearchDescend) {
             m_stageStep = StageStep::WaitForVision;
             m_searchDescendCount--;
-            m_searchDescendedMm -= kSearchDescendStep;
+            m_searchDescendedMm -= searchStepMm;
         }
     }
 }
@@ -1648,7 +1673,7 @@ void HuayanScheduler::onVisionTargetRejectedForPickup(VisionHttpClient::TargetSe
                             .arg(m_anchorPreviousTargetX, 0, 'f', 1)
                             .arg(m_anchorPreviousTargetY, 0, 'f', 1));
         const quint64 seq = nextCallbackSeq();
-        QTimer::singleShot(kVisionSettleMs, this, [this, seq] {
+        QTimer::singleShot(m_runtimeSettings.vision.settleMs, this, [this, seq] {
             if (seq == m_commandSeq
                 && m_stage == Stage::StageOne
                 && m_stageStep == StageStep::WaitForVision)
@@ -1686,7 +1711,7 @@ bool HuayanScheduler::executeNextGrabMove()
         emit logMessage(QStringLiteral("[阶段一] 本次微调完成，等待视觉更新后重新检测"));
         m_stageStep = StageStep::WaitForVision;
         const quint64 seq = nextCallbackSeq();
-        QTimer::singleShot(kVisionSettleMs, this, [this, seq] {
+        QTimer::singleShot(m_runtimeSettings.vision.settleMs, this, [this, seq] {
             if (seq == m_commandSeq
                 && m_stage == Stage::StageOne
                 && m_stageStep == StageStep::WaitForVision)
@@ -1726,12 +1751,12 @@ bool HuayanScheduler::validateStageOneRelMoveBeforeDispatch(const RelMove &move)
         return true;
 
     const bool isXY = move.poseId == 0 || move.poseId == 1;
-    if (isXY && move.distance > HUAYAN_MAX_SINGLE_XY_ADJUST_MM) {
+    if (isXY && move.distance > m_runtimeSettings.safety.maxSingleXyAdjustMm) {
         const QString axis = move.poseId == 0 ? QStringLiteral("X") : QStringLiteral("Y");
         emitOperationError(QStringLiteral("[阶段一] 目标不可信：计划 %1 微调 %2mm 超过单次上限 %3mm，拒绝下发 MoveRelL")
                                .arg(axis)
                                .arg(move.distance, 0, 'f', 1)
-                               .arg(HUAYAN_MAX_SINGLE_XY_ADJUST_MM, 0, 'f', 1));
+                               .arg(m_runtimeSettings.safety.maxSingleXyAdjustMm, 0, 'f', 1));
         return false;
     }
 

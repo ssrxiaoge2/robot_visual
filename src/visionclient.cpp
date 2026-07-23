@@ -60,6 +60,21 @@ VisionHttpClient::VisionHttpClient(QObject *parent)
     setHandEyeMatrix(kDefaultHandEye);
 }
 
+void VisionHttpClient::applyRuntimeSettings(const RuntimeSettings &settings)
+{
+    Q_ASSERT(validateRuntimeSettings(settings).ok);
+    m_runtimeSettings = settings;
+    m_targetSelectionContext.stationRoiHalfX = settings.vision.stationRoiHalfXmm;
+    m_targetSelectionContext.stationRoiHalfY = settings.vision.stationRoiHalfYmm;
+    m_targetSelectionContext.maxTrustX = settings.vision.anchorMaxTrustXmm;
+    m_targetSelectionContext.maxTrustY = settings.vision.anchorMaxTrustYmm;
+    m_targetSelectionContext.sameLayerZTol = settings.vision.anchorSameLayerToleranceMm;
+    m_targetSelectionContext.maxSwitchDistance = settings.vision.anchorSwitchMaxXyMm;
+    m_targetSelectionContext.maxLockMissingFrames = settings.vision.lockMaxMissingFrames;
+    m_targetSelectionContext.lockTrackRadius = settings.vision.lockTrackRadiusMm;
+    m_targetSelectionContext.lockSameLayerZTol = settings.vision.lockSameLayerToleranceMm;
+}
+
 // ── 配置接口 ─────────────────────────────────────────────────
 
 void VisionHttpClient::setServerUrl(const QString &ip, int port)
@@ -507,7 +522,11 @@ VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(
         candidate.anchorX = context.accumulatedToolX + candidate.alignmentX;
         candidate.anchorY = context.accumulatedToolY + candidate.alignmentY;
         candidate.anchorDistance = std::sqrt(distanceSq(candidate.anchorX, candidate.anchorY));
-        candidate.trusted = isAnchorInsideRectTrust(candidate, context);
+        candidate.insideStationRoi =
+            qAbs(candidate.x) <= context.stationRoiHalfX
+            && qAbs(candidate.y) <= context.stationRoiHalfY;
+        candidate.trusted = candidate.insideStationRoi
+            && isAnchorInsideRectTrust(candidate, context);
         if (context.lockEnabled && context.hasPreviousAnchorTarget) {
             candidate.lockDistance = std::sqrt(distanceSq(candidate.anchorX - context.previousAnchorX,
                                                           candidate.anchorY - context.previousAnchorY));
@@ -517,7 +536,6 @@ VisionHttpClient::TargetSelection VisionHttpClient::selectTarget(
                 selection.hasNearestLockDistance = true;
             }
         }
-        candidate.insideStationRoi = true;
         selection.candidates.append(candidate);
         validIndexes.append(selection.candidates.size() - 1);
     }

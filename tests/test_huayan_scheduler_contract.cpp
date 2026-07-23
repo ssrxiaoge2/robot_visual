@@ -99,6 +99,12 @@ static_assert(std::is_same_v<decltype(&HuayanScheduler::startPalletPlace),
 static_assert(std::is_same_v<decltype(&HuayanScheduler::startPalletPlaceFromClampedSafety),
                              void (HuayanScheduler::*)(const PalletPose &, double, double)>,
               "HuayanScheduler::startPalletPlaceFromClampedSafety must reuse pallet place arguments");
+static_assert(std::is_same_v<decltype(&HuayanScheduler::applyRuntimeSettings),
+                             void (HuayanScheduler::*)(const RuntimeSettings &)>,
+              "HuayanScheduler must accept a complete runtime settings snapshot");
+static_assert(std::is_same_v<decltype(&HuayanScheduler::runtimeSettings),
+                             const RuntimeSettings &(HuayanScheduler::*)() const>,
+              "HuayanScheduler must expose its current runtime settings snapshot");
 
 int main()
 {
@@ -115,6 +121,12 @@ int main()
 
     requireStageOneLargeRzGuard(source);
     requireStageOneZDescendTimeout(source);
+    requireTrue(source.contains(QStringLiteral("m_runtimeSettings.vision.xyToleranceMm")),
+                "抓取收敛阈值必须来自运行设置快照");
+    requireTrue(source.contains(QStringLiteral("m_runtimeSettings.search.descendStepMm")),
+                "无目标搜索步长必须来自运行设置快照");
+    requireTrue(source.contains(QStringLiteral("m_runtimeSettings.safety.maxSingleXyAdjustMm")),
+                "单次 XY 安全上限必须来自运行设置快照");
 
     requireTrue(header.contains(QStringLiteral("void schedulerStopped();")),
                 "HuayanScheduler 必须声明专用的 schedulerStopped 信号");
@@ -248,8 +260,8 @@ int main()
                     && !validateStageOneRelMoveBody.contains(QStringLiteral("move.poseId == 5")),
                 "validateStageOneRelMoveBeforeDispatch() 只能限制 poseId == 0 或 poseId == 1，不能限制 Rz");
     requireTrue(validateStageOneRelMoveBody.contains(
-                    QStringLiteral("move.distance > HUAYAN_MAX_SINGLE_XY_ADJUST_MM")),
-                "validateStageOneRelMoveBeforeDispatch() 必须用 move.distance 与 HUAYAN_MAX_SINGLE_XY_ADJUST_MM 比较");
+                    QStringLiteral("move.distance > m_runtimeSettings.safety.maxSingleXyAdjustMm")),
+                "validateStageOneRelMoveBeforeDispatch() 必须用 move.distance 与运行时 XY 安全上限比较");
 
     requireTrue(source.contains(QStringLiteral("qMin(kMaxDescend, HUAYAN_MAX_Z_DESCEND_MM)")),
                 "Z 下探计算必须同时受原有 kMaxDescend 和新的硬保护上限约束");

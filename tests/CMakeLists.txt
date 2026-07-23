@@ -153,6 +153,7 @@ add_test(NAME pallet_param_dialog_contract_tests
 add_executable(vision_target_selection_tests
     test_vision_target_selection.cpp
     ../src/visionclient.cpp
+    ../src/runtimesettings.cpp
 )
 
 target_include_directories(vision_target_selection_tests PRIVATE
@@ -171,6 +172,7 @@ add_test(NAME vision_target_selection_tests
 add_executable(anchor_target_selection_tests
     test_anchor_target_selection.cpp
     ../src/visionclient.cpp
+    ../src/runtimesettings.cpp
 )
 
 target_include_directories(anchor_target_selection_tests PRIVATE
@@ -189,6 +191,7 @@ add_test(NAME anchor_target_selection_tests
 add_executable(locked_target_selection_tests
     test_locked_target_selection.cpp
     ../src/visionclient.cpp
+    ../src/runtimesettings.cpp
 )
 
 target_include_directories(locked_target_selection_tests PRIVATE

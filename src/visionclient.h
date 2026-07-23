@@ -32,6 +32,8 @@
 #include <QList>
 #include <QObject>
 #include <QImage>
+
+#include "runtimesettings.h"
 #include <QNetworkAccessManager>
 #include <QNetworkReply>
 
@@ -107,6 +109,8 @@ public:
     struct TargetSelectionContext {
         bool anchorEnabled = false; ///< false 时使用兼容旧选择逻辑。
         bool lockEnabled = false; ///< true 时启用“初始锁定 + 闭环只跟踪锁定目标”策略。
+        double stationRoiHalfX = VISION_STATION_ROI_HALF_X_MM;
+        double stationRoiHalfY = VISION_STATION_ROI_HALF_Y_MM;
         double accumulatedToolX = 0.0; ///< 初始拍照位到当前相机位置的已完成工具系 X 位移(mm)。
         double accumulatedToolY = 0.0; ///< 初始拍照位到当前相机位置的已完成工具系 Y 位移(mm)。
         bool hasPreviousAnchorTarget = false; ///< 是否已有锁定/上一帧可信目标；锁定模式下表示闭环已锁定。
@@ -179,6 +183,8 @@ public:
     static QString formatTargetSelectionLog(const TargetSelection &selection);
 
     explicit VisionHttpClient(QObject *parent = nullptr);
+    void applyRuntimeSettings(const RuntimeSettings &settings);
+    const RuntimeSettings &runtimeSettings() const { return m_runtimeSettings; }
 
     // ── 服务器配置 ───────────────────────────────────────────
 
@@ -292,6 +298,7 @@ private:
     qint32 m_baseRzReg = 0; ///< ⚠ 需联机调试后设置实际值
 
     TargetSelectionContext m_targetSelectionContext; ///< 最近一次推理使用的选择上下文，生命周期到下一次 set 覆盖。
+    RuntimeSettings m_runtimeSettings;
 };
 
 #endif // VISIONCLIENT_H

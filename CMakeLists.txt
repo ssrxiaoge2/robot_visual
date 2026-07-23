@@ -45,6 +45,8 @@ set(PROJECT_SOURCES
         src/agvcontroller.h
         src/visionclient.cpp
         src/visionclient.h
+        src/runtimesettings.cpp
+        src/runtimesettings.h
         src/camerawindow.cpp
         src/camerawindow.h
         src/handeyedialog.cpp

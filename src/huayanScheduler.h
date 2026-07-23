@@ -75,6 +75,8 @@ public:
     bool isConnected() const;
     /// 是否有阶段、独立动作、待下发命令或已下发命令占用机械臂；只读接口用于入口互斥。
     bool isBusy() const;
+    void applyRuntimeSettings(const RuntimeSettings &settings);
+    const RuntimeSettings &runtimeSettings() const { return m_runtimeSettings; }
 
     void setStackingFunction(const QString &funcName,
                              const QStringList &params = QStringList());
@@ -441,6 +443,7 @@ private:
     QTimer *m_pollTimer    = nullptr; ///< 每 100ms 查询机器人运动状态。
     QTimer *m_timeoutTimer = nullptr; ///< 当前单条 SDK 动作的超时保护。
     QTimer *m_commandReadyTimer = nullptr; ///< SDK 命令下发前的状态门控轮询定时器。
+    RuntimeSettings m_runtimeSettings;
     int     m_pollCount    = 0;       ///< 当前动作已轮询次数，用于极短动作兜底。
     bool    m_hasSeenMoving = false;  // 是否已观察到运动真正开始（避免启动延迟误判完成）
     PendingCommand m_pendingCommand;       ///< 当前等待状态可执行后再下发的命令。
