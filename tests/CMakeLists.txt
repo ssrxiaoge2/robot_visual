@@ -256,6 +256,25 @@ target_link_libraries(depth_descent_contract_tests PRIVATE
 add_test(NAME depth_descent_contract_tests
          COMMAND depth_descent_contract_tests)
 
+add_executable(stable_z_validation_contract_tests
+    test_stable_z_validation_contract.cpp
+)
+
+target_include_directories(stable_z_validation_contract_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_compile_definitions(stable_z_validation_contract_tests PRIVATE
+    PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_link_libraries(stable_z_validation_contract_tests PRIVATE
+    Qt6::Core
+)
+
+add_test(NAME stable_z_validation_contract_tests
+         COMMAND stable_z_validation_contract_tests)
+
 add_executable(settings_dialog_tests
     test_settings_dialog.cpp
     ../src/settingsdialog.cpp

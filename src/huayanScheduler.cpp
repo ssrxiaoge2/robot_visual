@@ -9,6 +9,7 @@
 #include "palletscheduler.h"
 
 #include <QTimer>
+#include <algorithm>
 #include <vector>
 
 namespace {
@@ -25,6 +26,11 @@ static constexpr double kGrabTolerance     = 2.0;    // XY 偏移收敛阈值(mm
 static constexpr double kRzTolerance       = 1.0;    // Rz 旋转收敛阈值(度)
 static constexpr int    kMaxGrabIterations = 15;      // 最大矫正迭代次数（防死循环）
 static constexpr int    kVisionSettleMs    = 2000;   // 移动后等视觉出新帧(ms)
+static constexpr int kStableZWindowFrames = 3; // 达到最少观察时间后，用最近三个真实新帧判断是否稳定。
+static constexpr qint64 kStableZMinElapsedMs = 4000; // 现场观察约 4 秒后深度才稳定；按时间而非易变 FPS 控制。
+static constexpr qint64 kStableZMaxElapsedMs = 8000; // 8 秒仍无稳定窗口或新帧则安全失败，禁止盲目下探。
+static constexpr double kStableZMaxRangeMm = 5.0; // 最近三帧最大值与最小值允许的最大差值(mm)。
+static constexpr int kStableZPollIntervalMs = 100; // /inference 返回缓存，短轮询并用 frame_id 去重，不能按响应次数计帧。
 static constexpr double kSearchDescendStep = 20.0; // 未识别目标时每轮搜索下移量(mm)
 static constexpr double kMaxSearchDescend  = 80.0; // 搜索累计安全上限(mm)
 // GrpReset 退出 ProgramStopped 态是异步的；阶段间快速衔接时（取料→收姿态、倒料→收姿态）
@@ -511,6 +517,7 @@ void HuayanScheduler::startStageOne()
     m_grabIterations = 0;
     m_searchDescendCount = 0;
     m_searchDescendedMm = 0.0;
+    resetStableZValidation();
     resetDepthDescentState();
     m_pendingLargeRzConfirmation = false;
     m_pendingLargeRz = 0.0;
@@ -647,6 +654,7 @@ void HuayanScheduler::stop(bool emitStoppedLog)
     clearActionState();
     m_searchDescendCount = 0;
     m_searchDescendedMm = 0.0;
+    resetStableZValidation();
     resetDepthDescentState();
     m_pendingLargeRzConfirmation = false;
     m_pendingLargeRz = 0.0;
@@ -916,6 +924,7 @@ int HuayanScheduler::stepIndexFor(StageStep step)
     switch (step) {
     case StageStep::MoveToSurvey:
     case StageStep::WaitForVision:
+    case StageStep::ValidateStableZ:
     case StageStep::SearchDescend:           return 0;
     case StageStep::DepthDescent:            return 0;
     case StageStep::MoveToGrab:
@@ -952,6 +961,10 @@ void HuayanScheduler::executeCurrentStep()
                 m_visionClient->setTargetSelectionContext(makeVisionTargetSelectionContext());
             emit surveyReady();
             m_timeoutTimer->start(10000);
+            break;
+        case StageStep::ValidateStableZ:
+            // Z 稳定验证的下一次请求由 requestNextStableZFrame() 定时发起；
+            // 此状态绝不下发机械臂运动，确保全部观察帧来自同一静止位姿。
             break;
         case StageStep::SearchDescend:
         case StageStep::DepthDescent:
@@ -1511,6 +1524,43 @@ void HuayanScheduler::resetDepthDescentState()
     m_pendingDepthDescentMm = 0.0;
 }
 
+void HuayanScheduler::resetStableZValidation()
+{
+    m_stableZSamples.clear();
+    m_stableZLastFrameId = -1;
+    m_stableZLastTimestampMs = -1;
+    m_stableZElapsedTimer.invalidate();
+    m_stableZUniqueFrames = 0;
+}
+
+void HuayanScheduler::requestNextStableZFrame()
+{
+    // /inference 返回后台最新缓存，不代表每次 HTTP 响应都有新相机帧。
+    // 以 100ms 短轮询查询并在回调中用 frame_id 去重，兼顾当前约 2 FPS 和后续帧率提升。
+    const quint64 seq = nextCallbackSeq();
+    QTimer::singleShot(kStableZPollIntervalMs, this, [this, seq] {
+        if (seq != m_commandSeq
+            || m_stage != Stage::StageOne
+            || m_stageStep != StageStep::ValidateStableZ) {
+            return;
+        }
+
+        if (m_stableZElapsedTimer.isValid()
+            && m_stableZElapsedTimer.elapsed() >= kStableZMaxElapsedMs) {
+            emitOperationError(QStringLiteral("[阶段一][Z稳定] 已静止等待 %1ms，算法真实新帧仍不足或 Z 未稳定，拒绝 Z 下探")
+                                   .arg(m_stableZElapsedTimer.elapsed()));
+            return;
+        }
+
+        if (m_visionClient)
+            m_visionClient->setTargetSelectionContext(makeVisionTargetSelectionContext());
+        // 先启动本帧等待保护，再发请求；若配置错误导致 errorOccurred 同步返回，
+        // 错误槽仍能立即停止该定时器，不会在阶段结束后遗留一次假超时。
+        m_timeoutTimer->start(10000);
+        emit surveyReady();
+    });
+}
+
 bool HuayanScheduler::handleExcessiveVisionDepth(double depthMm)
 {
     const DepthDescentDecision decision =
@@ -1573,10 +1623,129 @@ void HuayanScheduler::executeDepthDescent(double moveMm)
 
 void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 {
-    if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision)
+    const bool validatingStableZ = m_stageStep == StageStep::ValidateStableZ;
+    if (m_stage != Stage::StageOne
+        || (m_stageStep != StageStep::WaitForVision && !validatingStableZ)) {
         return;
+    }
 
     stopVisionWaitTimeout();
+
+    if (validatingStableZ) {
+        if (!m_visionClient) {
+            emitOperationError(QStringLiteral("[阶段一][Z稳定] 未注入视觉客户端，无法校验真实帧"));
+            return;
+        }
+
+        const qint64 frameId = m_visionClient->lastInferenceFrameId();
+        const qint64 timestampMs = m_visionClient->lastInferenceTimestampMs();
+        if (frameId < 0 || timestampMs < 0) {
+            emitOperationError(QStringLiteral("[阶段一][Z稳定] 算法响应缺少 frame_id 或 timestamp，无法排除缓存重复帧"));
+            return;
+        }
+
+        if (frameId <= m_stableZLastFrameId) {
+            if (frameId < m_stableZLastFrameId) {
+                emitOperationError(QStringLiteral("[阶段一][Z稳定] frame_id 从 %1 回退到 %2，疑似视觉服务重启，拒绝 Z 下探")
+                                       .arg(m_stableZLastFrameId)
+                                       .arg(frameId));
+                return;
+            }
+
+            emit logMessage(QStringLiteral("[阶段一][Z稳定] frame_id=%1 为重复缓存帧，不计入样本；已获得 %2 个真实新帧，已等待 %3ms")
+                                .arg(frameId)
+                                .arg(m_stableZUniqueFrames)
+                                .arg(m_stableZElapsedTimer.elapsed()));
+            requestNextStableZFrame();
+            return;
+        }
+
+        if (timestampMs <= m_stableZLastTimestampMs) {
+            emitOperationError(QStringLiteral("[阶段一][Z稳定] 新 frame_id=%1 的 timestamp=%2 未大于上一帧 %3，帧元数据异常，拒绝 Z 下探")
+                                   .arg(frameId)
+                                   .arg(timestampMs)
+                                   .arg(m_stableZLastTimestampMs));
+            return;
+        }
+
+        m_stableZLastFrameId = frameId;
+        m_stableZLastTimestampMs = timestampMs;
+        const bool remainsAligned =
+            qAbs(x) < m_runtimeSettings.vision.xyToleranceMm
+            && qAbs(y) < m_runtimeSettings.vision.xyToleranceMm
+            && qAbs(rz) < kRzTolerance;
+        if (remainsAligned) {
+            ++m_stableZUniqueFrames;
+            m_stableZSamples.append(z);
+            if (m_stableZSamples.size() > kStableZWindowFrames)
+                m_stableZSamples.removeFirst();
+
+            QStringList sampleTexts;
+            for (double sample : m_stableZSamples)
+                sampleTexts.append(QString::number(sample, 'f', 1));
+
+            const qint64 elapsedMs = m_stableZElapsedTimer.elapsed();
+            double windowRange = 0.0;
+            bool hasFullWindow = m_stableZSamples.size() == kStableZWindowFrames;
+            if (hasFullWindow) {
+                const auto [windowMinIt, windowMaxIt] =
+                    std::minmax_element(m_stableZSamples.cbegin(), m_stableZSamples.cend());
+                const double windowMin = *windowMinIt;
+                const double windowMax = *windowMaxIt;
+                windowRange = windowMax - windowMin;
+            }
+
+            if (elapsedMs >= kStableZMinElapsedMs
+                && hasFullWindow
+                && windowRange <= kStableZMaxRangeMm) {
+                QList<double> sortedSamples = m_stableZSamples;
+                std::sort(sortedSamples.begin(), sortedSamples.end());
+                m_grabOffset = {x, y, z, 0.0, 0.0, rz};
+                m_grabOffset.z = sortedSamples.at(1);
+                emit logMessage(QStringLiteral("[阶段一][Z稳定] 验证通过：已等待 %1ms，真实新帧 %2 个，窗口=[%3]，极差=%4mm，中位数 Z=%5mm，开始 Z 下探")
+                                    .arg(elapsedMs)
+                                    .arg(m_stableZUniqueFrames)
+                                    .arg(sampleTexts.join(QStringLiteral(", ")))
+                                    .arg(windowRange, 0, 'f', 1)
+                                    .arg(m_grabOffset.z, 0, 'f', 1));
+                resetStableZValidation();
+                m_stageStep = StageStep::DescendZ;
+                proceedStage();
+                return;
+            }
+
+            if (elapsedMs >= kStableZMaxElapsedMs) {
+                emitOperationError(QStringLiteral("[阶段一][Z稳定] 已等待 %1ms、获得 %2 个真实新帧，最近窗口=[%3] 仍未满足极差≤%4mm，拒绝 Z 下探")
+                                       .arg(elapsedMs)
+                                       .arg(m_stableZUniqueFrames)
+                                       .arg(sampleTexts.join(QStringLiteral(", ")))
+                                       .arg(kStableZMaxRangeMm, 0, 'f', 1));
+                return;
+            }
+
+            emit logMessage(QStringLiteral("[阶段一][Z稳定] 新帧 frame_id=%1，真实新帧 %2 个，已等待 %3/%4ms，Z=%5mm，窗口=[%6]%7")
+                                .arg(frameId)
+                                .arg(m_stableZUniqueFrames)
+                                .arg(elapsedMs)
+                                .arg(kStableZMinElapsedMs)
+                                .arg(z, 0, 'f', 1)
+                                .arg(sampleTexts.join(QStringLiteral(", ")))
+                                .arg(hasFullWindow
+                                         ? QStringLiteral("，极差=%1mm").arg(windowRange, 0, 'f', 1)
+                                         : QStringLiteral("，窗口尚不足三帧")));
+            requestNextStableZFrame();
+            return;
+        }
+
+        // 验证期间重新失准说明目标或姿态发生变化，旧 Z 窗口不能继续使用；
+        // 切回原有 WaitForVision 路径，让本帧按既有 XY/Rz 规则生成微调动作。
+        emit logMessage(QStringLiteral("[阶段一][Z稳定] 验证期间重新失准（X=%1 Y=%2 Rz=%3），清空 Z 样本并恢复闭环矫正")
+                            .arg(x, 0, 'f', 1)
+                            .arg(y, 0, 'f', 1)
+                            .arg(rz, 0, 'f', 1));
+        resetStableZValidation();
+        m_stageStep = StageStep::WaitForVision;
+    }
 
     if (handleExcessiveVisionDepth(z))
         return;
@@ -1634,12 +1803,28 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
         && qAbs(y) < m_runtimeSettings.vision.xyToleranceMm
         && qAbs(effectiveRz) < kRzTolerance;
 
-    // 闭环收敛：只有 XY 平移与 Rz 旋转都达标才进入 Z 下探。
+    // 闭环收敛后不再直接使用当前帧 Z；以当前算法帧为基线并保持机械臂静止，
+    // 至少等待真实 4 秒，再用最近三个不同 frame_id 的结果判断稳定性。
     if (aligned) {
-        emit logMessage(QStringLiteral("[阶段一] 视觉对准完成（X=%1 Y=%2 Rz=%3），开始 Z 下探")
-                            .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1).arg(effectiveRz, 0, 'f', 1));
-        m_stageStep = StageStep::DescendZ;
-        proceedStage();
+        if (!m_visionClient
+            || m_visionClient->lastInferenceFrameId() < 0
+            || m_visionClient->lastInferenceTimestampMs() < 0) {
+            emitOperationError(QStringLiteral("[阶段一][Z稳定] 算法响应缺少 frame_id 或 timestamp，无法开始真实跨帧验证"));
+            return;
+        }
+
+        emit logMessage(QStringLiteral("[阶段一] 视觉对准完成（X=%1 Y=%2 Rz=%3），以 frame_id=%4 为基线静止等待至少 %5ms")
+                            .arg(x, 0, 'f', 1)
+                            .arg(y, 0, 'f', 1)
+                            .arg(effectiveRz, 0, 'f', 1)
+                            .arg(m_visionClient->lastInferenceFrameId())
+                            .arg(kStableZMinElapsedMs));
+        resetStableZValidation();
+        m_stableZLastFrameId = m_visionClient->lastInferenceFrameId();
+        m_stableZLastTimestampMs = m_visionClient->lastInferenceTimestampMs();
+        m_stableZElapsedTimer.start();
+        m_stageStep = StageStep::ValidateStableZ;
+        requestNextStableZFrame();
         return;
     }
 
@@ -1675,8 +1860,11 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz,
                                     double contextSelectedAnchorX, double contextSelectedAnchorY)
 {
-    if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision)
+    if (m_stage != Stage::StageOne
+        || (m_stageStep != StageStep::WaitForVision
+            && m_stageStep != StageStep::ValidateStableZ)) {
         return;
+    }
 
     // 视觉端只会在锚点模式选中可信目标时带回 anchor；记录值用于下一帧跳变保护。
     m_anchorHasPreviousTarget = true;
@@ -1688,6 +1876,12 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz,
 
 void HuayanScheduler::onVisionNoObject()
 {
+    if (m_stage == Stage::StageOne && m_stageStep == StageStep::ValidateStableZ) {
+        stopVisionWaitTimeout();
+        emitOperationError(QStringLiteral("[阶段一][Z稳定] 验证期间未检测到锁定目标，拒绝搜索下移并停止本次取料"));
+        return;
+    }
+
     if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision) {
         emit logMessage(QStringLiteral("[阶段一] 收到未检测到目标，但当前不在等待视觉阶段，忽略"));
         return;
@@ -1736,12 +1930,20 @@ void HuayanScheduler::onVisionNoObject()
 void HuayanScheduler::onVisionTargetRejectedForPickup(VisionHttpClient::TargetSelectionReason reason,
                                                       const QString &msg)
 {
-    if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision) {
+    if (m_stage != Stage::StageOne
+        || (m_stageStep != StageStep::WaitForVision
+            && m_stageStep != StageStep::ValidateStableZ)) {
         emit logMessage(QStringLiteral("[阶段一] 收到锚点可信拒绝，但当前不在等待视觉阶段，忽略：%1").arg(msg));
         return;
     }
 
+    const bool validatingStableZ = m_stageStep == StageStep::ValidateStableZ;
     stopVisionWaitTimeout();
+    if (validatingStableZ) {
+        emitOperationError(QStringLiteral("[阶段一][Z稳定] 锁定目标被可信规则拒绝：%1，拒绝搜索下移并停止本次取料")
+                               .arg(msg));
+        return;
+    }
 
     QString reasonText;
     using Reason = VisionHttpClient::TargetSelectionReason;
@@ -1794,7 +1996,9 @@ void HuayanScheduler::onVisionTargetRejectedForPickup(VisionHttpClient::TargetSe
 
 void HuayanScheduler::onVisionErrorForPickup(const QString &msg)
 {
-    if (m_stage != Stage::StageOne || m_stageStep != StageStep::WaitForVision) {
+    if (m_stage != Stage::StageOne
+        || (m_stageStep != StageStep::WaitForVision
+            && m_stageStep != StageStep::ValidateStableZ)) {
         emit logMessage(QStringLiteral("[阶段一] 收到视觉错误，但当前不在等待视觉阶段，忽略：%1").arg(msg));
         return;
     }
@@ -1957,7 +2161,9 @@ bool HuayanScheduler::executeStackingFunction()
 bool HuayanScheduler::hasActiveRobotCommand() const
 {
     return m_pollTimer->isActive()
-        || (m_timeoutTimer->isActive() && m_stageStep != StageStep::WaitForVision);
+        || (m_timeoutTimer->isActive()
+            && m_stageStep != StageStep::WaitForVision
+            && m_stageStep != StageStep::ValidateStableZ);
 }
 
 // 同时读取 flags 和 FSM，是为了定位 Cleanup 20561 前控制器是否仍在脚本运行态。
@@ -2111,9 +2317,10 @@ void HuayanScheduler::emitMoveRelFailureDiagnostics(
 void HuayanScheduler::stopVisionWaitTimeout()
 {
     if (m_stage == Stage::StageOne
-        && m_stageStep == StageStep::WaitForVision
+        && (m_stageStep == StageStep::WaitForVision
+            || m_stageStep == StageStep::ValidateStableZ)
         && m_timeoutTimer->isActive()) {
-        emit logMessage(QStringLiteral("[阶段一] 已收到视觉结果，停止 WaitForVision 超时定时器"));
+        emit logMessage(QStringLiteral("[阶段一] 已收到视觉结果，停止视觉等待超时定时器"));
         m_timeoutTimer->stop();
     }
 }

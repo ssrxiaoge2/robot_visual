@@ -220,6 +220,10 @@ public:
     bool    isConfigured() const { return !m_ip.isEmpty(); }
     QString ip()           const { return m_ip; }
     int     port()         const { return m_port; }
+    /// 最近一次成功解析的 /inference 根字段 frame_id；-1 表示算法未提供。
+    qint64 lastInferenceFrameId() const { return m_lastInferenceFrameId; }
+    /// 最近一次成功解析的 /inference 根字段 timestamp，转换为毫秒；-1 表示算法未提供。
+    qint64 lastInferenceTimestampMs() const { return m_lastInferenceTimestampMs; }
 
 public slots:
     /**
@@ -298,6 +302,8 @@ private:
     qint32 m_baseRzReg = 0; ///< ⚠ 需联机调试后设置实际值
 
     TargetSelectionContext m_targetSelectionContext; ///< 最近一次推理使用的选择上下文，生命周期到下一次 set 覆盖。
+    qint64 m_lastInferenceFrameId = -1; ///< 算法后台真实推理帧编号，用于上位机识别重复缓存响应。
+    qint64 m_lastInferenceTimestampMs = -1; ///< 算法生成该推理结果的时间戳(ms)，用于校验帧确实向前推进。
     RuntimeSettings m_runtimeSettings;
 };
 

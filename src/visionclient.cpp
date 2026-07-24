@@ -777,7 +777,15 @@ void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
         return;
     }
 
-    const QJsonArray objects = doc.object().value(QStringLiteral("objects")).toArray();
+    const QJsonObject root = doc.object();
+    const QJsonValue frameIdValue = root.value(QStringLiteral("frame_id"));
+    const QJsonValue timestampValue = root.value(QStringLiteral("timestamp"));
+    m_lastInferenceFrameId =
+        frameIdValue.isDouble() ? frameIdValue.toVariant().toLongLong() : -1;
+    m_lastInferenceTimestampMs =
+        timestampValue.isDouble() ? qRound64(timestampValue.toDouble() * 1000.0) : -1;
+
+    const QJsonArray objects = root.value(QStringLiteral("objects")).toArray();
     const TargetSelection selection = selectTarget(objects, m_targetSelectionContext, m_T);
     emit selectionLogMessage(formatTargetSelectionLog(selection));
     if (!selection.hasTarget()) {

@@ -162,10 +162,11 @@ int main()
                 "新阶段启动前必须拒绝清掉正在执行中的机械臂命令");
     requireTrue(schedulerSource.contains(QStringLiteral("if (m_stage == Stage::StageOne && m_stageStep == StageStep::SearchDescend)")),
                 "搜索下移命令门控失败后，只能在阶段状态仍有效时回滚搜索计数");
-    requireTrue(schedulerSource.contains(QStringLiteral("m_timeoutTimer->isActive() && m_stageStep != StageStep::WaitForVision")),
-                "执行中命令判定不能把 WaitForVision 的超时定时器误算成机械臂命令");
-    requireTrue(schedulerSource.contains(QStringLiteral("已收到视觉结果，停止 WaitForVision 超时定时器")),
-                "视觉结果到达后必须停止 WaitForVision 的超时定时器");
+    requireTrue(schedulerSource.contains(QStringLiteral("m_stageStep != StageStep::WaitForVision"))
+                    && schedulerSource.contains(QStringLiteral("m_stageStep != StageStep::ValidateStableZ")),
+                "执行中命令判定不能把普通视觉等待或 Z 稳定验证的超时定时器误算成机械臂命令");
+    requireTrue(schedulerSource.contains(QStringLiteral("已收到视觉结果，停止视觉等待超时定时器")),
+                "视觉结果到达后必须停止当前视觉等待状态的超时定时器");
     requireTrue(schedulerSource.contains(QStringLiteral("命令前读取 FSM 失败")),
                 "pollCommandReady() 在 FSM 读取失败时必须显式报错而不是放行");
     requireTrue(schedulerSource.contains(QStringLiteral("PendingCommandKind::MoveJ")),

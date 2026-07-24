@@ -3,7 +3,9 @@
 
 #include <array>
 
+#include <QElapsedTimer>
 #include <QObject>
+#include <QList>
 #include <QString>
 #include <QStringList>
 #include <QtGlobal>
@@ -246,6 +248,7 @@ private:
         None,                    ///< 当前阶段步骤耗尽，下一次执行将完成阶段。
         MoveToSurvey,            ///< 调用拍照位示教函数。
         WaitForVision,           ///< 机械臂静止，等待视觉成功/无目标/错误回调。
+        ValidateStableZ,         ///< X/Y/Rz 对准后保持静止，连续验证多帧 Z 深度。
         SearchDescend,           ///< 无目标时沿 Z 搜索下移。
         DepthDescent,            ///< 视觉深度过大时自动下探并重新检测。
         MoveToGrab,              ///< 按 X/Y/Rz 分轴执行视觉闭环偏移。
@@ -302,6 +305,10 @@ private:
     bool validateStageOneRelMoveBeforeDispatch(const RelMove &move);
     /// 清零阶段一固定拍照锚点状态；每次 startStageOne() 必须调用一次。
     void resetVisionAnchorTracking();
+    /// 清空当前任务的 Z 跨帧样本；阶段启动、停止、重新失准时都必须调用，避免复用旧帧。
+    void resetStableZValidation();
+    /// 机械臂保持静止，在上一帧响应完成后请求下一帧 Z 稳定验证结果。
+    void requestNextStableZFrame();
     void resetDepthDescentState();
     bool handleExcessiveVisionDepth(double depthMm);
     void executeDepthDescent(double moveMm);
@@ -466,6 +473,11 @@ private:
     QList<RelMove> m_grabMoves;    ///< 本轮视觉微调拆分出的单轴动作序列。
     int m_grabMoveIdx = 0;         ///< 下一条待执行视觉微调索引。
     int m_grabIterations = 0;   // 闭环视觉矫正的迭代计数
+    QList<double> m_stableZSamples; ///< Z 稳定验证最近三个真实新帧样本(mm)，只在 ValidateStableZ 状态使用。
+    qint64 m_stableZLastFrameId = -1; ///< 最近接收的算法真实 frame_id；相同值属于重复缓存，不能计入窗口。
+    qint64 m_stableZLastTimestampMs = -1; ///< 最近真实帧的算法 timestamp(ms)，用于防止帧编号异常复用。
+    QElapsedTimer m_stableZElapsedTimer; ///< 从 X/Y/Rz 对准开始计时，不受 HTTP 缓存响应次数影响。
+    int m_stableZUniqueFrames = 0; ///< 对准后真正接收的不同 frame_id 数量，仅用于现场日志。
     int m_searchDescendCount = 0;   // 找目标保护搜索的次数，不参与抓取闭环迭代
     double m_searchDescendedMm = 0.0;  // 找目标累计下移量(mm)，不是抓取 Z 下探量
     double m_depthDescentAccumulatedMm = 0.0; ///< 深度过大自动下探的已完成累计量。
