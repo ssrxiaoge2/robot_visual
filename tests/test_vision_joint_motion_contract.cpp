@@ -225,6 +225,26 @@ int main()
         "必须实现同一调度时刻的实际 TCP 与 J1～J6 快照读取");
     const QString normalizedReadSnapshotBody =
         normalizeCppCode(readSnapshotBody);
+    const QString tcpFailureBranch = requireSegmentBetween(
+        normalizedReadSnapshotBody,
+        QStringLiteral("if(tcpRet!=0){"),
+        QStringLiteral("constintjointsRet=HRIF_ReadActJointPos("),
+        "必须能定位 TCP 失败分支与后续关节读取边界");
+    requireContainsInOrder(
+        tcpFailureBranch,
+        {QStringLiteral("describeError(m_boxID,tcpRet)"),
+         QStringLiteral("returnfalse;")},
+        "TCP 读取失败必须在读取关节前立即携带错误说明返回");
+    const QString jointsFailureBranch = requireSegmentBetween(
+        normalizedReadSnapshotBody,
+        QStringLiteral("if(jointsRet!=0){"),
+        QStringLiteral("if(error)error->clear();"),
+        "必须能定位关节读取失败分支与成功出口边界");
+    requireContainsInOrder(
+        jointsFailureBranch,
+        {QStringLiteral("describeError(m_boxID,jointsRet)"),
+         QStringLiteral("returnfalse;")},
+        "关节读取失败必须在关节 SDK 调用后携带错误说明返回");
     requireContainsInOrder(
         normalizedReadSnapshotBody,
         {QStringLiteral("HRIF_ReadActTcpPos("),
@@ -299,6 +319,30 @@ int main()
          QStringLiteral("beginCommandWhenReady")},
         "首次视觉结果必须先读取实位姿与关节，再组合目标并下发");
     const QString normalizedQueueBody = normalizeCppCode(queueBody);
+    requireTrue(
+        normalizedQueueBody.count(
+            QStringLiteral("beginCommandWhenReady(cmd)")) == 1
+            && normalizedQueueBody.contains(
+                QStringLiteral(
+                    "constboolqueued=beginCommandWhenReady(cmd);")),
+        "queued 必须且只能直接绑定一次 beginCommandWhenReady(cmd) 的返回值");
+    requireTrue(
+        normalizedQueueBody.count(
+            QStringLiteral(
+                "m_pendingAlignmentCorrection=correction;")) == 1,
+        "待确认修正量在首次命令组装中必须且只能赋值一次");
+    const QString acceptedCommandSegment = requireSegmentBetween(
+        normalizedQueueBody,
+        QStringLiteral(
+            "constboolqueued=beginCommandWhenReady(cmd);"),
+        QStringLiteral(
+            "m_pendingAlignmentCorrection=correction;"),
+        "必须能定位门控返回值与待确认修正赋值边界");
+    requireContainsInOrder(
+        acceptedCommandSegment,
+        {QStringLiteral("if(!queued){"),
+         QStringLiteral("returnfalse;")},
+        "门控失败必须先返回，不能覆盖已有命令对应的待确认修正量");
     requireContainsInOrder(
         normalizedQueueBody,
         {QStringLiteral("cmd.targetPose=pregraspPose;"),
