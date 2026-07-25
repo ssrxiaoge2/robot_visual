@@ -27,6 +27,9 @@ struct RuntimeSettings
         double rzToleranceDeg = 1.0;
         /// 初始联合 MoveJ 后允许执行的联合 MoveL 精修正次数，范围为 0 到 2。
         int maxFineCorrectionCount = 1;
+        /// 旧阶段一逐轴循环在任务 5 完成迁移前使用的临时编译桥接值。
+        /// 此字段不在界面展示、不参与 INI 保存或读取、不参与运行时校验，且新联合对准流程不得读取。
+        int maxGrabIterations = 15;
         int settleMs = 2000;
         double largeRzJumpThresholdDeg = 80.0;
         double largeRzDeltaToleranceDeg = 15.0;
