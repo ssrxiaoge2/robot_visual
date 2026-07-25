@@ -2441,7 +2441,8 @@ bool HuayanScheduler::pollCommandReady()
 
 bool HuayanScheduler::dispatchReadyCommand(const PendingCommand &cmd)
 {
-    if (cmd.kind == PendingCommandKind::RunFunc) {
+    switch (cmd.kind) {
+    case PendingCommandKind::RunFunc: {
         std::vector<string> params;
         for (const QString &entry : cmd.params)
             params.push_back(entry.toStdString());
@@ -2460,7 +2461,8 @@ bool HuayanScheduler::dispatchReadyCommand(const PendingCommand &cmd)
         return true;
     }
 
-    if (cmd.kind == PendingCommandKind::MoveRelTool || cmd.kind == PendingCommandKind::MoveRelBase) {
+    case PendingCommandKind::MoveRelTool:
+    case PendingCommandKind::MoveRelBase: {
         const int toolMotion = cmd.kind == PendingCommandKind::MoveRelTool ? 1 : 0;
         const MotionDiagnosticSnapshot before =
             readMotionDiagnosticSnapshot(true, false);
@@ -2482,7 +2484,7 @@ bool HuayanScheduler::dispatchReadyCommand(const PendingCommand &cmd)
         return true;
     }
 
-    if (cmd.kind == PendingCommandKind::MoveJ) {
+    case PendingCommandKind::MoveJ: {
         int nRet = HRIF_MoveJ(m_boxID, m_rbtID,
                               cmd.targetPose.x, cmd.targetPose.y, cmd.targetPose.z,
                               cmd.targetPose.rx, cmd.targetPose.ry, cmd.targetPose.rz,
@@ -2505,7 +2507,148 @@ bool HuayanScheduler::dispatchReadyCommand(const PendingCommand &cmd)
         return true;
     }
 
+    case PendingCommandKind::VisionPregraspMoveJ:
+        return dispatchVisionPregraspMoveJ(cmd);
+
+    case PendingCommandKind::VisionFineCorrectionMoveL:
+        return dispatchVisionFineCorrectionMoveL(cmd);
+
+    case PendingCommandKind::None:
+        break;
+    }
+
     return false;
+}
+
+bool HuayanScheduler::dispatchVisionPregraspMoveJ(const PendingCommand &cmd)
+{
+    emit logMessage(
+        QStringLiteral("[阶段一][初始联合MoveJ] Base目标=(%1,%2,%3,%4,%5,%6)，"
+                       "关节参考=(%7,%8,%9,%10,%11,%12)，命令=%13")
+            .arg(cmd.targetPose.x, 0, 'f', 3)
+            .arg(cmd.targetPose.y, 0, 'f', 3)
+            .arg(cmd.targetPose.z, 0, 'f', 3)
+            .arg(cmd.targetPose.rx, 0, 'f', 3)
+            .arg(cmd.targetPose.ry, 0, 'f', 3)
+            .arg(cmd.targetPose.rz, 0, 'f', 3)
+            .arg(cmd.referenceJoints[0], 0, 'f', 3)
+            .arg(cmd.referenceJoints[1], 0, 'f', 3)
+            .arg(cmd.referenceJoints[2], 0, 'f', 3)
+            .arg(cmd.referenceJoints[3], 0, 'f', 3)
+            .arg(cmd.referenceJoints[4], 0, 'f', 3)
+            .arg(cmd.referenceJoints[5], 0, 'f', 3)
+            .arg(cmd.diagnosticCommandId));
+
+    const int nRet = HRIF_WayPoint(
+        // 控制盒编号和机器人编号沿用当前调度器连接配置。
+        m_boxID, m_rbtID,
+        // nMoveType=0：执行 MoveJ，而不是直线 MoveL。
+        0,
+        // dX～dRz：Base/UCS 下的绝对笛卡尔目标位姿。
+        cmd.targetPose.x, cmd.targetPose.y, cmd.targetPose.z,
+        cmd.targetPose.rx, cmd.targetPose.ry, cmd.targetPose.rz,
+        // dJ1～dJ6：nIsUseJoint=0 时不是关节目标，而是笛卡尔逆解的当前实际关节参考。
+        cmd.referenceJoints[0], cmd.referenceJoints[1],
+        cmd.referenceJoints[2], cmd.referenceJoints[3],
+        cmd.referenceJoints[4], cmd.referenceJoints[5],
+        // TCP/UCS 名称沿用当前调度器实际配置，避免坐标系与视觉标定不一致。
+        kTcpName.toStdString(), cmd.ucsName.toStdString(),
+        // 速度、加速度和圆滑半径使用本轮运行时设置快照，不使用编译期常量。
+        m_runtimeSettings.motion.velocity,
+        m_runtimeSettings.motion.acceleration,
+        m_runtimeSettings.motion.radius,
+        // nIsUseJoint=0 保持笛卡尔目标有效；不启用寻位，IO 位和状态均为 0。
+        0, 0, 0, 0,
+        // 命令编号由上游载荷提供，用于控制器和本地诊断关联。
+        cmd.cmdId.toStdString());
+    if (nRet != 0) {
+        const QString detail = describeError(m_boxID, nRet);
+        emitOperationError(
+            detail.isEmpty()
+                ? QStringLiteral("%1失败：%2，命令=%3")
+                      .arg(cmd.label)
+                      .arg(nRet)
+                      .arg(cmd.diagnosticCommandId)
+                : QStringLiteral("%1失败：%2（%3），命令=%4")
+                      .arg(cmd.label)
+                      .arg(nRet)
+                      .arg(detail)
+                      .arg(cmd.diagnosticCommandId));
+        return false;
+    }
+
+    m_activeCommandKind = cmd.kind;
+    m_activeCommandLabel = cmd.label;
+    m_loggedRunFuncScriptRunning = false;
+    startWaitForIdle(cmd.timeoutMs);
+    return true;
+}
+
+bool HuayanScheduler::dispatchVisionFineCorrectionMoveL(const PendingCommand &cmd)
+{
+    emit logMessage(
+        QStringLiteral("[阶段一][联合精修MoveL] Tool增量=(%1,%2,0,0,0,%3)，%4，命令=%5")
+            .arg(cmd.targetPose.x, 0, 'f', 3)
+            .arg(cmd.targetPose.y, 0, 'f', 3)
+            .arg(cmd.targetPose.rz, 0, 'f', 3)
+            .arg(cmd.label)
+            .arg(cmd.diagnosticCommandId));
+
+    const int nRet = HRIF_WayPointRel(
+        // 控制盒编号和机器人编号沿用当前调度器连接配置。
+        m_boxID, m_rbtID,
+        // nType=1：六个目标分量按同一条线性轨迹执行 MoveL。
+        1,
+        // nPointList=0：不读取控制器点位表，后续 dPos 和 dPos_J 参数必须全部传 0。
+        0,
+        // dPos_X～dPos_Rz：nPointList=0 时按 SDK 3.10.3 要求全部为 0。
+        0, 0, 0, 0, 0, 0,
+        // dPos_J1～dPos_J6：nPointList=0 时同样全部为 0。
+        0, 0, 0, 0, 0, 0,
+        // nrelMoveType=2：完整 SDK 接口文档 3.10.3 定义的 Tool 相对运动模式；
+        // 不得改成普通叠加模式 1，否则视觉输出会在错误坐标系中执行。
+        2,
+        // nAxisMask_1～6 对应 X/Y/Z/Rx/Ry/Rz：只启用 X、Y、Rz。
+        1, 1, 0, 0, 0, 1,
+        // dTarget_1～6 对应 X/Y/Z/Rx/Ry/Rz：三轴增量在同一条线性轨迹命令中完成；
+        // 不得拆成三个 HRIF_MoveRelL，否则轨迹和到位语义都会改变。
+        cmd.targetPose.x,
+        cmd.targetPose.y,
+        0,
+        0,
+        0,
+        cmd.targetPose.rz,
+        // TCP/UCS 名称沿用当前调度器实际配置，确保 Tool 模式与视觉标定一致。
+        kTcpName.toStdString(), cmd.ucsName.toStdString(),
+        // 速度、加速度和圆滑半径使用本轮运行时设置快照。
+        m_runtimeSettings.motion.velocity,
+        m_runtimeSettings.motion.acceleration,
+        m_runtimeSettings.motion.radius,
+        // nIsUseJoint=0；不启用寻位，IO 位和状态均为 0。
+        0, 0, 0, 0,
+        // 命令编号由上游载荷提供，用于控制器和本地诊断关联。
+        cmd.cmdId.toStdString());
+    if (nRet != 0) {
+        const QString detail = describeError(m_boxID, nRet);
+        emitOperationError(
+            detail.isEmpty()
+                ? QStringLiteral("%1失败：%2，命令=%3")
+                      .arg(cmd.label)
+                      .arg(nRet)
+                      .arg(cmd.diagnosticCommandId)
+                : QStringLiteral("%1失败：%2（%3），命令=%4")
+                      .arg(cmd.label)
+                      .arg(nRet)
+                      .arg(detail)
+                      .arg(cmd.diagnosticCommandId));
+        return false;
+    }
+
+    m_activeCommandKind = cmd.kind;
+    m_activeCommandLabel = cmd.label;
+    m_loggedRunFuncScriptRunning = false;
+    startWaitForIdle(cmd.timeoutMs);
+    return true;
 }
 
 void HuayanScheduler::resetArm()

@@ -137,6 +137,21 @@ target_link_libraries(huayan_scheduler_contract_tests PRIVATE
 add_test(NAME huayan_scheduler_contract_tests
          COMMAND huayan_scheduler_contract_tests)
 
+add_executable(vision_joint_motion_contract_tests
+    test_vision_joint_motion_contract.cpp
+)
+
+target_include_directories(vision_joint_motion_contract_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(vision_joint_motion_contract_tests PRIVATE
+    Qt6::Core
+)
+
+add_test(NAME vision_joint_motion_contract_tests
+         COMMAND vision_joint_motion_contract_tests)
+
 add_executable(task_executor_pallet_commit_semantics_tests
     test_task_executor_pallet_commit_semantics.cpp
 )

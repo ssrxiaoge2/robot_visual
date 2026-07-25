@@ -356,12 +356,16 @@ private:
     /// MoveRelTool：工具坐标系相对移动，视觉微调、搜索、Z 下探使用。
     /// MoveRelBase：基坐标系相对移动，码垛 offset 使用。
     /// MoveJ：绝对笛卡尔 MoveJ，倒料位/空箱位等示教点使用。
+    /// VisionPregraspMoveJ：阶段一视觉初始联合对准，笛卡尔目标配合当前实际关节作逆解参考。
+    /// VisionFineCorrectionMoveL：阶段一视觉联合精修，在工具坐标系内一次完成 X/Y/Rz 线性增量。
     enum class PendingCommandKind {
         None,
         RunFunc,
         MoveRelTool,
         MoveRelBase,
-        MoveJ
+        MoveJ,
+        VisionPregraspMoveJ,
+        VisionFineCorrectionMoveL
     };
 
     /// 统一命令门控使用的待执行命令。
@@ -374,7 +378,8 @@ private:
         int poseId = 0;       ///< kind=MoveRelTool/MoveRelBase 时使用，0~5=X/Y/Z/Rx/Ry/Rz。
         int direction = 1;    ///< 相对移动方向，0=负向，1=正向。
         double distance = 0;  ///< 相对移动距离(mm或deg，取决于 poseId)。
-        Pose targetPose;      ///< kind=MoveJ 时使用的绝对目标位姿。
+        Pose targetPose;      ///< 绝对目标位姿或联合相对位姿；具体语义由 kind 决定。
+        std::array<double, 6> referenceJoints{}; ///< 初始视觉 MoveJ 使用的当前实际 J1～J6 逆解参考，单位 deg。
         QString cmdId = QStringLiteral("0");      ///< kind=MoveJ 时透传给 SDK 的命令编号。
         QString ucsName = QStringLiteral("Base"); ///< kind=MoveJ 时使用的用户坐标系。
         int timeoutMs = 30000; ///< 到位等待超时，单位 ms，默认 30000ms。
@@ -424,6 +429,10 @@ private:
     /// 只有这个入口允许真正调用 HRIF_RunFunc / HRIF_MoveRelL；成功后接管到位轮询，
     /// 失败则立即走统一错误处理，确保所有运动命令的安全语义一致。
     bool dispatchReadyCommand(const PendingCommand &cmd);
+    /// 通过 HRIF_WayPoint 下发阶段一初始联合 MoveJ；笛卡尔目标有效，关节仅作逆解参考。
+    bool dispatchVisionPregraspMoveJ(const PendingCommand &cmd);
+    /// 通过单条 HRIF_WayPointRel 下发工具系 X/Y/Rz 联合线性精修。
+    bool dispatchVisionFineCorrectionMoveL(const PendingCommand &cmd);
     bool hasActiveRobotCommand() const; ///< 当前是否仍有已下发但尚未完成的 SDK 命令。
     void stopVisionWaitTimeout();       ///< 收到视觉结果后关闭 WaitForVision 的超时保护，避免误判为执行中命令。
     RobotStateSnapshot readRobotStateSnapshot() const;
