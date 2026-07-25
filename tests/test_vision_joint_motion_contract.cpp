@@ -178,6 +178,43 @@ QString requireSingleNormalizedCall(const QString &functionBody,
     return QString();
 }
 
+QString requireNormalizedIfConditionContaining(
+    const QString &source,
+    const QString &requiredFragment,
+    const char *message)
+{
+    const QString normalized = normalizeCppCode(source);
+    requireTrue(normalized.count(requiredFragment) == 1, message);
+
+    const qsizetype fragmentIndex = normalized.indexOf(requiredFragment);
+    const qsizetype ifIndex =
+        normalized.lastIndexOf(QStringLiteral("if("), fragmentIndex);
+    requireTrue(ifIndex >= 0, message);
+
+    const qsizetype openParenthesis = ifIndex + 2;
+    int parenthesisDepth = 0;
+    // 从包含目标片段的最近 if 左括号开始做括号配平，只提取条件本身。
+    // 这样断言不依赖换行和缩进，同时不会把分支体中的后续调用混入条件。
+    for (qsizetype index = openParenthesis;
+         index < normalized.size();
+         ++index) {
+        if (normalized.at(index) == QLatin1Char('(')) {
+            ++parenthesisDepth;
+        } else if (normalized.at(index) == QLatin1Char(')')) {
+            --parenthesisDepth;
+            if (parenthesisDepth == 0) {
+                requireTrue(fragmentIndex < index, message);
+                return normalized.mid(
+                    openParenthesis + 1,
+                    index - openParenthesis - 1);
+            }
+        }
+    }
+
+    requireTrue(false, message);
+    return QString();
+}
+
 } // namespace
 
 int main()
@@ -582,49 +619,49 @@ int main()
         source,
         QStringLiteral("void HuayanScheduler::onPollTick()"),
         "必须能定位运动到位轮询");
-    const QString completionBranch = requireSegmentBetween(
-        pollBody,
-        QStringLiteral(
-            "if (m_stage == Stage::StageOne\n"
-            "            && (m_stageStep == StageStep::MoveToPregrasp"),
-        QStringLiteral("if (m_action == Action::PalletPlace"),
-        "必须能定位初始 MoveJ 和联合精修 MoveL 的统一完成分支");
-    const QString normalizedCompletionBranch =
-        normalizeCppCode(completionBranch);
     const QString pregraspCompletedKindComparison = QStringLiteral(
         "completedCommandKind==PendingCommandKind::VisionPregraspMoveJ");
-    const QString fineCompletedKindComparison = QStringLiteral(
-        "completedCommandKind==PendingCommandKind::VisionFineCorrectionMoveL");
-    const QString initialCompletionCondition = requireSegmentBetween(
-        normalizedCompletionBranch,
-        QStringLiteral(
-            "&&((m_stageStep==StageStep::MoveToPregrasp"),
-        QStringLiteral(
-            ")||(m_stageStep==StageStep::FineCorrectAlignment"),
-        "必须能局部定位 MoveToPregrasp 与活动命令类型的配对条件");
+    const QString completionCondition =
+        requireNormalizedIfConditionContaining(
+            pollBody,
+            pregraspCompletedKindComparison,
+            "必须能结构化提取视觉联合运动完成 if 的完整条件");
+    const QString redundantStageMembershipGuard = QStringLiteral(
+        "&&(m_stageStep==StageStep::MoveToPregrasp"
+        "||m_stageStep==StageStep::FineCorrectAlignment)");
+    QString canonicalCompletionCondition = completionCondition;
+    const qsizetype redundantGuardCount =
+        canonicalCompletionCondition.count(redundantStageMembershipGuard);
     requireTrue(
-        initialCompletionCondition.contains(pregraspCompletedKindComparison)
-            && !initialCompletionCondition.contains(
-                fineCompletedKindComparison),
-        "MoveToPregrasp 到位只能匹配 VisionPregraspMoveJ 活动命令");
-    const QString fineCompletionCondition = requireSegmentBetween(
-        normalizedCompletionBranch,
-        QStringLiteral(
-            ")||(m_stageStep==StageStep::FineCorrectAlignment"),
-        QStringLiteral("recordCompletedVisionAlignmentMove()"),
-        "必须能局部定位 FineCorrectAlignment 与活动命令类型的配对条件");
+        redundantGuardCount <= 1,
+        "视觉联合运动完成条件不得重复叠加状态集合前置约束");
+    if (redundantGuardCount == 1) {
+        // 现有生产代码的状态集合前置约束已被后续两个精确配对分支蕴含。
+        // 仅移除这一段完整且固定的等价冗余，其余条件标记全部保留参与等值比较。
+        canonicalCompletionCondition.remove(redundantStageMembershipGuard);
+    }
+    const QString expectedCompletionCondition = QStringLiteral(
+        "m_stage==Stage::StageOne"
+        "&&((m_stageStep==StageStep::MoveToPregrasp"
+        "&&completedCommandKind==PendingCommandKind::VisionPregraspMoveJ)"
+        "||(m_stageStep==StageStep::FineCorrectAlignment"
+        "&&completedCommandKind"
+        "==PendingCommandKind::VisionFineCorrectionMoveL))");
     requireTrue(
-        fineCompletionCondition.contains(fineCompletedKindComparison)
-            && !fineCompletionCondition.contains(
-                pregraspCompletedKindComparison),
-        "FineCorrectAlignment 到位只能匹配 VisionFineCorrectionMoveL 活动命令");
+        canonicalCompletionCondition == expectedCompletionCondition,
+        "视觉联合运动完成条件必须精确匹配两个状态及其唯一命令类型，不得增加命令 OR 旁路");
+
+    const QString normalizedPollBody = normalizeCppCode(pollBody);
+    const QString normalizedCompletionBranch = requireSegmentBetween(
+        normalizedPollBody,
+        QStringLiteral("if(") + completionCondition + QStringLiteral("){"),
+        QStringLiteral("if(m_action==Action::PalletPlace"),
+        "必须能定位初始 MoveJ 和联合精修 MoveL 的统一完成分支");
     requireContainsInOrder(
         normalizedCompletionBranch,
-        {pregraspCompletedKindComparison,
-         fineCompletedKindComparison,
-         QStringLiteral("recordCompletedVisionAlignmentMove()"),
+        {QStringLiteral("recordCompletedVisionAlignmentMove()"),
          QStringLiteral("enterVisionAlignmentValidation()")},
-        "两类活动命令必须先与各自阶段正确配对，再累计锚点并开启视觉窗口");
+        "精确匹配联合运动完成条件后，必须先累计锚点再开启视觉窗口");
 
     const QString dispatchBody = normalizeCppCode(requireFunctionBody(
         source,
