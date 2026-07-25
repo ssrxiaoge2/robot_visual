@@ -479,6 +479,8 @@ int main()
             "bool HuayanScheduler::queueVisionFineCorrection("),
         "必须实现联合精修命令组装入口");
     const QString normalizedFineQueueBody = normalizeCppCode(fineQueueBody);
+    const QString pendingCorrectionAssignment =
+        QStringLiteral("m_pendingAlignmentCorrection=correction;");
     requireTrue(
         normalizedFineQueueBody.contains(
             QStringLiteral(
@@ -489,6 +491,16 @@ int main()
                     "qAbs(correction.yMm)>"
                     "m_runtimeSettings.safety.maxSingleXyAdjustMm")),
         "联合精修必须分别校验工具 X 和 Y，任一轴超过单次安全上限都应拒绝");
+    requireTrue(
+        normalizedFineQueueBody.count(pendingCorrectionAssignment) == 1,
+        "联合精修函数内必须且只能登记一次待确认修正量");
+    const qsizetype fineQueueGateIndex = normalizedFineQueueBody.indexOf(
+        QStringLiteral("constboolqueued=beginCommandWhenReady(cmd);"));
+    requireTrue(
+        fineQueueGateIndex >= 0
+            && !normalizedFineQueueBody.left(fineQueueGateIndex)
+                    .contains(pendingCorrectionAssignment),
+        "联合精修在 beginCommandWhenReady(cmd) 返回前不得提前登记待确认修正量");
     requireContainsInOrder(
         normalizedFineQueueBody,
         {QStringLiteral("PendingCommandKind::VisionFineCorrectionMoveL"),
@@ -511,20 +523,49 @@ int main()
         QStringLiteral(
             "void HuayanScheduler::recordCompletedVisionAlignmentMove()"),
         "必须实现联合运动确认完成后的状态记录入口");
+    const QString normalizedRecordCompletedBody =
+        normalizeCppCode(recordCompletedBody);
     requireContainsInOrder(
-        recordCompletedBody,
+        normalizedRecordCompletedBody,
         {QStringLiteral(
-             "m_anchorAccumulatedToolX += m_pendingAlignmentCorrection.xMm;"),
+             "m_anchorAccumulatedToolX+=m_pendingAlignmentCorrection.xMm;"),
          QStringLiteral(
-             "m_anchorAccumulatedToolY += m_pendingAlignmentCorrection.yMm;"),
-         QStringLiteral("m_initialVisionMoveCompleted = true;"),
+             "m_anchorAccumulatedToolY+=m_pendingAlignmentCorrection.yMm;"),
+         QStringLiteral("m_initialVisionMoveCompleted=true;"),
          QStringLiteral("++m_completedFineCorrectionCount;"),
-         QStringLiteral("m_pendingAlignmentCorrection = {};")},
+         QStringLiteral("m_pendingAlignmentCorrection={};")},
         "联合运动只允许在确认完成后累计工具 XY，并分别记录首次 MoveJ 或精修完成次数");
     requireTrue(
-        !recordCompletedBody.contains(QStringLiteral(
+        !normalizedRecordCompletedBody.contains(QStringLiteral(
             "m_pendingAlignmentCorrection.rzDeg")),
         "Rz 修正不得加入拍照锚点 XY 累计量");
+
+    const QString initialCompletionBranch = requireSegmentBetween(
+        normalizedRecordCompletedBody,
+        QStringLiteral(
+            "if(m_stageStep==StageStep::MoveToPregrasp){"),
+        QStringLiteral(
+            "}elseif(m_stageStep==StageStep::FineCorrectAlignment){"),
+        "必须能单独定位首次联合 MoveJ 的完成分支");
+    requireTrue(
+        initialCompletionBranch.count(
+            QStringLiteral("m_initialVisionMoveCompleted=true;")) == 1
+            && !initialCompletionBranch.contains(
+                QStringLiteral("m_completedFineCorrectionCount")),
+        "首次联合 MoveJ 完成分支只能设置首次完成标志，不能递增联合精修次数");
+
+    const QString fineCompletionBranch = requireSegmentBetween(
+        normalizedRecordCompletedBody,
+        QStringLiteral(
+            "}elseif(m_stageStep==StageStep::FineCorrectAlignment){"),
+        QStringLiteral("m_pendingAlignmentCorrection={};"),
+        "必须能单独定位联合精修 MoveL 的完成分支");
+    requireTrue(
+        fineCompletionBranch.count(
+            QStringLiteral("++m_completedFineCorrectionCount;")) == 1
+            && !fineCompletionBranch.contains(
+                QStringLiteral("m_initialVisionMoveCompleted")),
+        "联合精修 MoveL 完成分支只能递增精修次数，不能改写首次 MoveJ 完成标志");
 
     const QString pollBody = requireFunctionBody(
         source,
