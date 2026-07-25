@@ -183,8 +183,8 @@ int main()
 
     requireTrue(header.contains(QStringLiteral("resetVisionAnchorTracking()"))
                     && header.contains(QStringLiteral("makeVisionTargetSelectionContext() const"))
-                    && header.contains(QStringLiteral("recordCompletedGrabMove(const RelMove &move)")),
-                "HuayanScheduler 必须声明锚点清零、上下文生成和已完成微调累计接口");
+                    && header.contains(QStringLiteral("recordCompletedVisionAlignmentMove()")),
+                "HuayanScheduler 必须声明锚点清零、上下文生成和联合运动完成累计接口");
     requireTrue(header.contains(QStringLiteral("m_anchorMissingFrames")),
                 "HuayanScheduler 必须维护锁定目标连续丢失帧数，避免视觉丢帧时切换旁站目标");
 
@@ -214,64 +214,56 @@ int main()
     const QString onPollTickBody = requireBracedScopeAfter(
         source, QStringLiteral("void HuayanScheduler::onPollTick()"),
         "必须能定位 HuayanScheduler::onPollTick() 函数体");
-    const QString moveToGrabCompletionBranch = requireBracedScopeAfter(
+    const QString visionAlignmentCompletionBranch = requireBracedScopeAfter(
         onPollTickBody,
-        QStringLiteral("if (m_stage == Stage::StageOne && m_stageStep == StageStep::MoveToGrab)"),
-        "必须能定位 MoveToGrab 单轴完成分支");
+        QStringLiteral(
+            "if (m_stage == Stage::StageOne\n"
+            "            && (m_stageStep == StageStep::MoveToPregrasp"),
+        "必须能定位视觉联合运动完成分支");
     requireContainsInOrder(
-        moveToGrabCompletionBranch,
-        {QStringLiteral("recordCompletedGrabMove(m_grabMoves.at(m_grabMoveIdx))"),
-         QStringLiteral("m_grabMoveIdx++;")},
-        "MoveToGrab 单轴完成后必须在 m_grabMoveIdx++ 之前累计已完成工具系 XY 位移");
+        visionAlignmentCompletionBranch,
+        {QStringLiteral("recordCompletedVisionAlignmentMove();"),
+         QStringLiteral("enterVisionAlignmentValidation();"),
+         QStringLiteral("return;")},
+        "视觉联合运动到位后必须先累计已完成工具 XY，再进入验证状态并结束本轮推进");
 
-    const QString recordCompletedGrabMoveBody = requireBracedScopeAfter(
-        source, QStringLiteral("void HuayanScheduler::recordCompletedGrabMove(const RelMove &move)"),
-        "必须能定位 HuayanScheduler::recordCompletedGrabMove() 函数体");
+    const QString recordCompletedVisionMoveBody = requireBracedScopeAfter(
+        source,
+        QStringLiteral(
+            "void HuayanScheduler::recordCompletedVisionAlignmentMove()"),
+        "必须能定位 HuayanScheduler::recordCompletedVisionAlignmentMove() 函数体");
     requireContainsInOrder(
-        recordCompletedGrabMoveBody,
-        {QStringLiteral("const double signedDistance = move.direction ? move.distance : -move.distance;"),
-         QStringLiteral("if (move.poseId == 0)"),
-         QStringLiteral("m_anchorAccumulatedToolX += signedDistance;"),
-         QStringLiteral("else if (move.poseId == 1)"),
-         QStringLiteral("m_anchorAccumulatedToolY += signedDistance;")},
-        "recordCompletedGrabMove() 必须按方向符号累计工具系 X/Y 已完成位移");
-    requireTrue(recordCompletedGrabMoveBody.count(QStringLiteral("move.poseId ==")) == 2,
-                "recordCompletedGrabMove() 只能累计 poseId == 0 和 poseId == 1");
+        recordCompletedVisionMoveBody,
+        {QStringLiteral(
+             "m_anchorAccumulatedToolX += m_pendingAlignmentCorrection.xMm;"),
+         QStringLiteral(
+             "m_anchorAccumulatedToolY += m_pendingAlignmentCorrection.yMm;"),
+         QStringLiteral("m_pendingAlignmentCorrection = {};")},
+        "联合 MoveJ/MoveL 只有确认到位后才能把待完成工具 X/Y 写入锚点累计");
+    requireTrue(
+        !recordCompletedVisionMoveBody.contains(QStringLiteral("rzDeg")),
+        "联合运动完成记录不得把 Rz 混入拍照锚点 XY 累计");
 
     requireTrue(source.contains(QStringLiteral("HUAYAN_MAX_SINGLE_XY_ADJUST_MM"))
                     && source.contains(QStringLiteral("HUAYAN_MAX_Z_DESCEND_MM")),
                 "阶段一必须有独立的 XY 单步和 Z 下探硬保护常量");
 
-    requireTrue(source.contains(QStringLiteral("validateStageOneRelMoveBeforeDispatch"))
-                    && source.contains(QStringLiteral("目标不可信：计划"))
-                    && source.contains(QStringLiteral("拒绝下发 MoveRelL")),
-                "阶段一相对运动下发前必须执行 fail-closed 保护并记录原因");
-
-    const QString executeNextGrabMoveBody = requireBracedScopeAfter(
-        source, QStringLiteral("bool HuayanScheduler::executeNextGrabMove()"),
-        "必须能定位 HuayanScheduler::executeNextGrabMove() 函数体");
-    requireContainsInOrder(
-        executeNextGrabMoveBody,
-        {QStringLiteral("const RelMove &mv = m_grabMoves.at(m_grabMoveIdx);"),
-         QStringLiteral("validateStageOneRelMoveBeforeDispatch(mv)"),
-         QStringLiteral("PendingCommand cmd;")},
-        "executeNextGrabMove() 必须在创建 PendingCommand 前校验阶段一相对运动");
-    requireContainsInOrder(
-        executeNextGrabMoveBody,
-        {QStringLiteral("if (!validateStageOneRelMoveBeforeDispatch(mv))"),
-         QStringLiteral("return false;"),
-         QStringLiteral("beginCommandWhenReady(cmd)")},
-        "executeNextGrabMove() 必须在 beginCommandWhenReady 前 fail-closed 拒绝保护失败的相对运动");
-
-    const QString validateStageOneRelMoveBody = requireBracedScopeAfter(
-        source, QStringLiteral("bool HuayanScheduler::validateStageOneRelMoveBeforeDispatch(const RelMove &move)"),
-        "必须能定位 validateStageOneRelMoveBeforeDispatch() 函数体");
-    requireTrue(validateStageOneRelMoveBody.contains(QStringLiteral("move.poseId == 0 || move.poseId == 1"))
-                    && !validateStageOneRelMoveBody.contains(QStringLiteral("move.poseId == 5")),
-                "validateStageOneRelMoveBeforeDispatch() 只能限制 poseId == 0 或 poseId == 1，不能限制 Rz");
-    requireTrue(validateStageOneRelMoveBody.contains(
-                    QStringLiteral("move.distance > m_runtimeSettings.safety.maxSingleXyAdjustMm")),
-                "validateStageOneRelMoveBeforeDispatch() 必须用 move.distance 与运行时 XY 安全上限比较");
+    const QString queueFineCorrectionBody = requireBracedScopeAfter(
+        source,
+        QStringLiteral(
+            "bool HuayanScheduler::queueVisionFineCorrection("),
+        "必须能定位 queueVisionFineCorrection() 函数体");
+    requireTrue(
+        queueFineCorrectionBody.count(QStringLiteral("qAbs(correction.")) == 2
+            && queueFineCorrectionBody.contains(QStringLiteral("qAbs(correction.xMm)"))
+            && queueFineCorrectionBody.contains(QStringLiteral("qAbs(correction.yMm)"))
+            && queueFineCorrectionBody.contains(QStringLiteral(
+                "m_runtimeSettings.safety.maxSingleXyAdjustMm"))
+            && queueFineCorrectionBody.contains(
+                QStringLiteral("PendingCommandKind::VisionFineCorrectionMoveL"))
+            && queueFineCorrectionBody.contains(
+                QStringLiteral("目标不可信：计划联合精修")),
+        "联合精修必须分别保护 X/Y 单轴上限，失败时 fail-closed，成功时只创建一条联合 MoveL");
 
     requireTrue(source.contains(QStringLiteral("qMin(kMaxDescend, HUAYAN_MAX_Z_DESCEND_MM)")),
                 "Z 下探计算必须同时受原有 kMaxDescend 和新的硬保护上限约束");

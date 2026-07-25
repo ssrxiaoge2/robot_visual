@@ -514,7 +514,11 @@ void HuayanScheduler::startStageOne()
     clearActionState();
     m_stage = Stage::StageOne;
     m_stageStep = StageStep::MoveToSurvey;
-    m_grabIterations = 0;
+    // 每个新任务只允许一次首次联合 MoveJ，并从零开始统计真正到位的联合精修 MoveL。
+    // 待确认修正必须同步清空，避免上一次停止/失败遗留量在新任务到位时误累计到锚点。
+    m_initialVisionMoveCompleted = false;
+    m_completedFineCorrectionCount = 0;
+    m_pendingAlignmentCorrection = {};
     m_searchDescendCount = 0;
     m_searchDescendedMm = 0.0;
     resetStableZValidation();
@@ -662,6 +666,9 @@ void HuayanScheduler::stop(bool emitStoppedLog)
     m_waitingPreGripScan = false;
     m_preGripScanSearchCurrentY = 0.0;
     m_preGripScanSearchTargetY = 0.0;
+    m_initialVisionMoveCompleted = false;
+    m_completedFineCorrectionCount = 0;
+    m_pendingAlignmentCorrection = {};
     m_stage = Stage::None;
     m_stageStep = StageStep::None;
     if (emitStoppedLog) {
@@ -726,6 +733,9 @@ void HuayanScheduler::onPollTick()
                 return;
             }
         }
+        // 清空活动命令前保存本次真正到位的命令种类；阶段步骤与命令种类必须同时匹配，
+        // 防止状态被外部停止/切换后把无关动作误记为视觉联合运动完成。
+        const PendingCommandKind completedCommandKind = m_activeCommandKind;
         const bool completedGrabZDescend =
             m_stage == Stage::StageOne
             && m_stageStep == StageStep::DescendZ
@@ -746,6 +756,20 @@ void HuayanScheduler::onPollTick()
         m_loggedRunFuncScriptRunning = false;
         m_pollTimer->stop();
         m_timeoutTimer->stop();
+        if (m_stage == Stage::StageOne
+            && (m_stageStep == StageStep::MoveToPregrasp
+                || m_stageStep == StageStep::FineCorrectAlignment)
+            && ((m_stageStep == StageStep::MoveToPregrasp
+                 && completedCommandKind == PendingCommandKind::VisionPregraspMoveJ)
+                || (m_stageStep == StageStep::FineCorrectAlignment
+                    && completedCommandKind
+                        == PendingCommandKind::VisionFineCorrectionMoveL))) {
+            // 只有控制器轮询确认到位后才能累计锚点或精修次数；随后再开启新视觉窗口。
+            // SDK 拒绝、命令门控失败、超时和 stop() 都不会进入此分支。
+            recordCompletedVisionAlignmentMove();
+            enterVisionAlignmentValidation();
+            return;
+        }
         if (m_action == Action::PalletPlace
             && (m_actionStep == ActionStep::MovePalletXY
                 || m_actionStep == ActionStep::DescendPalletZ
@@ -828,23 +852,8 @@ void HuayanScheduler::onPollTick()
             beginCommandWhenReady(cmd);
             return;
         }
-        // MoveToGrab 是多次 MoveRelL 串联，单次到位后继续下一个偏移分量
-        if (m_stage == Stage::StageOne && m_stageStep == StageStep::MoveToGrab) {
-            recordCompletedGrabMove(m_grabMoves.at(m_grabMoveIdx));
-            m_grabMoveIdx++;
-            // 运动结束后机器人状态切换有滞后(nMovingState=0 但仍 RobotInMoving)，
-            // 高速下稍等再发下一轴，避免 20018 RobotInMoving
-            const quint64 seq = nextCallbackSeq();
-            QTimer::singleShot(300, this, [this, seq] {
-                if (seq == m_commandSeq
-                    && m_stage == Stage::StageOne
-                    && m_stageStep == StageStep::MoveToGrab)
-                    executeNextGrabMove();
-            });
-        } else {
-            advanceStep();
-            proceedStage();
-        }
+        advanceStep();
+        proceedStage();
     }
 }
 
@@ -877,6 +886,13 @@ void HuayanScheduler::advanceStep()
     case Stage::StageOne:
         switch (m_stageStep) {
         case StageStep::MoveToSurvey:  m_stageStep = StageStep::WaitForVision; break;
+        case StageStep::MoveToPregrasp:
+        case StageStep::FineCorrectAlignment:
+            m_stageStep = StageStep::ValidateVisionAlignment;
+            break;
+        case StageStep::ValidateVisionAlignment:
+            m_stageStep = StageStep::WaitForVision;
+            break;
         case StageStep::DescendZ:
             m_stageStep = m_preGripScanEnabled ? StageStep::WaitPreGripScan : StageStep::CloseGripper;
             break;
@@ -927,7 +943,9 @@ int HuayanScheduler::stepIndexFor(StageStep step)
     case StageStep::ValidateStableZ:
     case StageStep::SearchDescend:           return 0;
     case StageStep::DepthDescent:            return 0;
-    case StageStep::MoveToGrab:
+    case StageStep::ValidateVisionAlignment: return 0;
+    case StageStep::MoveToPregrasp:
+    case StageStep::FineCorrectAlignment:
     case StageStep::DescendZ:
     case StageStep::WaitPreGripScan:
     case StageStep::CloseGripper:
@@ -966,11 +984,17 @@ void HuayanScheduler::executeCurrentStep()
             // Z 稳定验证的下一次请求由 requestNextStableZFrame() 定时发起；
             // 此状态绝不下发机械臂运动，确保全部观察帧来自同一静止位姿。
             break;
+        case StageStep::ValidateVisionAlignment:
+            // 正常路径由运动完成分支直接调用 enterVisionAlignmentValidation()；
+            // 若兼容推进路径进入此状态，也统一启动相同的稳定等待，避免新增枚举成为死状态。
+            enterVisionAlignmentValidation();
+            break;
         case StageStep::SearchDescend:
         case StageStep::DepthDescent:
             break;
-        case StageStep::MoveToGrab:
-            executeNextGrabMove();
+        case StageStep::MoveToPregrasp:
+        case StageStep::FineCorrectAlignment:
+            // 两种联合运动均由视觉回调完成命令组装并进入统一门控，此处只表示等待到位。
             break;
         case StageStep::DescendZ: {
             const double plannedDescend = m_grabOffset.z - m_grabZClearance;
@@ -1172,14 +1196,43 @@ VisionHttpClient::TargetSelectionContext HuayanScheduler::makeVisionTargetSelect
     return context;
 }
 
-void HuayanScheduler::recordCompletedGrabMove(const RelMove &move)
+void HuayanScheduler::recordCompletedVisionAlignmentMove()
 {
-    // 只累计阶段一闭环中已经实际到位的工具系 XY；Rz/Z 不改变拍照锚点平面位置。
-    const double signedDistance = move.direction ? move.distance : -move.distance;
-    if (move.poseId == 0)
-        m_anchorAccumulatedToolX += signedDistance;
-    else if (move.poseId == 1)
-        m_anchorAccumulatedToolY += signedDistance;
+    // pending 中保存的是统一方向换算后的实际工具系修正；只有运动轮询确认到位后，
+    // 才能把 X/Y 写入拍照锚点。Rz 只改变姿态，不得污染锚点平面累计量。
+    m_anchorAccumulatedToolX += m_pendingAlignmentCorrection.xMm;
+    m_anchorAccumulatedToolY += m_pendingAlignmentCorrection.yMm;
+
+    if (m_stageStep == StageStep::MoveToPregrasp) {
+        m_initialVisionMoveCompleted = true;
+    } else if (m_stageStep == StageStep::FineCorrectAlignment) {
+        ++m_completedFineCorrectionCount;
+    }
+
+    m_pendingAlignmentCorrection = {};
+}
+
+void HuayanScheduler::enterVisionAlignmentValidation()
+{
+    // 任务 6 将在 ValidateVisionAlignment 内统一 XY/Rz 与 Z 窗口判定。本任务先把新状态
+    // 兼容映射到现有 WaitForVision → ValidateStableZ 路径，确保中间提交可运行且无死状态。
+    m_stageStep = StageStep::ValidateVisionAlignment;
+    emit logMessage(
+        QStringLiteral("[阶段一] 联合运动已到位，等待视觉稳定后验证（已完成精修 %1/%2）")
+            .arg(m_completedFineCorrectionCount)
+            .arg(m_runtimeSettings.vision.maxFineCorrectionCount));
+
+    const quint64 seq = nextCallbackSeq();
+    QTimer::singleShot(m_runtimeSettings.vision.settleMs, this, [this, seq] {
+        if (seq != m_commandSeq
+            || m_stage != Stage::StageOne
+            || m_stageStep != StageStep::ValidateVisionAlignment) {
+            return;
+        }
+
+        m_stageStep = StageStep::WaitForVision;
+        proceedStage();
+    });
 }
 
 void HuayanScheduler::proceedAction()
@@ -1793,10 +1846,41 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
     }
 
     m_grabOffset = { x, y, z, 0.0, 0.0, effectiveRz };
-    emit logMessage(QStringLiteral("[阶段一] 视觉偏移(工具系) X=%1 Y=%2 Z=%3 Rz=%4 (迭代 %5)")
+    emit logMessage(QStringLiteral("[阶段一] 视觉偏移(工具系) X=%1 Y=%2 Z=%3 Rz=%4（首次MoveJ=%5，已完成精修=%6/%7）")
                         .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1)
                         .arg(z, 0, 'f', 1).arg(effectiveRz, 0, 'f', 1)
-                        .arg(m_grabIterations));
+                        .arg(m_initialVisionMoveCompleted
+                                 ? QStringLiteral("已完成")
+                                 : QStringLiteral("待执行"))
+                        .arg(m_completedFineCorrectionCount)
+                        .arg(m_runtimeSettings.vision.maxFineCorrectionCount));
+
+    // Rz 大角度的第一帧只允许登记候选值，不能让 X/Y 先行运动后消耗唯一一次首次 MoveJ。
+    // 等下一真实帧通过原有方向和幅值确认后，再把完整 X/Y/Rz 作为一条联合命令下发。
+    if (suppressLargeRzRotation) {
+        const quint64 seq = nextCallbackSeq();
+        QTimer::singleShot(m_runtimeSettings.vision.settleMs, this, [this, seq] {
+            if (seq == m_commandSeq
+                && m_stage == Stage::StageOne
+                && m_stageStep == StageStep::WaitForVision) {
+                proceedStage();
+            }
+        });
+        return;
+    }
+
+    const VisionAlignment::Sample sample{x, y, z, effectiveRz, true};
+
+    // 首次可信目标无论是否已经落在容差内，都必须走同一条绝对预抓取 MoveJ。
+    // 这保证首次运动固定且仅固定一次，并且不会从初始帧直接绕过到 Z 下探。
+    if (!m_initialVisionMoveCompleted) {
+        if (!queueInitialVisionPregrasp(sample))
+            return;
+
+        m_stageStep = StageStep::MoveToPregrasp;
+        emit logMessage(QStringLiteral("[阶段一] 首次可信目标已排队为单条联合 MoveJ，等待控制器确认到位"));
+        return;
+    }
 
     const bool aligned = !suppressLargeRzRotation
         && qAbs(x) < m_runtimeSettings.vision.xyToleranceMm
@@ -1828,9 +1912,11 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
         return;
     }
 
-    if (m_grabIterations >= m_runtimeSettings.vision.maxGrabIterations) {
-        emitOperationError(QStringLiteral("[阶段一] 视觉闭环对准超限：迭代 %1 次后仍未收敛（X=%2 Y=%3 Rz=%4，阈值 XY<%5mm/Rz<%6°）")
-                               .arg(m_grabIterations)
+    if (m_completedFineCorrectionCount
+        >= m_runtimeSettings.vision.maxFineCorrectionCount) {
+        emitOperationError(QStringLiteral("[阶段一] 联合精修次数已耗尽：完成 %1/%2 次后仍未收敛（X=%3 Y=%4 Rz=%5，阈值 XY<%6mm/Rz<%7°）")
+                               .arg(m_completedFineCorrectionCount)
+                               .arg(m_runtimeSettings.vision.maxFineCorrectionCount)
                                .arg(x, 0, 'f', 1)
                                .arg(y, 0, 'f', 1)
                                .arg(effectiveRz, 0, 'f', 1)
@@ -1839,22 +1925,15 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
         return;
     }
 
-    // 未收敛：工具坐标系 XY 平面微调，移动完成后回 WaitForVision 重新拍照
-    m_grabIterations++;
-    m_grabMoves.clear();
-    auto addMove = [this](int poseId, double v) {
-        if (qAbs(v) < kOffsetIgnoreDistance) return;   // 忽略 <0.5mm 的微小偏移
-        m_grabMoves.append({ poseId, v >= 0 ? 1 : 0, qAbs(v) });
-    };
-    // 方向修正（联机实测）：X 方向一致直接施加，Y 与 Rz 方向相反需取反
-    // Rz 取反：眼在手上闭环时，按 +rz 旋转会使下帧视觉角同向变大、机械臂持续旋转累积至 180°
-    addMove(0, x);    // X
-    addMove(1, -y);   // Y
-    addMove(5, -effectiveRz);  // Rz 旋转
-
-    m_grabMoveIdx = 0;
-    m_stageStep = StageStep::MoveToGrab;
-    proceedStage();
+    // 首次 MoveJ 后仍未收敛时，只允许一条 Tool 模式 MoveL 联合修正 X/Y/Rz。
+    // 已完成次数只在 onPollTick() 确认到位后递增，排队、SDK 下发或运动失败均不消耗次数。
+    const VisionAlignment::ToolCorrection correction =
+        VisionAlignment::toToolCorrection(sample);
+    if (queueVisionFineCorrection(correction)) {
+        emit logMessage(QStringLiteral("[阶段一] 已排队第 %1/%2 条联合精修 MoveL，等待控制器确认到位")
+                            .arg(m_completedFineCorrectionCount + 1)
+                            .arg(m_runtimeSettings.vision.maxFineCorrectionCount));
+    }
 }
 
 void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz,
@@ -2007,65 +2086,6 @@ void HuayanScheduler::onVisionErrorForPickup(const QString &msg)
 
     // 通信/解析错误不代表目标不在视野内，继续下移没有意义，应直接按视觉异常失败处理。
     emitOperationError(QStringLiteral("[阶段一] 视觉推理失败：%1").arg(msg));
-}
-
-bool HuayanScheduler::executeNextGrabMove()
-{
-    if (m_grabMoveIdx >= m_grabMoves.size()) {
-        // 本次 XY 微调完成，回到拍照状态，等视觉出新帧后重新检测（闭环）
-        emit logMessage(QStringLiteral("[阶段一] 本次微调完成，等待视觉更新后重新检测"));
-        m_stageStep = StageStep::WaitForVision;
-        const quint64 seq = nextCallbackSeq();
-        QTimer::singleShot(m_runtimeSettings.vision.settleMs, this, [this, seq] {
-            if (seq == m_commandSeq
-                && m_stage == Stage::StageOne
-                && m_stageStep == StageStep::WaitForVision)
-                proceedStage();
-        });
-        return true;
-    }
-
-    if (!ensureConnected())
-        return false;
-
-    static const QString axisName[] = {
-        QStringLiteral("X"),  QStringLiteral("Y"),  QStringLiteral("Z"),
-        QStringLiteral("Rx"), QStringLiteral("Ry"), QStringLiteral("Rz")
-    };
-    const RelMove &mv = m_grabMoves.at(m_grabMoveIdx);
-    if (!validateStageOneRelMoveBeforeDispatch(mv))
-        return false;
-
-    emit logMessage(QStringLiteral("[阶段一] 工具系微调 %1 %2 %3")
-                        .arg(axisName[mv.poseId])
-                        .arg(mv.direction ? QStringLiteral("正向") : QStringLiteral("负向"))
-                        .arg(mv.distance, 0, 'f', 1));
-
-    PendingCommand cmd;
-    cmd.kind = PendingCommandKind::MoveRelTool;
-    cmd.label = QStringLiteral("相对运动 %1").arg(axisName[mv.poseId]);
-    cmd.poseId = mv.poseId;
-    cmd.direction = mv.direction;
-    cmd.distance = mv.distance;
-    return beginCommandWhenReady(cmd);
-}
-
-bool HuayanScheduler::validateStageOneRelMoveBeforeDispatch(const RelMove &move)
-{
-    if (m_stage != Stage::StageOne)
-        return true;
-
-    const bool isXY = move.poseId == 0 || move.poseId == 1;
-    if (isXY && move.distance > m_runtimeSettings.safety.maxSingleXyAdjustMm) {
-        const QString axis = move.poseId == 0 ? QStringLiteral("X") : QStringLiteral("Y");
-        emitOperationError(QStringLiteral("[阶段一] 目标不可信：计划 %1 微调 %2mm 超过单次上限 %3mm，拒绝下发 MoveRelL")
-                               .arg(axis)
-                               .arg(move.distance, 0, 'f', 1)
-                               .arg(m_runtimeSettings.safety.maxSingleXyAdjustMm, 0, 'f', 1));
-        return false;
-    }
-
-    return true;
 }
 
 void HuayanScheduler::setSurveyPose(const HuayanScheduler::Pose &p)
@@ -2349,9 +2369,52 @@ bool HuayanScheduler::queueInitialVisionPregrasp(
         return false;
     }
 
-    // 本任务只组装 helper，不从旧 setGrabOffset() 接线。修正量在运动确认前仅作为
-    // “待完成”状态保存，绝不能提前写入 m_anchorAccumulatedToolX/Y。
+    // 修正量在运动确认前仅作为“待完成”状态保存，绝不能提前写入
+    // m_anchorAccumulatedToolX/Y；实际累计统一由 onPollTick() 的到位分支完成。
     m_pendingAlignmentCorrection = correction;
+    return true;
+}
+
+bool HuayanScheduler::queueVisionFineCorrection(
+    const VisionAlignment::ToolCorrection &correction)
+{
+    // X/Y 必须分别校验，不能使用合成距离掩盖某一轴单独越过运行时安全上限。
+    if (qAbs(correction.xMm)
+        > m_runtimeSettings.safety.maxSingleXyAdjustMm) {
+        emitOperationError(
+            QStringLiteral("[阶段一] 目标不可信：计划联合精修 X=%1mm 超过单次上限 %2mm，拒绝下发 MoveL")
+                .arg(correction.xMm, 0, 'f', 1)
+                .arg(m_runtimeSettings.safety.maxSingleXyAdjustMm, 0, 'f', 1));
+        return false;
+    }
+    if (qAbs(correction.yMm)
+        > m_runtimeSettings.safety.maxSingleXyAdjustMm) {
+        emitOperationError(
+            QStringLiteral("[阶段一] 目标不可信：计划联合精修 Y=%1mm 超过单次上限 %2mm，拒绝下发 MoveL")
+                .arg(correction.yMm, 0, 'f', 1)
+                .arg(m_runtimeSettings.safety.maxSingleXyAdjustMm, 0, 'f', 1));
+        return false;
+    }
+
+    PendingCommand cmd;
+    cmd.kind = PendingCommandKind::VisionFineCorrectionMoveL;
+    cmd.label = QStringLiteral("视觉联合精修");
+    cmd.targetPose.x = correction.xMm;
+    cmd.targetPose.y = correction.yMm;
+    cmd.targetPose.z = 0;
+    cmd.targetPose.rx = 0;
+    cmd.targetPose.ry = 0;
+    cmd.targetPose.rz = correction.rzDeg;
+
+    // 统一门控可能因为已有命令、控制器状态或 SDK 下发失败而返回 false。
+    // 只有门控明确接受后，才能覆盖 pending 并进入精修状态，防止失败命令污染锚点。
+    const bool queued = beginCommandWhenReady(cmd);
+    if (!queued) {
+        return false;
+    }
+
+    m_pendingAlignmentCorrection = correction;
+    m_stageStep = StageStep::FineCorrectAlignment;
     return true;
 }
 

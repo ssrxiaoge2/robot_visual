@@ -186,6 +186,106 @@ int main()
         readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/huayanScheduler.h"));
     const QString source =
         readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/huayanScheduler.cpp"));
+    const QString runtimeSettingsHeader =
+        readUtf8File(QStringLiteral(PROJECT_SOURCE_DIR "/src/runtimesettings.h"));
+
+    requireContainsInOrder(
+        header,
+        {QStringLiteral("MoveToPregrasp,"),
+         QStringLiteral("ValidateVisionAlignment,"),
+         QStringLiteral("FineCorrectAlignment,")},
+        "阶段一必须声明初始联合对准、运动后验证和联合精修三个独立状态");
+    requireContainsInOrder(
+        header,
+        {QStringLiteral("bool m_initialVisionMoveCompleted = false;"),
+         QStringLiteral("int m_completedFineCorrectionCount = 0;"),
+         QStringLiteral(
+             "VisionAlignment::ToolCorrection m_pendingAlignmentCorrection;")},
+        "阶段一必须保存首次 MoveJ 完成标志、已完成精修次数和待确认联合修正");
+    requireTrue(
+        header.contains(QStringLiteral(
+            "bool queueVisionFineCorrection("))
+            && header.contains(QStringLiteral(
+                "void recordCompletedVisionAlignmentMove();"))
+            && header.contains(QStringLiteral(
+                "void enterVisionAlignmentValidation();")),
+        "调度器必须声明联合精修排队、完成后记录和进入验证的状态迁移入口");
+    requireTrue(!header.contains(QStringLiteral("m_grabMoves")),
+                "阶段一不得继续持有逐轴抓取动作队列");
+    requireTrue(!header.contains(QStringLiteral("m_grabMoveIdx")),
+                "阶段一不得继续持有逐轴抓取动作索引");
+    requireTrue(!header.contains(QStringLiteral("m_grabIterations")),
+                "新闭环不得继续使用旧15轮计数");
+    requireTrue(!source.contains(QStringLiteral("executeNextGrabMove()")),
+                "生产路径不得继续执行逐轴抓取循环");
+    requireTrue(!source.contains(QStringLiteral(
+                    "m_runtimeSettings.vision.maxGrabIterations")),
+                "新生产路径不得读取旧最大迭代参数");
+    requireTrue(!runtimeSettingsHeader.contains(
+                    QStringLiteral("maxGrabIterations")),
+                "运行设置不得继续暴露旧15轮逐轴循环字段");
+
+    const QString startStageOneBody = requireFunctionBody(
+        source,
+        QStringLiteral("void HuayanScheduler::startStageOne()"),
+        "必须能定位阶段一启动状态重置");
+    requireContainsInOrder(
+        startStageOneBody,
+        {QStringLiteral("m_initialVisionMoveCompleted = false;"),
+         QStringLiteral("m_completedFineCorrectionCount = 0;"),
+         QStringLiteral("m_pendingAlignmentCorrection = {};"),
+         QStringLiteral("resetStableZValidation();"),
+         QStringLiteral("resetVisionAnchorTracking();")},
+        "每次启动阶段一必须清空有限联合闭环状态、稳定窗口和锚点累计");
+
+    const QString setGrabOffsetBody = requireFunctionBody(
+        source,
+        QStringLiteral(
+            "void HuayanScheduler::setGrabOffset("
+            "double x, double y, double z, double rz)"),
+        "必须能定位阶段一四参数视觉结果处理入口");
+    const QString normalizedSetGrabOffsetBody =
+        normalizeCppCode(setGrabOffsetBody);
+    requireTrue(
+        normalizedSetGrabOffsetBody.count(
+            QStringLiteral("queueInitialVisionPregrasp(sample)")) == 1,
+        "首次可信目标必须且只能从生产入口排队一次初始联合 MoveJ");
+    requireContainsInOrder(
+        normalizedSetGrabOffsetBody,
+        {QStringLiteral(
+             "constVisionAlignment::Samplesample{x,y,z,effectiveRz,true};"),
+         QStringLiteral("if(!m_initialVisionMoveCompleted){"),
+         QStringLiteral("if(!queueInitialVisionPregrasp(sample))"),
+         QStringLiteral("return;"),
+         QStringLiteral("m_stageStep=StageStep::MoveToPregrasp;"),
+         QStringLiteral("return;"),
+         QStringLiteral("constboolaligned=")},
+        "首次样本即使已在容差内也必须先排队联合 MoveJ，不能直接进入对准或 Z 下探分支");
+    requireContainsInOrder(
+        normalizedSetGrabOffsetBody,
+        {QStringLiteral(
+             "m_completedFineCorrectionCount>="
+             "m_runtimeSettings.vision.maxFineCorrectionCount"),
+         QStringLiteral("emitOperationError("),
+         QStringLiteral("return;"),
+         QStringLiteral(
+             "VisionAlignment::toToolCorrection(sample)"),
+         QStringLiteral("queueVisionFineCorrection(correction)")},
+        "首次 MoveJ 后只有已完成精修次数未达上限时才允许排队下一条联合 MoveL");
+
+    const QString enterValidationBody = requireFunctionBody(
+        source,
+        QStringLiteral(
+            "void HuayanScheduler::enterVisionAlignmentValidation()"),
+        "必须实现联合运动后的兼容视觉验证入口");
+    requireContainsInOrder(
+        enterValidationBody,
+        {QStringLiteral(
+             "m_stageStep = StageStep::ValidateVisionAlignment;"),
+         QStringLiteral("QTimer::singleShot("),
+         QStringLiteral("m_stageStep = StageStep::WaitForVision;"),
+         QStringLiteral("proceedStage();")},
+        "联合运动完成后必须经过新验证状态并回到现有视觉回调路径，不能形成死状态");
 
     requireContainsInOrder(
         header,
@@ -372,6 +472,76 @@ int main()
         normalizedQueueBody.count(QStringLiteral("emitOperationError(")) >= 2
             && normalizedQueueBody.count(QStringLiteral("returnfalse;")) >= 2,
         "读取或位姿组合失败必须经统一错误出口停止调度");
+
+    const QString fineQueueBody = requireFunctionBody(
+        source,
+        QStringLiteral(
+            "bool HuayanScheduler::queueVisionFineCorrection("),
+        "必须实现联合精修命令组装入口");
+    const QString normalizedFineQueueBody = normalizeCppCode(fineQueueBody);
+    requireTrue(
+        normalizedFineQueueBody.contains(
+            QStringLiteral(
+                "qAbs(correction.xMm)>"
+                "m_runtimeSettings.safety.maxSingleXyAdjustMm"))
+            && normalizedFineQueueBody.contains(
+                QStringLiteral(
+                    "qAbs(correction.yMm)>"
+                    "m_runtimeSettings.safety.maxSingleXyAdjustMm")),
+        "联合精修必须分别校验工具 X 和 Y，任一轴超过单次安全上限都应拒绝");
+    requireContainsInOrder(
+        normalizedFineQueueBody,
+        {QStringLiteral("PendingCommandKind::VisionFineCorrectionMoveL"),
+         QStringLiteral("cmd.targetPose.x=correction.xMm;"),
+         QStringLiteral("cmd.targetPose.y=correction.yMm;"),
+         QStringLiteral("cmd.targetPose.z=0;"),
+         QStringLiteral("cmd.targetPose.rx=0;"),
+         QStringLiteral("cmd.targetPose.ry=0;"),
+         QStringLiteral("cmd.targetPose.rz=correction.rzDeg;"),
+         QStringLiteral("constboolqueued=beginCommandWhenReady(cmd);"),
+         QStringLiteral("if(!queued){"),
+         QStringLiteral("returnfalse;"),
+         QStringLiteral("m_pendingAlignmentCorrection=correction;"),
+         QStringLiteral("m_stageStep=StageStep::FineCorrectAlignment;"),
+         QStringLiteral("returntrue;")},
+        "联合精修必须用单条 Tool MoveL，并仅在统一门控接受后登记待确认修正和状态");
+
+    const QString recordCompletedBody = requireFunctionBody(
+        source,
+        QStringLiteral(
+            "void HuayanScheduler::recordCompletedVisionAlignmentMove()"),
+        "必须实现联合运动确认完成后的状态记录入口");
+    requireContainsInOrder(
+        recordCompletedBody,
+        {QStringLiteral(
+             "m_anchorAccumulatedToolX += m_pendingAlignmentCorrection.xMm;"),
+         QStringLiteral(
+             "m_anchorAccumulatedToolY += m_pendingAlignmentCorrection.yMm;"),
+         QStringLiteral("m_initialVisionMoveCompleted = true;"),
+         QStringLiteral("++m_completedFineCorrectionCount;"),
+         QStringLiteral("m_pendingAlignmentCorrection = {};")},
+        "联合运动只允许在确认完成后累计工具 XY，并分别记录首次 MoveJ 或精修完成次数");
+    requireTrue(
+        !recordCompletedBody.contains(QStringLiteral(
+            "m_pendingAlignmentCorrection.rzDeg")),
+        "Rz 修正不得加入拍照锚点 XY 累计量");
+
+    const QString pollBody = requireFunctionBody(
+        source,
+        QStringLiteral("void HuayanScheduler::onPollTick()"),
+        "必须能定位运动到位轮询");
+    const QString completionBranch = requireSegmentBetween(
+        pollBody,
+        QStringLiteral(
+            "if (m_stage == Stage::StageOne\n"
+            "            && (m_stageStep == StageStep::MoveToPregrasp"),
+        QStringLiteral("if (m_action == Action::PalletPlace"),
+        "必须能定位初始 MoveJ 和联合精修 MoveL 的统一完成分支");
+    requireContainsInOrder(
+        completionBranch,
+        {QStringLiteral("recordCompletedVisionAlignmentMove()"),
+         QStringLiteral("enterVisionAlignmentValidation()")},
+        "联合运动必须确认完成后再累计锚点并开启视觉窗口");
 
     const QString dispatchBody = normalizeCppCode(requireFunctionBody(
         source,

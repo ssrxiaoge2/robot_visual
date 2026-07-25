@@ -252,7 +252,9 @@ private:
         ValidateStableZ,         ///< X/Y/Rz 对准后保持静止，连续验证多帧 Z 深度。
         SearchDescend,           ///< 无目标时沿 Z 搜索下移。
         DepthDescent,            ///< 视觉深度过大时自动下探并重新检测。
-        MoveToGrab,              ///< 按 X/Y/Rz 分轴执行视觉闭环偏移。
+        MoveToPregrasp,          ///< 根据首次可信目标，一次绝对 MoveJ 到目标正上方。
+        ValidateVisionAlignment, ///< 联合运动完成后保持静止，兼容进入现有视觉验证流程。
+        FineCorrectAlignment,    ///< 使用单条工具坐标系 MoveL 联合精修 X/Y/Rz。
         DescendZ,                ///< 根据视觉深度向夹取高度下探。
         WaitPreGripScan,         ///< 夹紧前安全暂停，等待扫码决策。
         MoveToPickup,            ///< 旧步骤名，保留枚举兼容性。
@@ -268,7 +270,8 @@ private:
         RunUnloadFunc            ///< 新主流程调用工位倒料函数。
     };
 
-    // 工具坐标系单轴相对运动（HRIF_MoveRelL），用于视觉偏移的分轴串联微调
+    // 工具坐标系单轴相对运动（HRIF_MoveRelL）；阶段一旧逐轴视觉队列已删除，
+    // 该结构现在仅供码垛路径 m_palletMoves 保存 X/Y/Z/Rz 相对动作。
     struct RelMove {
         int poseId;     // 0~5 = X/Y/Z/Rx/Ry/Rz
         int direction;  // 0=负向, 1=正向
@@ -301,9 +304,6 @@ private:
     void proceedStage();
     void advanceStep();
     void executeCurrentStep();
-    bool executeNextGrabMove();
-    /// 阶段一相对运动下发前的上位机硬保护；单位为 mm，返回 false 表示已 fail-closed 记录错误并拒绝继续下发。
-    bool validateStageOneRelMoveBeforeDispatch(const RelMove &move);
     /// 清零阶段一固定拍照锚点状态；每次 startStageOne() 必须调用一次。
     void resetVisionAnchorTracking();
     /// 清空当前任务的 Z 跨帧样本；阶段启动、停止、重新失准时都必须调用，避免复用旧帧。
@@ -315,8 +315,10 @@ private:
     void executeDepthDescent(double moveMm);
     /// 生成下一次视觉推理使用的固定拍照锚点上下文。
     VisionHttpClient::TargetSelectionContext makeVisionTargetSelectionContext() const;
-    /// 记录一条已经完成的阶段一 XY 微调；只能在控制器确认到位后调用。
-    void recordCompletedGrabMove(const RelMove &move);
+    /// 记录已确认到位的首次 MoveJ 或联合精修 MoveL；只累计工具 X/Y，Rz 不改变锚点平面位置。
+    void recordCompletedVisionAlignmentMove();
+    /// 联合运动到位后进入短暂稳定等待，再复用现有 WaitForVision/ValidateStableZ 验证路径。
+    void enterVisionAlignmentValidation();
     void proceedAction();
     void advanceActionStep();
     void startPalletPlaceInternal(const PalletPose &targetOffset,
@@ -433,9 +435,12 @@ private:
         const VisionAlignment::ToolCorrection &correction,
         Pose *pregraspPose,
         QString *error) const;
-    /// 组装首次视觉联合 MoveJ；任务 4 只提供 helper，生产入口由后续阶段状态机接线。
+    /// 组装首次视觉联合 MoveJ；只在统一门控接受命令后保存待完成修正。
     bool queueInitialVisionPregrasp(
         const VisionAlignment::Sample &sample);
+    /// 组装一条工具系 X/Y/Rz 联合精修 MoveL；X/Y 分别受单次运行时安全上限保护。
+    bool queueVisionFineCorrection(
+        const VisionAlignment::ToolCorrection &correction);
 
     /// 在真正下发 SDK 命令前先做一次控制器状态门控。
     ///
@@ -502,9 +507,9 @@ private:
 
     Pose m_surveyPose;             ///< 旧硬编码拍照位，主流程优先使用示教函数。
     Pose m_grabOffset;             ///< 最近视觉结果转换后的工具系偏移（mm/deg）。
-    QList<RelMove> m_grabMoves;    ///< 本轮视觉微调拆分出的单轴动作序列。
-    int m_grabMoveIdx = 0;         ///< 下一条待执行视觉微调索引。
-    int m_grabIterations = 0;   // 闭环视觉矫正的迭代计数
+    bool m_initialVisionMoveCompleted = false; ///< 首次联合 MoveJ 已被控制器确认到位；未到位不得进入精修或下探。
+    int m_completedFineCorrectionCount = 0; ///< 已被控制器确认到位的联合 MoveL 次数，不统计排队或下发失败。
+    VisionAlignment::ToolCorrection m_pendingAlignmentCorrection; ///< 当前联合运动待确认的工具 X/Y/Rz；到位前不得累计到锚点。
     QList<double> m_stableZSamples; ///< Z 稳定验证最近三个真实新帧样本(mm)，只在 ValidateStableZ 状态使用。
     qint64 m_stableZLastFrameId = -1; ///< 最近接收的算法真实 frame_id；相同值属于重复缓存，不能计入窗口。
     qint64 m_stableZLastTimestampMs = -1; ///< 最近真实帧的算法 timestamp(ms)，用于防止帧编号异常复用。
@@ -523,7 +528,6 @@ private:
     double m_preGripScanSearchTargetY = 0.0;  ///< 本轮夹紧前扫码搜索目标 Y 偏移(mm)。
     double m_anchorAccumulatedToolX = 0.0; ///< 初始拍照位到当前相机位置已完成工具系 X 位移(mm)。
     double m_anchorAccumulatedToolY = 0.0; ///< 初始拍照位到当前相机位置已完成工具系 Y 位移(mm)。
-    VisionAlignment::ToolCorrection m_pendingAlignmentCorrection; ///< 已组装且待确认到位的工具系 X/Y/Rz；确认前不得累计到锚点。
     bool m_anchorHasPreviousTarget = false; ///< 是否已有上一帧可信目标用于闭环跳变保护。
     double m_anchorPreviousTargetX = 0.0; ///< 上一帧可信目标相对初始拍照锚点 X(mm)。
     double m_anchorPreviousTargetY = 0.0; ///< 上一帧可信目标相对初始拍照锚点 Y(mm)。
