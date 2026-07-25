@@ -26,6 +26,30 @@ void requireNear(double actual, double expected, double tolerance, const char *m
     }
 }
 
+QString requireBracedScopeAfter(const QString &source,
+                                const QString &needle,
+                                const char *message)
+{
+    const qsizetype start = source.indexOf(needle);
+    requireTrue(start >= 0, message);
+    const qsizetype openingBrace = source.indexOf(QLatin1Char('{'), start);
+    requireTrue(openingBrace >= 0, message);
+
+    int depth = 0;
+    for (qsizetype index = openingBrace; index < source.size(); ++index) {
+        if (source.at(index) == QLatin1Char('{'))
+            ++depth;
+        else if (source.at(index) == QLatin1Char('}'))
+            --depth;
+
+        if (depth == 0)
+            return source.mid(openingBrace + 1, index - openingBrace - 1);
+    }
+
+    requireTrue(false, message);
+    return {};
+}
+
 } // namespace
 
 int main()
@@ -163,8 +187,11 @@ int main()
     requireTrue(schedulerSource.contains(QStringLiteral("if (m_stage == Stage::StageOne && m_stageStep == StageStep::SearchDescend)")),
                 "搜索下移命令门控失败后，只能在阶段状态仍有效时回滚搜索计数");
     requireTrue(schedulerSource.contains(QStringLiteral("m_stageStep != StageStep::WaitForVision"))
-                    && schedulerSource.contains(QStringLiteral("m_stageStep != StageStep::ValidateStableZ")),
-                "执行中命令判定不能把普通视觉等待或 Z 稳定验证的超时定时器误算成机械臂命令");
+                    && schedulerSource.contains(QStringLiteral(
+                        "m_stageStep != StageStep::ValidateVisionAlignment")),
+                "执行中命令判定不能把普通视觉等待或联合验证窗口的超时定时器误算成机械臂命令");
+    requireTrue(!schedulerSource.contains(QStringLiteral("ValidateStableZ")),
+                "调度器生产源不得重新引入旧 ValidateStableZ 状态");
     requireTrue(schedulerSource.contains(QStringLiteral("已收到视觉结果，停止视觉等待超时定时器")),
                 "视觉结果到达后必须停止当前视觉等待状态的超时定时器");
     requireTrue(schedulerSource.contains(QStringLiteral("命令前读取 FSM 失败")),
@@ -181,8 +208,18 @@ int main()
                 "扫码搜索成功回原夹取位后，阶段一完成必须继续推进");
     requireTrue(taskExecutorSource.contains(QStringLiteral("if (isPickupCompletionState(m_state))")),
                 "onArmStageCompleted 必须使用取料完成状态 helper");
-    requireTrue(schedulerSource.contains(QStringLiteral("++m_commandSeq; // 让已经排队的 singleShot 回调全部失效")),
-                "stop() 必须显式失效已排队的 singleShot 回调");
+    const QString stopBody = requireBracedScopeAfter(
+        schedulerSource,
+        QStringLiteral("void HuayanScheduler::stop(bool emitStoppedLog)"),
+        "必须能定位 stop() 函数体");
+    const QString stopPollingAndTimersBody = requireBracedScopeAfter(
+        schedulerSource,
+        QStringLiteral("void HuayanScheduler::stopPollingAndTimers()"),
+        "必须能定位 stopPollingAndTimers() 函数体");
+    requireTrue(stopBody.contains(QStringLiteral("stopPollingAndTimers();"))
+                    && stopPollingAndTimersBody.contains(QStringLiteral(
+                        "nextCallbackSeq();")),
+                "stop() 必须经统一定时器清理入口失效已排队的 singleShot 回调");
     requireTrue(schedulerSource.contains(QStringLiteral("nextCallbackSeq()")),
                 "resetAndProceed() 必须在 singleShot 前生成新的回调序号");
     requireTrue(schedulerSource.contains(QStringLiteral("HRIF_GrpReset(m_boxID, m_rbtID)")),
