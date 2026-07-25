@@ -43,6 +43,39 @@ private slots:
         QCOMPARE(result.settings.depthDescent.triggerDepthMm, 1300.0);
     }
 
+    void persistsFineCorrectionCountAndRemovesLegacyIterationKey()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("runtime.ini"));
+        SettingsManager manager(path);
+        RuntimeSettings settings = RuntimeSettings::defaults();
+        settings.vision.maxFineCorrectionCount = 2;
+        QString error;
+
+        QVERIFY2(manager.stageCandidate(settings, &error), qPrintable(error));
+        QVERIFY2(manager.commitStaged(settings, &error), qPrintable(error));
+        QCOMPARE(manager.load().settings.vision.maxFineCorrectionCount, 2);
+
+        QSettings ini(path, QSettings::IniFormat);
+        ini.setValue(QStringLiteral("vision/maxFineCorrectionCount"), 3);
+        ini.sync();
+        QCOMPARE(manager.load().settings.vision.maxFineCorrectionCount, 1);
+
+        ini.remove(QStringLiteral("vision/maxFineCorrectionCount"));
+        ini.sync();
+        QCOMPARE(manager.load().settings.vision.maxFineCorrectionCount, 1);
+
+        ini.setValue(QStringLiteral("vision/maxGrabIterations"), 15);
+        ini.sync();
+        QCOMPARE(manager.load().settings.vision.maxFineCorrectionCount, 1);
+        const RuntimeSettings loaded = manager.load().settings;
+        QVERIFY2(manager.stageCandidate(loaded, &error), qPrintable(error));
+        QVERIFY2(manager.commitStaged(loaded, &error), qPrintable(error));
+        QSettings persisted(path, QSettings::IniFormat);
+        QVERIFY(!persisted.contains(QStringLiteral("vision/maxGrabIterations")));
+    }
+
     void invalidDepthGroupFallsBackTogether()
     {
         QTemporaryDir dir;

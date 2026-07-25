@@ -24,7 +24,10 @@ void writeSettings(QSettings *ini, const RuntimeSettings &s)
 
     ini->setValue(QStringLiteral("vision/xyToleranceMm"), s.vision.xyToleranceMm);
     ini->setValue(QStringLiteral("vision/rzToleranceDeg"), s.vision.rzToleranceDeg);
-    ini->setValue(QStringLiteral("vision/maxGrabIterations"), s.vision.maxGrabIterations);
+    ini->setValue(QStringLiteral("vision/maxFineCorrectionCount"),
+                  s.vision.maxFineCorrectionCount);
+    // 保存时主动清理遗留键，避免旧 15 轮配置继续参与后续配置读取。
+    ini->remove(QStringLiteral("vision/maxGrabIterations"));
     ini->setValue(QStringLiteral("vision/settleMs"), s.vision.settleMs);
     ini->setValue(QStringLiteral("vision/largeRzJumpThresholdDeg"),
                   s.vision.largeRzJumpThresholdDeg);
@@ -146,8 +149,8 @@ SettingsLoadResult SettingsManager::load()
 
     readDouble(QStringLiteral("vision/xyToleranceMm"), &loaded.vision.xyToleranceMm);
     readDouble(QStringLiteral("vision/rzToleranceDeg"), &loaded.vision.rzToleranceDeg);
-    readInt(QStringLiteral("vision/maxGrabIterations"),
-            &loaded.vision.maxGrabIterations);
+    readInt(QStringLiteral("vision/maxFineCorrectionCount"),
+            &loaded.vision.maxFineCorrectionCount);
     readInt(QStringLiteral("vision/settleMs"), &loaded.vision.settleMs);
     readDouble(QStringLiteral("vision/largeRzJumpThresholdDeg"),
                &loaded.vision.largeRzJumpThresholdDeg);
@@ -272,9 +275,12 @@ SettingsLoadResult SettingsManager::load()
     requirePositiveDouble(QStringLiteral("vision/rzToleranceDeg"),
                           &loaded.vision.rzToleranceDeg,
                           defaults.vision.rzToleranceDeg);
-    requirePositiveInt(QStringLiteral("vision/maxGrabIterations"),
-                       &loaded.vision.maxGrabIterations,
-                       defaults.vision.maxGrabIterations);
+    if (loaded.vision.maxFineCorrectionCount < 0
+        || loaded.vision.maxFineCorrectionCount > 2) {
+        loaded.vision.maxFineCorrectionCount =
+            defaults.vision.maxFineCorrectionCount;
+        warnFallback(QStringLiteral("vision/maxFineCorrectionCount"));
+    }
     requirePositiveInt(QStringLiteral("vision/settleMs"),
                        &loaded.vision.settleMs,
                        defaults.vision.settleMs);

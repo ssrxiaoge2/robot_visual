@@ -171,7 +171,8 @@ QWidget *SettingsDialog::createCategoryPage(SettingsCategory category)
     case SettingsCategory::VisionClosedLoop:
         addDouble(page, "visionXyTolerance", QStringLiteral("XY 收敛阈值"), 0.1, 100, "mm");
         addDouble(page, "visionRzTolerance", QStringLiteral("Rz 收敛阈值"), 0.1, 90, "°");
-        addInt(page, "visionMaxIterations", QStringLiteral("最大矫正次数"), 1, 100, "次");
+        addInt(page, "visionMaxFineCorrections", QStringLiteral("联合精修正次数"),
+               0, 2, "次");
         addInt(page, "visionSettleMs", QStringLiteral("视觉稳定等待"), 0, 60000, "ms");
         addDouble(page, "largeRzThreshold", QStringLiteral("Rz 大角度阈值"), 0, 180, "°");
         addDouble(page, "largeRzTolerance", QStringLiteral("连续帧 Rz 容差"), 0, 180, "°");
@@ -271,7 +272,8 @@ RuntimeSettings SettingsDialog::candidate() const
     s.pickup.zDescendInvert = m_bools["zDescendInvert"]->isChecked();
     s.vision.xyToleranceMm = m_doubles["visionXyTolerance"]->value();
     s.vision.rzToleranceDeg = m_doubles["visionRzTolerance"]->value();
-    s.vision.maxGrabIterations = m_ints["visionMaxIterations"]->value();
+    s.vision.maxFineCorrectionCount =
+        m_ints["visionMaxFineCorrections"]->value();
     s.vision.settleMs = m_ints["visionSettleMs"]->value();
     s.vision.largeRzJumpThresholdDeg = m_doubles["largeRzThreshold"]->value();
     s.vision.largeRzDeltaToleranceDeg = m_doubles["largeRzTolerance"]->value();
@@ -317,7 +319,8 @@ void SettingsDialog::writeSettings(const RuntimeSettings &s)
     m_bools["zDescendInvert"]->setChecked(s.pickup.zDescendInvert);
     m_doubles["visionXyTolerance"]->setValue(s.vision.xyToleranceMm);
     m_doubles["visionRzTolerance"]->setValue(s.vision.rzToleranceDeg);
-    m_ints["visionMaxIterations"]->setValue(s.vision.maxGrabIterations);
+    m_ints["visionMaxFineCorrections"]->setValue(
+        s.vision.maxFineCorrectionCount);
     m_ints["visionSettleMs"]->setValue(s.vision.settleMs);
     m_doubles["largeRzThreshold"]->setValue(s.vision.largeRzJumpThresholdDeg);
     m_doubles["largeRzTolerance"]->setValue(s.vision.largeRzDeltaToleranceDeg);
@@ -396,8 +399,9 @@ QStringList SettingsDialog::changedValues(const RuntimeSettings &s) const
               s.vision.xyToleranceMm, "mm");
     addDouble(QStringLiteral("Rz 收敛阈值"), m_original.vision.rzToleranceDeg,
               s.vision.rzToleranceDeg, "°");
-    addInt(QStringLiteral("最大矫正次数"), m_original.vision.maxGrabIterations,
-           s.vision.maxGrabIterations, "次");
+    addInt(QStringLiteral("联合精修正次数"),
+           m_original.vision.maxFineCorrectionCount,
+           s.vision.maxFineCorrectionCount, "次");
     addInt(QStringLiteral("视觉稳定等待"), m_original.vision.settleMs,
            s.vision.settleMs, "ms");
     addBool(QStringLiteral("深度自动下探"), m_original.depthDescent.enabled,

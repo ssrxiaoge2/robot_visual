@@ -25,7 +25,8 @@ struct RuntimeSettings
     struct VisionClosedLoop {
         double xyToleranceMm = 2.0;
         double rzToleranceDeg = 1.0;
-        int maxGrabIterations = 15;
+        /// 初始联合 MoveJ 后允许执行的联合 MoveL 精修正次数，范围为 0 到 2。
+        int maxFineCorrectionCount = 1;
         int settleMs = 2000;
         double largeRzJumpThresholdDeg = 80.0;
         double largeRzDeltaToleranceDeg = 15.0;

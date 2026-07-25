@@ -6,6 +6,7 @@
 #include <QListWidget>
 #include <QPushButton>
 #include <QSignalSpy>
+#include <QSpinBox>
 #include <QStackedWidget>
 
 #include "settingsdialog.h"
@@ -82,6 +83,27 @@ private slots:
         QTest::mouseClick(dialog.findChild<QPushButton *>("saveAndApplyButton"),
                           Qt::LeftButton);
         QCOMPARE(spy.count(), 1);
+    }
+
+    void editsFineCorrectionCountWithApprovedRange()
+    {
+        SettingsDialog dialog(RuntimeSettings::defaults(), false);
+        auto *spin = dialog.findChild<QSpinBox *>(
+            QStringLiteral("visionMaxFineCorrectionsSpin"));
+        QVERIFY(spin);
+        QCOMPARE(spin->minimum(), 0);
+        QCOMPARE(spin->maximum(), 2);
+        QCOMPARE(spin->value(), 1);
+        QVERIFY(!dialog.findChild<QSpinBox *>(
+            QStringLiteral("visionMaxIterationsSpin")));
+
+        spin->setValue(2);
+        QCOMPARE(dialog.candidate().vision.maxFineCorrectionCount, 2);
+        QTest::mouseClick(dialog.findChild<QPushButton *>(
+                              "saveAndApplyButton"),
+                          Qt::LeftButton);
+        QVERIFY(dialog.findChild<QLabel *>("settingsChangePreview")->text()
+                    .contains(QStringLiteral("联合精修正次数")));
     }
 };
 

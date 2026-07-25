@@ -51,6 +51,27 @@ private slots:
         QVERIFY(!validateRuntimeSettings(settings).ok);
     }
 
+    void validatesFineCorrectionCountRange()
+    {
+        RuntimeSettings settings = RuntimeSettings::defaults();
+
+        settings.vision.maxFineCorrectionCount = 0;
+        QVERIFY(validateRuntimeSettings(settings).ok);
+
+        settings.vision.maxFineCorrectionCount = 2;
+        QVERIFY(validateRuntimeSettings(settings).ok);
+
+        settings.vision.maxFineCorrectionCount = -1;
+        SettingsValidation result = validateRuntimeSettings(settings);
+        QVERIFY(!result.ok);
+        QVERIFY(result.errors.join('\n').contains(QStringLiteral("联合精修正次数")));
+
+        settings.vision.maxFineCorrectionCount = 3;
+        result = validateRuntimeSettings(settings);
+        QVERIFY(!result.ok);
+        QVERIFY(result.errors.join('\n').contains(QStringLiteral("联合精修正次数")));
+    }
+
     void restoresOnlyRequestedCategory()
     {
         RuntimeSettings settings = RuntimeSettings::defaults();

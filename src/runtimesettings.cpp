@@ -46,8 +46,9 @@ SettingsValidation validateRuntimeSettings(const RuntimeSettings &settings)
             QStringLiteral("XY 收敛阈值必须为正数"), &errors);
     require(finitePositive(settings.vision.rzToleranceDeg),
             QStringLiteral("Rz 收敛阈值必须为正数"), &errors);
-    require(settings.vision.maxGrabIterations > 0,
-            QStringLiteral("最大视觉矫正次数必须为正数"), &errors);
+    require(settings.vision.maxFineCorrectionCount >= 0
+                && settings.vision.maxFineCorrectionCount <= 2,
+            QStringLiteral("联合精修正次数必须位于 0 到 2"), &errors);
     require(settings.vision.settleMs > 0,
             QStringLiteral("视觉稳定等待时间必须为正数"), &errors);
     require(finitePositive(settings.vision.largeRzJumpThresholdDeg),
