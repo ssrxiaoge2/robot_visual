@@ -525,6 +525,17 @@ int main()
         "必须实现联合运动确认完成后的状态记录入口");
     const QString normalizedRecordCompletedBody =
         normalizeCppCode(recordCompletedBody);
+    const QString initialMoveCompletedAssignment =
+        QStringLiteral("m_initialVisionMoveCompleted=true;");
+    const QString fineCorrectionCompletedIncrement =
+        QStringLiteral("++m_completedFineCorrectionCount;");
+    requireTrue(
+        normalizedRecordCompletedBody.count(initialMoveCompletedAssignment) == 1,
+        "联合运动完成函数内必须且只能设置一次首次 MoveJ 完成标志");
+    requireTrue(
+        normalizedRecordCompletedBody.count(
+            fineCorrectionCompletedIncrement) == 1,
+        "联合运动完成函数内必须且只能递增一次联合精修完成次数");
     requireContainsInOrder(
         normalizedRecordCompletedBody,
         {QStringLiteral(
@@ -549,7 +560,7 @@ int main()
         "必须能单独定位首次联合 MoveJ 的完成分支");
     requireTrue(
         initialCompletionBranch.count(
-            QStringLiteral("m_initialVisionMoveCompleted=true;")) == 1
+            initialMoveCompletedAssignment) == 1
             && !initialCompletionBranch.contains(
                 QStringLiteral("m_completedFineCorrectionCount")),
         "首次联合 MoveJ 完成分支只能设置首次完成标志，不能递增联合精修次数");
@@ -562,7 +573,7 @@ int main()
         "必须能单独定位联合精修 MoveL 的完成分支");
     requireTrue(
         fineCompletionBranch.count(
-            QStringLiteral("++m_completedFineCorrectionCount;")) == 1
+            fineCorrectionCompletedIncrement) == 1
             && !fineCompletionBranch.contains(
                 QStringLiteral("m_initialVisionMoveCompleted")),
         "联合精修 MoveL 完成分支只能递增精修次数，不能改写首次 MoveJ 完成标志");
@@ -578,11 +589,42 @@ int main()
             "            && (m_stageStep == StageStep::MoveToPregrasp"),
         QStringLiteral("if (m_action == Action::PalletPlace"),
         "必须能定位初始 MoveJ 和联合精修 MoveL 的统一完成分支");
+    const QString normalizedCompletionBranch =
+        normalizeCppCode(completionBranch);
+    const QString pregraspCompletedKindComparison = QStringLiteral(
+        "completedCommandKind==PendingCommandKind::VisionPregraspMoveJ");
+    const QString fineCompletedKindComparison = QStringLiteral(
+        "completedCommandKind==PendingCommandKind::VisionFineCorrectionMoveL");
+    const QString initialCompletionCondition = requireSegmentBetween(
+        normalizedCompletionBranch,
+        QStringLiteral(
+            "&&((m_stageStep==StageStep::MoveToPregrasp"),
+        QStringLiteral(
+            ")||(m_stageStep==StageStep::FineCorrectAlignment"),
+        "必须能局部定位 MoveToPregrasp 与活动命令类型的配对条件");
+    requireTrue(
+        initialCompletionCondition.contains(pregraspCompletedKindComparison)
+            && !initialCompletionCondition.contains(
+                fineCompletedKindComparison),
+        "MoveToPregrasp 到位只能匹配 VisionPregraspMoveJ 活动命令");
+    const QString fineCompletionCondition = requireSegmentBetween(
+        normalizedCompletionBranch,
+        QStringLiteral(
+            ")||(m_stageStep==StageStep::FineCorrectAlignment"),
+        QStringLiteral("recordCompletedVisionAlignmentMove()"),
+        "必须能局部定位 FineCorrectAlignment 与活动命令类型的配对条件");
+    requireTrue(
+        fineCompletionCondition.contains(fineCompletedKindComparison)
+            && !fineCompletionCondition.contains(
+                pregraspCompletedKindComparison),
+        "FineCorrectAlignment 到位只能匹配 VisionFineCorrectionMoveL 活动命令");
     requireContainsInOrder(
-        completionBranch,
-        {QStringLiteral("recordCompletedVisionAlignmentMove()"),
+        normalizedCompletionBranch,
+        {pregraspCompletedKindComparison,
+         fineCompletedKindComparison,
+         QStringLiteral("recordCompletedVisionAlignmentMove()"),
          QStringLiteral("enterVisionAlignmentValidation()")},
-        "联合运动必须确认完成后再累计锚点并开启视觉窗口");
+        "两类活动命令必须先与各自阶段正确配对，再累计锚点并开启视觉窗口");
 
     const QString dispatchBody = normalizeCppCode(requireFunctionBody(
         source,
