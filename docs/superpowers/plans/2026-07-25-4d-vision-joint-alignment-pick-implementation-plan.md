@@ -20,6 +20,7 @@
 - 每次联合运动完成后重新开启 4～8 秒观察窗口；8 秒是硬上限，不新增额外等待帧。
 - 达到精修正次数仍未收敛、目标丢失、目标可信规则拒绝、Z 不稳定或观察超时，均直接停止调度。
 - 失败后不自动返回固定拍照位、不重新选择目标、不继续旧的 15 轮逐轴循环、不下探、不夹紧。
+- 删除范围仅限旧阶段一 15 轮 X/Y/Rz 逐轴闭环及其专用配置、状态和辅助函数；不得改动目标选择、手眼转换、锚点锁定、Rz 大角度保护、深度处理、搜索下移、最终 Z 下探、扫码和夹爪行为。
 - 保留现有 Z 深度定义、深度自动下探、抓取余量、Z 下探硬上限、扫码与夹爪流程。
 - 首版不增加三维运动包络、碰撞模型、MoveJ 整条路径预测、逆解评分、动态工位占用或复杂轨迹规划器。
 - 所有新增接口、状态、单位、SDK 参数和复杂分支均添加中文注释。
@@ -47,13 +48,14 @@
 
 - `src/runtimesettings.h`
   - 在视觉闭环配置中增加 `maxFineCorrectionCount`，默认 1。
-  - 旧 `maxGrabIterations` 保留用于配置兼容，但新生产路径不再读取它。
+  - 删除旧 `maxGrabIterations` 字段。
 - `src/runtimesettings.cpp`
   - 校验 `maxFineCorrectionCount` 必须位于 0～2。
 - `src/settingsmanager.cpp`
   - 使用 `vision/maxFineCorrectionCount` 保存、读取和修复新配置。
+  - 不再读取旧 `vision/maxGrabIterations`，保存时移除该旧键。
 - `src/settingsdialog.cpp`
-  - 新增“联合精修正次数”控件，范围 0～2；旧“最大矫正次数”标明为兼容参数，避免现场误解。
+  - 将现有“最大矫正次数”所在行直接替换为“联合精修正次数”，范围 0～2，不增加第二个次数控件。
 - `CMakeLists.txt`
   - 把纯判定源文件加入主程序。
 - `tests/CMakeLists.txt`
@@ -80,7 +82,7 @@
 
 ---
 
-### 任务 1：增加联合精修正次数配置并接通设置界面
+### 任务 1：用联合精修正次数替换旧 15 轮配置
 
 **文件：**
 
@@ -96,7 +98,8 @@
 
 - 产生：`RuntimeSettings::VisionClosedLoop::maxFineCorrectionCount`，类型 `int`，默认值 `1`，合法范围 `[0, 2]`。
 - 产生：INI 键 `vision/maxFineCorrectionCount`。
-- 保留：`RuntimeSettings::VisionClosedLoop::maxGrabIterations` 和 INI 键 `vision/maxGrabIterations`，只用于兼容旧配置，不作为新闭环上限。
+- 删除：`RuntimeSettings::VisionClosedLoop::maxGrabIterations`。
+- 删除：INI 键 `vision/maxGrabIterations` 的保存和读取；保存设置时主动移除磁盘中遗留的旧键。
 
 - [ ] **步骤 1：先在运行时配置测试中写失败用例**
 
@@ -140,6 +143,11 @@ QCOMPARE(manager.load().vision.maxFineCorrectionCount, 1);
 
 ini.remove(QStringLiteral("vision/maxFineCorrectionCount"));
 QCOMPARE(manager.load().vision.maxFineCorrectionCount, 1);
+
+ini.setValue(QStringLiteral("vision/maxGrabIterations"), 15);
+QCOMPARE(manager.load().vision.maxFineCorrectionCount, 1);
+QVERIFY(manager.save(manager.load(), &error));
+QVERIFY(!ini.contains(QStringLiteral("vision/maxGrabIterations")));
 ```
 
 在 `tests/test_settings_dialog.cpp` 按现有 `findChild` 写法验证：
@@ -152,7 +160,7 @@ QCOMPARE(spin->maximum(), 2);
 QCOMPARE(spin->value(), 1);
 ```
 
-再将控件设为 2，验证 `dialog.settings().vision.maxFineCorrectionCount == 2`，并验证变更摘要包含“联合精修正次数”。
+再将控件设为 2，验证 `dialog.candidate().vision.maxFineCorrectionCount == 2`，并验证变更摘要包含“联合精修正次数”。同时验证界面中不存在旧对象名 `visionMaxIterationsSpinBox`，确保没有保留第二行旧次数控件。
 
 - [ ] **步骤 3：运行三个测试，确认它们先失败**
 
@@ -164,7 +172,7 @@ cmake --build $BuildDirectory --target runtime_settings_tests settings_manager_t
 ctest --test-dir $BuildDirectory -C Debug --output-on-failure -R "runtime_settings_tests|settings_manager_tests|settings_dialog_tests"
 ```
 
-预期：编译因 `maxFineCorrectionCount` 尚未定义而失败，或新增界面控件断言失败。
+预期：编译因 `maxFineCorrectionCount` 尚未定义而失败，或替换后的界面控件断言失败。
 
 - [ ] **步骤 4：实现配置字段、校验与持久化**
 
@@ -172,6 +180,12 @@ ctest --test-dir $BuildDirectory -C Debug --output-on-failure -R "runtime_settin
 
 ```cpp
 int maxFineCorrectionCount = 1; ///< 初始联合 MoveJ 后允许的联合 MoveL 精修正次数，范围 0～2。
+```
+
+同时删除：
+
+```cpp
+int maxGrabIterations = 15;
 ```
 
 在 `validateRuntimeSettings()` 中加入：
@@ -187,6 +201,7 @@ require(settings.vision.maxFineCorrectionCount >= 0
 ```cpp
 ini->setValue(QStringLiteral("vision/maxFineCorrectionCount"),
               s.vision.maxFineCorrectionCount);
+ini->remove(QStringLiteral("vision/maxGrabIterations"));
 ```
 
 ```cpp
@@ -202,9 +217,22 @@ if (loaded.vision.maxFineCorrectionCount < 0
 }
 ```
 
+删除对 `vision/maxGrabIterations` 的 `setValue()`、`readInt()` 和合法性修复调用。旧 INI 文件可以继续加载，但旧键不参与任何运行决策，并在用户下一次保存设置时被清除。
+
 - [ ] **步骤 5：实现设置界面读写**
 
-在视觉闭环页面加入：
+在视觉闭环页面中，删除现有：
+
+```cpp
+addInt(page,
+       "visionMaxIterations",
+       QStringLiteral("最大矫正次数"),
+       1,
+       100,
+       QStringLiteral("次"));
+```
+
+在同一位置替换为：
 
 ```cpp
 addInt(page,
@@ -215,7 +243,7 @@ addInt(page,
        QStringLiteral("次"));
 ```
 
-在 `settings()`、`setSettings()` 和变更摘要中使用同一个字段：
+在 `candidate()`、`writeSettings()` 和变更摘要中使用同一个字段：
 
 ```cpp
 s.vision.maxFineCorrectionCount =
@@ -234,7 +262,7 @@ addInt(QStringLiteral("联合精修正次数"),
        "次");
 ```
 
-把旧控件显示名改为“旧逐轴最大矫正次数（兼容）”，字段名和保存键保持不变。
+删除 `candidate()`、`writeSettings()` 和变更摘要中对 `visionMaxIterations`、`maxGrabIterations` 的旧读写。界面最终只能看到一行“联合精修正次数”，不能同时出现新旧两个次数控件。
 
 - [ ] **步骤 6：运行测试并确认通过**
 
@@ -249,7 +277,7 @@ ctest --test-dir $BuildDirectory -C Debug --output-on-failure -R "runtime_settin
 
 ```powershell
 git add src/runtimesettings.h src/runtimesettings.cpp src/settingsmanager.cpp src/settingsdialog.cpp tests/test_runtime_settings.cpp tests/test_settings_manager.cpp tests/test_settings_dialog.cpp
-git commit -m "配置: 增加联合精修正次数"
+git commit -m "配置: 用联合精修次数替换旧迭代参数"
 ```
 
 ---
