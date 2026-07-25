@@ -38,6 +38,8 @@ TaskExecutor::TaskExecutor(AgvController *agv,
                 this, &TaskExecutor::onArmStageCompleted);
         connect(m_arm, &HuayanScheduler::stageError,
                 this, &TaskExecutor::onArmStageError);
+        connect(m_arm, &HuayanScheduler::visionAlignmentFailed,
+                this, &TaskExecutor::onArmVisionAlignmentFailed);
         connect(m_arm, &HuayanScheduler::preGripScanRequested,
                 this, &TaskExecutor::onPreGripScanRequested);
         connect(m_arm, &HuayanScheduler::preGripScanSearchMoveCompleted,
@@ -329,6 +331,25 @@ void TaskExecutor::onArmStageError(const QString &reason)
     emit logMessage(prefix(QStringLiteral("ERROR"))
                     + QStringLiteral(" ARM 阶段失败：%1").arg(reason));
     beginCleanupAfterTaskFailure(QStringLiteral("机械臂动作失败：%1").arg(reason));
+}
+
+void TaskExecutor::onArmVisionAlignmentFailed(const QString &reason)
+{
+    if (!isBusy())
+        return;
+
+    // 调度器保证发出该信号前已经停止并作废全部机器人/视觉回调，因此这里不能再进入
+    // CleanupStow。直接收口为 Failed，既避免同步竞态，也符合现场“失准即停调度”的要求。
+    const QString finalReason =
+        QStringLiteral("机械臂联合视觉对准失败：%1").arg(reason);
+    emit logMessage(prefix(QStringLiteral("ERROR"))
+                    + QStringLiteral(" 联合视觉对准已安全停止，任务直接失败：%1")
+                          .arg(reason));
+    resetRuntimeState();
+    setTaskTerminal(TaskState::Failed,
+                    QStringLiteral("联合视觉对准失败，调度已停止"),
+                    finalReason);
+    emit taskFailed(m_task, finalReason);
 }
 
 void TaskExecutor::onPreGripScanRequested()

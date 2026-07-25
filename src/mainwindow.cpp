@@ -371,6 +371,8 @@ MainWindow::MainWindow(QWidget *parent)
                 this, &MainWindow::onHuayanStageCompleted);
         connect(hs, &HuayanScheduler::stageError,
                 this, &MainWindow::onHuayanStageError);
+        connect(hs, &HuayanScheduler::visionAlignmentFailed,
+                this, &MainWindow::onHuayanStageError);
         connect(hs, &HuayanScheduler::schedulerStopped,
                 this, &MainWindow::updateStandalonePickupControls);
         // 顶部"机械臂"指示灯跟随 SDK 连接状态

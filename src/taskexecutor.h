@@ -63,6 +63,8 @@ private slots:
     void onAgvMonitor(const AgvMonitorData &data);
     void onArmStageCompleted(const QString &stageName);
     void onArmStageError(const QString &reason);
+    /// 联合对准已经由 HuayanScheduler 完成安全停止；直接失败，禁止再启动 CleanupStow。
+    void onArmVisionAlignmentFailed(const QString &reason);
     void onPreGripScanRequested();
     void onPreGripScanSearchMoveCompleted(double currentYOffsetMm);
     void onPreGripScanSearchMoveError(const QString &reason);

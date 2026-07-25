@@ -191,6 +191,10 @@ DeviceManager::DeviceManager(QObject *parent)
             this, [this](const QString &msg) {
         emit logMessage(QStringLiteral("[华沿] 错误：%1").arg(msg));
     });
+    connect(m_huayanScheduler, &HuayanScheduler::visionAlignmentFailed,
+            this, [this](const QString &msg) {
+        emit logMessage(QStringLiteral("[华沿][联合视觉对准] 已安全停止：%1").arg(msg));
+    });
 
     m_palletScheduler = new PalletScheduler(this);
 

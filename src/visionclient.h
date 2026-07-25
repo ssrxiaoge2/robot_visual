@@ -32,6 +32,7 @@
 #include <QList>
 #include <QObject>
 #include <QImage>
+#include <QSet>
 
 #include "runtimesettings.h"
 #include <QNetworkAccessManager>
@@ -216,6 +217,9 @@ public:
 
     /// 设置下一次 /inference 使用的目标选择上下文；由机械臂阶段一在发起推理前注入。
     void setTargetSelectionContext(const TargetSelectionContext &context);
+    /// 作废并中止所有尚未完成的推理请求。代际递增后，即使旧 reply 已进入事件队列，
+    /// 也不得更新最近帧、发出视觉结果或使用新任务的目标选择上下文。
+    void invalidateInferenceRequests();
 
     bool    isConfigured() const { return !m_ip.isEmpty(); }
     QString ip()           const { return m_ip; }
@@ -274,7 +278,8 @@ signals:
     void selectionLogMessage(QString message);
 private:
     /// 解析 /inference 响应 JSON
-    void parseInferenceReply(QNetworkReply *reply);
+    void parseInferenceReply(QNetworkReply *reply,
+                             const TargetSelectionContext &requestContext);
 
     struct RawCoords { double x, y, z, rz; };
     RawCoords transformToMm(float cx, float cy, float cz, float angleDeg);
@@ -302,6 +307,8 @@ private:
     qint32 m_baseRzReg = 0; ///< ⚠ 需联机调试后设置实际值
 
     TargetSelectionContext m_targetSelectionContext; ///< 最近一次推理使用的选择上下文，生命周期到下一次 set 覆盖。
+    quint64 m_inferenceGeneration = 0; ///< 推理请求代际；停止/新阶段会递增，使旧 reply 无条件失效。
+    QSet<QNetworkReply *> m_pendingInferenceReplies; ///< 仅跟踪 /inference，不影响预览帧和状态查询消费者。
     qint64 m_lastInferenceFrameId = -1; ///< 算法后台真实推理帧编号，用于上位机识别重复缓存响应。
     qint64 m_lastInferenceTimestampMs = -1; ///< 算法生成该推理结果的时间戳(ms)，用于校验帧确实向前推进。
     RuntimeSettings m_runtimeSettings;

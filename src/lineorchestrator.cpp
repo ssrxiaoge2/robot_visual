@@ -28,6 +28,8 @@ LineOrchestrator::LineOrchestrator(AgvController *agv,
             this, &LineOrchestrator::onArmCompleted);
     connect(m_arm, &HuayanScheduler::stageError,
             this, &LineOrchestrator::onArmError);
+    connect(m_arm, &HuayanScheduler::visionAlignmentFailed,
+            this, &LineOrchestrator::onArmError);
 
     m_agvTimeout = new QTimer(this);
     m_agvTimeout->setSingleShot(true);

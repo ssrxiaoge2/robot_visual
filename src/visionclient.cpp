@@ -101,6 +101,19 @@ void VisionHttpClient::setTargetSelectionContext(const TargetSelectionContext &c
     m_targetSelectionContext = context;
 }
 
+void VisionHttpClient::invalidateInferenceRequests()
+{
+    ++m_inferenceGeneration;
+
+    // abort() 可能同步或异步触发 finished；finished lambda 仍会先核对 generation，
+    // 因而无论具体时序如何，旧请求都不能进入新任务。复制集合避免回调移除时迭代失效。
+    const auto pendingReplies = m_pendingInferenceReplies;
+    for (QNetworkReply *reply : pendingReplies) {
+        if (reply && reply->isRunning())
+            reply->abort();
+    }
+}
+
 // ── 公开请求接口 ─────────────────────────────────────────────
 
 /**
@@ -121,10 +134,19 @@ void VisionHttpClient::fetchInference()
         QString("http://%1:%2/inference").arg(m_ip).arg(m_port)));
     req.setTransferTimeout(5000); // 5s 超时，防止阻塞工作流
 
+    const quint64 requestGeneration = m_inferenceGeneration;
+    const TargetSelectionContext requestContext = m_targetSelectionContext;
     QNetworkReply *reply = m_nam->get(req);
     reply->setParent(this);
-    connect(reply, &QNetworkReply::finished, this, [this, reply]() {
-        parseInferenceReply(reply);
+    m_pendingInferenceReplies.insert(reply);
+    connect(reply, &QNetworkReply::finished, this,
+            [this, reply, requestGeneration, requestContext]() {
+        m_pendingInferenceReplies.remove(reply);
+        if (requestGeneration != m_inferenceGeneration) {
+            reply->deleteLater();
+            return;
+        }
+        parseInferenceReply(reply, requestContext);
         reply->deleteLater();
     });
 }
@@ -764,7 +786,9 @@ QString VisionHttpClient::formatTargetSelectionLog(const TargetSelection &select
  * 多目标抓取优先级：先过滤当前工位 ROI，再按最高层、同层最近中心、
  * 原始下标稳定兜底的确定性规则选择。
  */
-void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
+void VisionHttpClient::parseInferenceReply(
+    QNetworkReply *reply,
+    const TargetSelectionContext &requestContext)
 {
     if (reply->error() != QNetworkReply::NoError) {
         emit errorOccurred(QString("[视觉] 网络错误: %1").arg(reply->errorString()));
@@ -786,7 +810,7 @@ void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
         timestampValue.isDouble() ? qRound64(timestampValue.toDouble() * 1000.0) : -1;
 
     const QJsonArray objects = root.value(QStringLiteral("objects")).toArray();
-    const TargetSelection selection = selectTarget(objects, m_targetSelectionContext, m_T);
+    const TargetSelection selection = selectTarget(objects, requestContext, m_T);
     emit selectionLogMessage(formatTargetSelectionLog(selection));
     if (!selection.hasTarget()) {
         if (isAnchorTrustRejection(selection.reason)) {
@@ -810,13 +834,13 @@ void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)
     Q_UNUSED(conf)
 
     RawCoords raw;
-    if (m_targetSelectionContext.anchorEnabled) {
+    if (requestContext.anchorEnabled) {
         raw = {candidate.toolX, candidate.toolY, candidate.toolZ, candidate.toolRz};
     } else {
         raw = transformToMm(cx, cy, cz, angle);
     }
     emit rawCoordinatesReady(raw.x, raw.y, raw.z, raw.rz);
-    if (m_targetSelectionContext.anchorEnabled) {
+    if (requestContext.anchorEnabled) {
         // 锚点坐标为相对阶段一初始拍照位的工具系 XY(mm)，供调度器闭环累计上一帧目标。
         emit rawCoordinatesReady(raw.x, raw.y, raw.z, raw.rz,
                                  candidate.anchorX, candidate.anchorY);

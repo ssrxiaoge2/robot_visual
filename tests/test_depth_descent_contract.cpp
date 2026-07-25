@@ -76,7 +76,8 @@ int main()
         "vision success callback must exist");
     const qsizetype stopTimeout = source.indexOf(QStringLiteral("stopVisionWaitTimeout();"), callback);
     const qsizetype depthGuard = source.indexOf(QStringLiteral("handleExcessiveVisionDepth(z)"), callback);
-    const qsizetype rzLogic = source.indexOf(QStringLiteral("auto sameDirection"), callback);
+    const qsizetype rzLogic = source.indexOf(
+        QStringLiteral("evaluateLargeRzConfirmation("), callback);
     requireTrue(stopTimeout >= 0 && depthGuard > stopTimeout && depthGuard < rzLogic,
                 "excessive depth must be handled before XY/Rz alignment");
 
@@ -130,7 +131,7 @@ int main()
         QStringLiteral("case VisionAlignment::WindowAction::Descend:"),
         unifiedDecisionIndex);
     const qsizetype updateDepthIndex = source.indexOf(
-        QStringLiteral("m_grabOffset.z = sample.zMm;"),
+        QStringLiteral("m_grabOffset.z = measuredSample.zMm;"),
         unifiedDescendIndex);
     const qsizetype enterDescendIndex = source.indexOf(
         QStringLiteral("m_stageStep = StageStep::DescendZ;"),

@@ -206,6 +206,124 @@ public:
         return !hasPendingCommand && !hasActiveCommand;
     }
 
+    /// Rz 大角度连续帧确认的持久状态；帧号和时间戳必须同时严格递增，
+    /// 防止视觉服务反复返回同一缓存结果时把一次测量误当成两帧。
+    struct LargeRzConfirmationState {
+        bool pending = false;
+        double rzDeg = 0.0;
+        qint64 frameId = -1;
+        qint64 timestampMs = -1;
+    };
+
+    enum class LargeRzAction {
+        NotLarge,
+        WaitForNewFrame,
+        AllowMotion,
+        ExecutionLimitReached
+    };
+
+    struct LargeRzEvaluation {
+        LargeRzAction action = LargeRzAction::NotLarge;
+        LargeRzConfirmationState nextState;
+        double measuredRzDeg = 0.0; ///< 视觉真实残差，必须原样参与是否收敛的判定。
+        double motionRzDeg = 0.0;   ///< 本帧允许下发的旋转量；达到上限时为 0。
+        bool blocksDescent = false; ///< true 时即使 XY/Z 已满足，也绝不能进入 Z 下探。
+    };
+
+    /// 纯判定：执行“大角度两个真实新帧确认 + 单阶段执行上限”。
+    /// 候选不一致时用当前新帧重建候选，至少还要再等一个新帧才能授权运动。
+    static LargeRzEvaluation evaluateLargeRzConfirmation(
+        const LargeRzConfirmationState &state,
+        double measuredRzDeg,
+        qint64 frameId,
+        qint64 timestampMs,
+        double largeThresholdDeg,
+        double deltaToleranceDeg,
+        int completedExecutions,
+        int maxExecutions)
+    {
+        LargeRzEvaluation result;
+        result.measuredRzDeg = measuredRzDeg;
+        result.motionRzDeg = measuredRzDeg;
+
+        if (qAbs(measuredRzDeg) < largeThresholdDeg)
+            return result;
+
+        result.blocksDescent = true;
+        if (completedExecutions >= maxExecutions) {
+            result.action = LargeRzAction::ExecutionLimitReached;
+            result.motionRzDeg = 0.0;
+            return result;
+        }
+
+        const auto rememberCurrentFrame = [&] {
+            result.action = LargeRzAction::WaitForNewFrame;
+            result.motionRzDeg = 0.0;
+            result.nextState = {true, measuredRzDeg, frameId, timestampMs};
+        };
+        if (!state.pending) {
+            rememberCurrentFrame();
+            return result;
+        }
+
+        // 同一缓存帧只继续等待，不覆盖第一帧候选基线。
+        if (frameId <= state.frameId || timestampMs <= state.timestampMs) {
+            result.action = LargeRzAction::WaitForNewFrame;
+            result.motionRzDeg = 0.0;
+            result.nextState = state;
+            return result;
+        }
+
+        const bool sameDirection =
+            (state.rzDeg >= 0.0 && measuredRzDeg >= 0.0)
+            || (state.rzDeg < 0.0 && measuredRzDeg < 0.0);
+        const bool closeMagnitude =
+            qAbs(qAbs(state.rzDeg) - qAbs(measuredRzDeg))
+            <= deltaToleranceDeg;
+        if (!sameDirection || !closeMagnitude) {
+            rememberCurrentFrame();
+            return result;
+        }
+
+        result.action = LargeRzAction::AllowMotion;
+        return result;
+    }
+
+    enum class VisionMotionCompletion {
+        Wait,
+        Complete
+    };
+
+    /// 视觉 MoveJ/MoveL 的完成证据输入。残留的 blendingDone=true 单独不能证明
+    /// 新命令完成，必须结合 seen-moving、not-done→done 或实际 TCP 到达目标。
+    struct VisionMotionCompletionInput {
+        bool moving = false;
+        bool hasSeenMoving = false;
+        bool blendingQuerySucceeded = false;
+        bool blendingDone = false;
+        bool hasSeenBlendingNotDone = false;
+        bool actualPoseAtTarget = false;
+        qint64 elapsedMs = 0;
+        int shortMotionFallbackMs = 0;
+    };
+
+    static VisionMotionCompletion evaluateVisionMotionCompletion(
+        const VisionMotionCompletionInput &input)
+    {
+        if (input.moving)
+            return VisionMotionCompletion::Wait;
+
+        const bool officialCompletion =
+            input.blendingQuerySucceeded && input.blendingDone
+            && (input.hasSeenMoving || input.hasSeenBlendingNotDone);
+        const bool actualPoseCompletion =
+            input.elapsedMs >= input.shortMotionFallbackMs
+            && input.actualPoseAtTarget;
+        return officialCompletion || actualPoseCompletion
+            ? VisionMotionCompletion::Complete
+            : VisionMotionCompletion::Wait;
+    }
+
 public slots:
     void setGrabOffset(double x, double y, double z, double rz);
     /// 接收带拍照锚点的视觉结果；anchor 单位 mm，生命周期为本轮阶段一闭环。
@@ -223,6 +341,8 @@ signals:
     void stageStarted(const QString &stageName);
     void stageCompleted(const QString &stageName);
     void stageError(const QString &msg);
+    /// 联合视觉对准专用失败；本信号发出前调度器已经停止并作废旧视觉/定时回调。
+    void visionAlignmentFailed(const QString &msg);
     void logMessage(const QString &msg);
     void schedulerStopped();
     void surveyReady();             ///< 已稳定到拍照位，请 VisionHttpClient 发起推理。
@@ -336,6 +456,7 @@ private:
     void stopPollingAndTimers();
     void requestRobotStop();
     void emitOperationError(const QString &msg);
+    bool isVisionAlignmentFailureStep() const;
 
     void setPickupPose(const Pose &p);
     Pose pickupPose() const;
@@ -465,6 +586,8 @@ private:
     /// 通过单条 HRIF_WayPointRel 下发工具系 X/Y/Rz 联合线性精修。
     bool dispatchVisionFineCorrectionMoveL(const PendingCommand &cmd);
     bool hasActiveRobotCommand() const; ///< 当前是否仍有已下发但尚未完成的 SDK 命令。
+    bool isActiveVisionMotion() const;
+    bool actualVisionTargetReached() const;
     void stopVisionWaitTimeout();       ///< 收到视觉结果后关闭 WaitForVision 的超时保护，避免误判为执行中命令。
     RobotStateSnapshot readRobotStateSnapshot() const;
     /// 按开关读取 MoveRelL 前/后快照；readPoseAndJoints 控制 TCP/关节读取，readAxisErrors 控制轴错误读取。
@@ -497,6 +620,10 @@ private:
     RuntimeSettings m_runtimeSettings;
     int     m_pollCount    = 0;       ///< 当前动作已轮询次数，用于极短动作兜底。
     bool    m_hasSeenMoving = false;  // 是否已观察到运动真正开始（避免启动延迟误判完成）
+    bool m_hasSeenBlendingNotDone = false; ///< 当前视觉命令是否观察到官方完成标志为 false。
+    qint64 m_motionElapsedMs = 0; ///< 当前命令轮询耗时；视觉短动作兜底使用运行时配置。
+    Pose m_activeVisionTargetPose; ///< 视觉 MoveJ/MoveL 下发时计算出的 Base 绝对 TCP 目标。
+    bool m_activeVisionTargetPoseValid = false; ///< 上述目标是否可用于实际 TCP 到位校验。
     PendingCommand m_pendingCommand;       ///< 当前等待状态可执行后再下发的命令。
     PendingCommandKind m_activeCommandKind = PendingCommandKind::None;
     QString m_activeCommandLabel;
@@ -525,6 +652,8 @@ private:
     double m_pendingDepthDescentMm = 0.0;     ///< 已下发但尚未确认到位的下探量。
     bool m_pendingLargeRzConfirmation = false; ///< 上一帧是否出现待确认的 Rz 大角度跳变。
     double m_pendingLargeRz = 0.0;             ///< 待确认的 Rz 大角度跳变值(deg)。
+    qint64 m_pendingLargeRzFrameId = -1; ///< 大角度候选对应的真实 frame_id。
+    qint64 m_pendingLargeRzTimestampMs = -1; ///< 大角度候选对应的算法时间戳(ms)。
     int m_stageOneLargeRzExecutionCount = 0; ///< 阶段一当前锁定目标已实际执行的 Rz 大角度次数；阶段启动/停止/锁定重置时清零，普通小角度 Rz 不计数。
     bool m_preGripScanEnabled = false; ///< 是否启用夹紧前扫码暂停。
     bool m_waitingPreGripScan = false; ///< 已发扫码请求且尚未收到继续指令。

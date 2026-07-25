@@ -287,14 +287,16 @@ int main()
         normalizeCppCode(setGrabOffsetBody);
     requireTrue(
         normalizedSetGrabOffsetBody.count(
-            QStringLiteral("queueInitialVisionPregrasp(sample)")) == 1,
+            QStringLiteral("queueInitialVisionPregrasp(motionSample)")) == 1,
         "首次可信目标必须且只能从生产入口排队一次初始联合 MoveJ");
     requireContainsInOrder(
         normalizedSetGrabOffsetBody,
         {QStringLiteral(
-             "constVisionAlignment::Samplesample{x,y,z,effectiveRz,true};"),
+             "constVisionAlignment::SamplemeasuredSample{x,y,z,measuredRz,true};"),
+         QStringLiteral(
+             "constVisionAlignment::SamplemotionSample{x,y,z,motionRz,true};"),
          QStringLiteral("if(!m_initialVisionMoveCompleted){"),
-         QStringLiteral("if(!queueInitialVisionPregrasp(sample))"),
+         QStringLiteral("if(!queueInitialVisionPregrasp(motionSample))"),
          QStringLiteral("return;"),
          QStringLiteral("m_stageStep=StageStep::MoveToPregrasp;"),
          QStringLiteral("return;"),
@@ -635,19 +637,21 @@ int main()
             QStringLiteral("++m_stageOneLargeRzExecutionCount;")) == 0,
         "视觉帧确认大角度方向时不得提前消耗实际执行次数");
     requireTrue(
-        normalizedSetGrabOffsetBody.contains(QStringLiteral(
-            "qAbs(rz)>=m_runtimeSettings.vision.largeRzJumpThresholdDeg"))
+        normalizedSetGrabOffsetBody.contains(
+            QStringLiteral("evaluateLargeRzConfirmation("))
             && normalizedSetGrabOffsetBody.contains(QStringLiteral(
-                "m_stageOneLargeRzExecutionCount>="
-                "m_runtimeSettings.vision.maxLargeRzExecutions"))
+                "m_runtimeSettings.vision.largeRzJumpThresholdDeg"))
             && normalizedSetGrabOffsetBody.contains(QStringLiteral(
-                "qAbs(qAbs(m_pendingLargeRz)-qAbs(rz))>"
                 "m_runtimeSettings.vision.largeRzDeltaToleranceDeg"))
-            && normalizedSetGrabOffsetBody.contains(
-                QStringLiteral("m_pendingLargeRzConfirmation=true;"))
-            && normalizedSetGrabOffsetBody.contains(
-                QStringLiteral("m_pendingLargeRzConfirmation=false;")),
-        "大角度Rz必须由阈值触发、两帧差值确认并受同一目标最大执行次数限制");
+            && normalizedSetGrabOffsetBody.contains(QStringLiteral(
+                "m_stageOneLargeRzExecutionCount"))
+            && normalizedSetGrabOffsetBody.contains(QStringLiteral(
+                "m_runtimeSettings.vision.maxLargeRzExecutions"))
+            && header.contains(QStringLiteral(
+                "frameId <= state.frameId || timestampMs <= state.timestampMs"))
+            && header.contains(QStringLiteral(
+                "result.motionRzDeg = 0.0;")),
+        "大角度Rz必须由阈值触发、两个严格新帧确认、保留测量残差并受实际执行次数限制");
     requireTrue(
         !normalizeCppCode(enterValidationBody).contains(QStringLiteral(
             "m_stageOneLargeRzExecutionCount=0;")),

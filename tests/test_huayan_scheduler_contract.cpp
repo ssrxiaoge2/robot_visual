@@ -77,10 +77,10 @@ void requireStageOneLargeRzGuard(const QString &source)
                 "必须定义阶段一 Rz 大角度最大执行次数宏，避免 90 度重复旋转");
     requireTrue(source.contains(QStringLiteral("m_stageOneLargeRzExecutionCount")),
                 "必须记录同一阶段一目标锁定周期内已执行的大角度 Rz 次数");
-    requireTrue(source.contains(QStringLiteral("已执行过 Rz 大角度修正")),
-                "重复出现 Rz 大角度时必须输出现场可读日志");
-    requireTrue(source.contains(QStringLiteral("疑似视觉旧帧或角度歧义")),
-                "重复 Rz 大角度日志必须说明可能是视觉旧帧或角度歧义");
+    requireTrue(source.contains(QStringLiteral("Rz大角度执行次数已达上限")),
+                "重复出现 Rz 大角度且执行次数耗尽时必须输出现场可读日志");
+    requireTrue(source.contains(QStringLiteral("继续按未收敛处理并禁止下探")),
+                "重复 Rz 大角度日志必须明确保留真实残差并禁止下探");
 }
 
 void requireStageOneZDescendTimeout(const QString &source)
@@ -300,7 +300,7 @@ int main()
                     && visionHeader.contains(QStringLiteral("TargetSelectionReason reason")),
                 "VisionHttpClient 必须提供携带拒绝原因的锚点可信规则拒绝信号");
     const QString parseInferenceReplyBody = requireBracedScopeAfter(
-        visionSource, QStringLiteral("void VisionHttpClient::parseInferenceReply(QNetworkReply *reply)"),
+        visionSource, QStringLiteral("void VisionHttpClient::parseInferenceReply("),
         "必须能定位 VisionHttpClient::parseInferenceReply() 函数体");
     const QString noTargetBranch = requireBracedScopeAfter(
         parseInferenceReplyBody,

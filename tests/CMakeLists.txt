@@ -17,6 +17,109 @@ target_link_libraries(vision_alignment_decision_tests PRIVATE
 add_test(NAME vision_alignment_decision_tests
          COMMAND vision_alignment_decision_tests)
 
+add_executable(vision_alignment_safety_tests
+    test_vision_alignment_safety.cpp
+    ../src/visionalignmentdecision.cpp
+)
+
+target_include_directories(vision_alignment_safety_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(vision_alignment_safety_tests PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Network
+    Qt6::Test
+)
+
+add_test(NAME vision_alignment_safety_tests
+         COMMAND vision_alignment_safety_tests)
+
+add_executable(visionclient_generation_tests
+    test_visionclient_generation.cpp
+    ../src/visionclient.cpp
+    ../src/runtimesettings.cpp
+)
+
+target_include_directories(visionclient_generation_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(visionclient_generation_tests PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Network
+    Qt6::Test
+)
+
+add_test(NAME visionclient_generation_tests
+         COMMAND visionclient_generation_tests)
+
+add_executable(vision_failure_signal_integration_tests
+    test_vision_failure_signal_integration.cpp
+    ../src/taskexecutor.cpp
+    ../src/huayanScheduler.cpp
+    ../src/agvcontroller.cpp
+    ../src/palletscheduler.cpp
+    ../src/palletplacesequence.cpp
+    ../src/visionclient.cpp
+    ../src/visionalignmentdecision.cpp
+    ../src/runtimesettings.cpp
+)
+
+target_include_directories(vision_failure_signal_integration_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/3rd/HuaYansdk/HuayanRobotLibrary-C++-V1.0.15.0/include"
+)
+
+target_link_libraries(vision_failure_signal_integration_tests PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Network
+    Qt6::SerialBus
+    Qt6::Test
+)
+
+# 集成测试会真正装载 HuayanScheduler 目标文件，因此 Windows 启动测试进程时
+# 必须能在可执行文件同目录找到厂商运行库；这里只复制 DLL，不调用任何机器人接口。
+set(HUAYAN_TEST_SDK_ROOT
+    "${CMAKE_SOURCE_DIR}/3rd/HuaYansdk/HuayanRobotLibrary-C++-V1.0.15.0")
+if(WIN32 AND MSVC)
+    target_link_libraries(vision_failure_signal_integration_tests PRIVATE
+        "${HUAYAN_TEST_SDK_ROOT}/MSVC/HR_Pro.lib"
+    )
+    add_custom_command(TARGET vision_failure_signal_integration_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${HUAYAN_TEST_SDK_ROOT}/MSVC/HR_Pro.dll"
+            "$<TARGET_FILE_DIR:vision_failure_signal_integration_tests>/HR_Pro.dll"
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${HUAYAN_TEST_SDK_ROOT}/MSVC/pthreadVC2.dll"
+            "$<TARGET_FILE_DIR:vision_failure_signal_integration_tests>/pthreadVC2.dll"
+        COMMENT "复制华沿集成测试运行时 DLL"
+    )
+elseif(WIN32 AND MINGW)
+    target_link_libraries(vision_failure_signal_integration_tests PRIVATE
+        "${HUAYAN_TEST_SDK_ROOT}/MinGW/libHR_Pro.dll.a"
+    )
+    add_custom_command(TARGET vision_failure_signal_integration_tests POST_BUILD
+        COMMAND ${CMAKE_COMMAND} -E copy_if_different
+            "${HUAYAN_TEST_SDK_ROOT}/MinGW/libHR_Pro.dll"
+            "$<TARGET_FILE_DIR:vision_failure_signal_integration_tests>/libHR_Pro.dll"
+        COMMENT "复制华沿 MinGW 集成测试运行时 DLL"
+    )
+elseif(UNIX)
+    target_link_libraries(vision_failure_signal_integration_tests PRIVATE
+        "${HUAYAN_TEST_SDK_ROOT}/Linux/libHR_Pro.so"
+    )
+    set_property(TARGET vision_failure_signal_integration_tests APPEND PROPERTY
+        BUILD_RPATH "${HUAYAN_TEST_SDK_ROOT}/Linux"
+    )
+endif()
+
+add_test(NAME vision_failure_signal_integration_tests
+         COMMAND vision_failure_signal_integration_tests)
+
 add_executable(runtime_settings_tests
     test_runtime_settings.cpp
     ../src/runtimesettings.cpp
