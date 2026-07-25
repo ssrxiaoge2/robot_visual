@@ -204,6 +204,115 @@ int main()
             && header.contains(QStringLiteral(
                 "bool dispatchVisionFineCorrectionMoveL(const PendingCommand &cmd);")),
         "调度器必须为两种视觉联合运动提供独立 SDK 下发入口");
+    requireContainsInOrder(
+        header,
+        {QStringLiteral("struct RobotPoseAndJoints"),
+         QStringLiteral("Pose actualTcp;"),
+         QStringLiteral("std::array<double, 6> actualJoints{};"),
+         QStringLiteral(
+             "bool readActualPoseAndJoints(RobotPoseAndJoints *snapshot,"),
+         QStringLiteral(
+             "bool composeVisionPregraspPose("),
+         QStringLiteral(
+             "bool queueInitialVisionPregrasp(")},
+        "调度器必须声明实际 TCP/关节快照、SDK 位姿组合和首次预抓取命令组装入口");
+
+    const QString readSnapshotBody = requireFunctionBody(
+        source,
+        QStringLiteral(
+            "bool HuayanScheduler::readActualPoseAndJoints("
+            "RobotPoseAndJoints *snapshot, QString *error) const"),
+        "必须实现同一调度时刻的实际 TCP 与 J1～J6 快照读取");
+    const QString normalizedReadSnapshotBody =
+        normalizeCppCode(readSnapshotBody);
+    requireContainsInOrder(
+        normalizedReadSnapshotBody,
+        {QStringLiteral("HRIF_ReadActTcpPos("),
+         QStringLiteral("snapshot->actualTcp.x"),
+         QStringLiteral("snapshot->actualTcp.rz"),
+         QStringLiteral("HRIF_ReadActJointPos("),
+         QStringLiteral("snapshot->actualJoints[0]"),
+         QStringLiteral("snapshot->actualJoints[5]")},
+        "实际快照必须先读完整 TCP，再读完整 J1～J6");
+    requireTrue(
+        normalizedReadSnapshotBody.count(
+            QStringLiteral("describeError(m_boxID,")) == 2
+            && normalizedReadSnapshotBody.contains(
+                QStringLiteral("describeError(m_boxID,tcpRet)"))
+            && normalizedReadSnapshotBody.contains(
+                QStringLiteral("读取实际TCP失败：ret=%1"))
+            && normalizedReadSnapshotBody.contains(
+                QStringLiteral("describeError(m_boxID,jointsRet)"))
+            && normalizedReadSnapshotBody.contains(
+                QStringLiteral("读取实际J1～J6失败：ret=%1"))
+            && normalizedReadSnapshotBody.count(QStringLiteral("returnfalse;")) >= 3,
+        "TCP 与关节读取失败必须分别携带各自 SDK 返回码和错误说明，并 fail-closed");
+
+    const QString composeBody = requireFunctionBody(
+        source,
+        QStringLiteral(
+            "bool HuayanScheduler::composeVisionPregraspPose("),
+        "必须实现绝对预抓取位姿组合入口");
+    requireContainsInOrder(
+        composeBody,
+        {QStringLiteral("HRIF_PoseTrans("),
+         QStringLiteral("capturePose.x"),
+         QStringLiteral("correction.xMm"),
+         QStringLiteral("correction.yMm"),
+         QStringLiteral("correction.rzDeg"),
+         QStringLiteral("pregraspPose->x")},
+        "绝对预抓取位必须由拍照位实际 TCP 右乘工具系联合修正得到");
+    const QString composeCall = requireSingleNormalizedCall(
+        composeBody,
+        QStringLiteral("HRIF_PoseTrans"),
+        "绝对预抓取位必须且只能调用一次 HRIF_PoseTrans");
+    requireTrue(
+        composeCall
+            == QStringLiteral(
+                "HRIF_PoseTrans("
+                "m_boxID,m_rbtID,"
+                "capturePose.x,capturePose.y,capturePose.z,"
+                "capturePose.rx,capturePose.ry,capturePose.rz,"
+                "correction.xMm,correction.yMm,0,"
+                "0,0,correction.rzDeg,"
+                "pregraspPose->x,pregraspPose->y,pregraspPose->z,"
+                "pregraspPose->rx,pregraspPose->ry,pregraspPose->rz)"),
+        "PoseTrans 相对位姿必须固定 Z/Rx/Ry 为 0，并完整输出六维绝对位姿");
+    const QString normalizedComposeBody = normalizeCppCode(composeBody);
+    requireTrue(
+        normalizedComposeBody.contains(QStringLiteral("describeError("))
+            && normalizedComposeBody.contains(QStringLiteral("if(ret!=0){"))
+            && normalizedComposeBody.contains(QStringLiteral("returnfalse;")),
+        "PoseTrans 失败必须携带 SDK 返回码和错误说明并 fail-closed");
+
+    const QString queueBody = requireFunctionBody(
+        source,
+        QStringLiteral(
+            "bool HuayanScheduler::queueInitialVisionPregrasp("),
+        "必须实现首次视觉预抓取命令组装入口");
+    requireContainsInOrder(
+        queueBody,
+        {QStringLiteral("readActualPoseAndJoints"),
+         QStringLiteral("VisionAlignment::toToolCorrection"),
+         QStringLiteral("composeVisionPregraspPose"),
+         QStringLiteral("PendingCommandKind::VisionPregraspMoveJ"),
+         QStringLiteral("beginCommandWhenReady")},
+        "首次视觉结果必须先读取实位姿与关节，再组合目标并下发");
+    const QString normalizedQueueBody = normalizeCppCode(queueBody);
+    requireContainsInOrder(
+        normalizedQueueBody,
+        {QStringLiteral("cmd.targetPose=pregraspPose;"),
+         QStringLiteral("cmd.referenceJoints=snapshot.actualJoints;"),
+         QStringLiteral("beginCommandWhenReady(cmd);"),
+         QStringLiteral("if(!queued){"),
+         QStringLiteral("returnfalse;"),
+         QStringLiteral("m_pendingAlignmentCorrection=correction;"),
+         QStringLiteral("returntrue;")},
+        "首次命令必须携带组合后的绝对位姿与当前关节参考，并仅在门控接受后记录待确认修正量");
+    requireTrue(
+        normalizedQueueBody.count(QStringLiteral("emitOperationError(")) >= 2
+            && normalizedQueueBody.count(QStringLiteral("returnfalse;")) >= 2,
+        "读取或位姿组合失败必须经统一错误出口停止调度");
 
     const QString dispatchBody = normalizeCppCode(requireFunctionBody(
         source,

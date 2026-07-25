@@ -2223,6 +2223,138 @@ HuayanScheduler::readMotionDiagnosticSnapshot(bool readPoseAndJoints,
     return snapshot;
 }
 
+bool HuayanScheduler::readActualPoseAndJoints(RobotPoseAndJoints *snapshot, QString *error) const
+{
+    if (!snapshot) {
+        if (error)
+            *error = QStringLiteral("实际位姿与关节快照输出参数为空");
+        return false;
+    }
+
+    // 必须先完整读取实际 TCP，再读取同一调度时刻的 J1～J6。任何一步失败都立即
+    // fail-closed，避免把局部有效的旧关节或位姿用于后续逆解参考和运动下发。
+    const int tcpRet = HRIF_ReadActTcpPos(
+        m_boxID, m_rbtID,
+        snapshot->actualTcp.x, snapshot->actualTcp.y, snapshot->actualTcp.z,
+        snapshot->actualTcp.rx, snapshot->actualTcp.ry, snapshot->actualTcp.rz);
+    if (tcpRet != 0) {
+        const QString detail = describeError(m_boxID, tcpRet);
+        if (error) {
+            *error = detail.isEmpty()
+                ? QStringLiteral("读取实际 TCP 失败：ret=%1").arg(tcpRet)
+                : QStringLiteral("读取实际 TCP 失败：ret=%1（%2）")
+                      .arg(tcpRet)
+                      .arg(detail);
+        }
+        return false;
+    }
+
+    const int jointsRet = HRIF_ReadActJointPos(
+        m_boxID, m_rbtID,
+        snapshot->actualJoints[0], snapshot->actualJoints[1],
+        snapshot->actualJoints[2], snapshot->actualJoints[3],
+        snapshot->actualJoints[4], snapshot->actualJoints[5]);
+    if (jointsRet != 0) {
+        const QString detail = describeError(m_boxID, jointsRet);
+        if (error) {
+            *error = detail.isEmpty()
+                ? QStringLiteral("读取实际 J1～J6 失败：ret=%1").arg(jointsRet)
+                : QStringLiteral("读取实际 J1～J6 失败：ret=%1（%2）")
+                      .arg(jointsRet)
+                      .arg(detail);
+        }
+        return false;
+    }
+
+    if (error)
+        error->clear();
+    return true;
+}
+
+bool HuayanScheduler::composeVisionPregraspPose(
+    const Pose &capturePose,
+    const VisionAlignment::ToolCorrection &correction,
+    Pose *pregraspPose,
+    QString *error) const
+{
+    if (!pregraspPose) {
+        if (error)
+            *error = QStringLiteral("绝对预抓取位姿输出参数为空");
+        return false;
+    }
+
+    // 绝对目标必须由 SDK 做完整刚体位姿连乘：
+    // T_base_pregrasp = T_base_capture × Trans(toolX, toolY, 0) × RotZ(toolRz)。
+    // correction 已由 toToolCorrection() 完成 X 同向、Y/Rz 取反，禁止再做符号变换，
+    // 也禁止把欧拉角或平移量直接与 capturePose 的六个分量相加。
+    const int ret = HRIF_PoseTrans(
+        m_boxID, m_rbtID,
+        capturePose.x, capturePose.y, capturePose.z,
+        capturePose.rx, capturePose.ry, capturePose.rz,
+        correction.xMm, correction.yMm, 0,
+        0, 0, correction.rzDeg,
+        pregraspPose->x, pregraspPose->y, pregraspPose->z,
+        pregraspPose->rx, pregraspPose->ry, pregraspPose->rz);
+    if (ret != 0) {
+        const QString detail = describeError(m_boxID, ret);
+        if (error) {
+            *error = detail.isEmpty()
+                ? QStringLiteral("组合绝对预抓取位姿失败：ret=%1").arg(ret)
+                : QStringLiteral("组合绝对预抓取位姿失败：ret=%1（%2）")
+                      .arg(ret)
+                      .arg(detail);
+        }
+        return false;
+    }
+
+    if (error)
+        error->clear();
+    return true;
+}
+
+bool HuayanScheduler::queueInitialVisionPregrasp(
+    const VisionAlignment::Sample &sample)
+{
+    RobotPoseAndJoints snapshot;
+    QString error;
+    if (!readActualPoseAndJoints(&snapshot, &error)) {
+        emitOperationError(QStringLiteral("[阶段一][初始联合MoveJ] %1").arg(error));
+        return false;
+    }
+
+    // 工具修正的唯一方向换算入口：视觉 X 同向，视觉 Y/Rz 取反。
+    // Z/Rx/Ry 不属于首次平面对准，composeVisionPregraspPose() 固定传入 0。
+    const VisionAlignment::ToolCorrection correction =
+        VisionAlignment::toToolCorrection(sample);
+    Pose pregraspPose;
+    if (!composeVisionPregraspPose(
+            snapshot.actualTcp, correction, &pregraspPose, &error)) {
+        emitOperationError(QStringLiteral("[阶段一][初始联合MoveJ] %1").arg(error));
+        return false;
+    }
+
+    PendingCommand cmd;
+    cmd.kind = PendingCommandKind::VisionPregraspMoveJ;
+    cmd.label = QStringLiteral("视觉初始绝对预抓取");
+    cmd.targetPose = pregraspPose;
+    // 这里保存的是读取绝对目标时的当前实际 J1～J6，只作为笛卡尔逆解参考，
+    // dispatchVisionPregraspMoveJ() 仍以组合后的 Base 绝对位姿作为实际运动目标。
+    cmd.referenceJoints = snapshot.actualJoints;
+
+    // 必须先让统一门控接受命令，再更新待确认修正量。否则旧视觉命令仍在执行时，
+    // 新请求会先覆盖旧修正，随后才被门控拒绝，旧命令到位后就可能累计错误的锚点。
+    const bool queued = beginCommandWhenReady(cmd);
+    if (!queued) {
+        // 具体失败原因和停调度动作由 beginCommandWhenReady() 的统一错误出口负责。
+        return false;
+    }
+
+    // 本任务只组装 helper，不从旧 setGrabOffset() 接线。修正量在运动确认前仅作为
+    // “待完成”状态保存，绝不能提前写入 m_anchorAccumulatedToolX/Y。
+    m_pendingAlignmentCorrection = correction;
+    return true;
+}
+
 bool HuayanScheduler::readActualTcpPose(PalletPose *pose, QString *error) const
 {
     if (!pose) {

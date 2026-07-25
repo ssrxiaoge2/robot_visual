@@ -12,6 +12,7 @@
 
 #include "lineconfig.h"
 #include "palletscheduler.h"
+#include "visionalignmentdecision.h"
 #include "visionclient.h"
 
 class QTimer;
@@ -414,6 +415,28 @@ private:
         int axisErrorsRet = -1;            ///< HRIF_ReadAxisErrorCode 返回码；-1 表示本次未读取。
     };
 
+    /// 首次视觉预抓取命令组装使用的同批实际状态快照。
+    ///
+    /// TCP 与关节角必须在同一个同步 helper 中顺序读取；任一读取失败时整个快照无效，
+    /// 调用方不得使用已成功读取的局部数据继续计算或下发运动。
+    struct RobotPoseAndJoints {
+        Pose actualTcp;                          ///< 当前实际 TCP 位姿，平移 mm、旋转 deg。
+        std::array<double, 6> actualJoints{};   ///< 当前实际 J1～J6，单位 deg。
+    };
+
+    /// 顺序读取当前实际 TCP 和 J1～J6；任一 SDK 调用失败均返回 false。
+    bool readActualPoseAndJoints(RobotPoseAndJoints *snapshot,
+                                 QString *error) const;
+    /// 使用 SDK 刚体位姿运算，把工具系联合修正右乘到拍照时实际 TCP。
+    bool composeVisionPregraspPose(
+        const Pose &capturePose,
+        const VisionAlignment::ToolCorrection &correction,
+        Pose *pregraspPose,
+        QString *error) const;
+    /// 组装首次视觉联合 MoveJ；任务 4 只提供 helper，生产入口由后续阶段状态机接线。
+    bool queueInitialVisionPregrasp(
+        const VisionAlignment::Sample &sample);
+
     /// 在真正下发 SDK 命令前先做一次控制器状态门控。
     ///
     /// 该入口只负责登记待执行命令并启动/立即执行状态检查，不会直接调用 SDK 运动原语；
@@ -500,6 +523,7 @@ private:
     double m_preGripScanSearchTargetY = 0.0;  ///< 本轮夹紧前扫码搜索目标 Y 偏移(mm)。
     double m_anchorAccumulatedToolX = 0.0; ///< 初始拍照位到当前相机位置已完成工具系 X 位移(mm)。
     double m_anchorAccumulatedToolY = 0.0; ///< 初始拍照位到当前相机位置已完成工具系 Y 位移(mm)。
+    VisionAlignment::ToolCorrection m_pendingAlignmentCorrection; ///< 已组装且待确认到位的工具系 X/Y/Rz；确认前不得累计到锚点。
     bool m_anchorHasPreviousTarget = false; ///< 是否已有上一帧可信目标用于闭环跳变保护。
     double m_anchorPreviousTargetX = 0.0; ///< 上一帧可信目标相对初始拍照锚点 X(mm)。
     double m_anchorPreviousTargetY = 0.0; ///< 上一帧可信目标相对初始拍照锚点 Y(mm)。
