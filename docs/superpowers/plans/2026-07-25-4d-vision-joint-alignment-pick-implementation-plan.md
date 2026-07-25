@@ -98,7 +98,7 @@
 
 - 产生：`RuntimeSettings::VisionClosedLoop::maxFineCorrectionCount`，类型 `int`，默认值 `1`，合法范围 `[0, 2]`。
 - 产生：INI 键 `vision/maxFineCorrectionCount`。
-- 删除：`RuntimeSettings::VisionClosedLoop::maxGrabIterations`。
+- 过渡保留：`RuntimeSettings::VisionClosedLoop::maxGrabIterations` 仅作为任务 5 删除旧调度循环前的编译桥接；不展示、不保存、不校验，新流程不得读取，任务 5 必须连同旧循环一起删除。
 - 删除：INI 键 `vision/maxGrabIterations` 的保存和读取；保存设置时主动移除磁盘中遗留的旧键。
 
 - [ ] **步骤 1：先在运行时配置测试中写失败用例**
@@ -182,11 +182,13 @@ ctest --test-dir $BuildDirectory -C Debug --output-on-failure -R "runtime_settin
 int maxFineCorrectionCount = 1; ///< 初始联合 MoveJ 后允许的联合 MoveL 精修正次数，范围 0～2。
 ```
 
-同时删除：
+任务 1 暂时保留：
 
 ```cpp
-int maxGrabIterations = 15;
+int maxGrabIterations = 15; ///< 仅用于旧阶段一循环迁移前保持中间提交可构建；任务5必须删除。
 ```
+
+该字段不得重新接入设置界面、INI 持久化或新联合闭环。之所以延后到任务 5 删除，是为了避免任务 1 完成后、调度器尚未迁移时主程序因成员缺失而无法编译。
 
 在 `validateRuntimeSettings()` 中加入：
 
@@ -841,6 +843,7 @@ void enterVisionAlignmentValidation();
   - `executeNextGrabMove()`
   - `recordCompletedGrabMove()`
   - `validateStageOneRelMoveBeforeDispatch()`
+- 同步删除任务 1 为保持中间提交可构建而临时保留的 `RuntimeSettings::VisionClosedLoop::maxGrabIterations` 字段；删除后全工程不得再出现运行时读取。
 - 保留 `RelMove` 和 `m_palletMoves`，因为码垛路径仍使用它们。
 
 - [ ] **步骤 1：先写状态迁移和旧循环退出契约**
