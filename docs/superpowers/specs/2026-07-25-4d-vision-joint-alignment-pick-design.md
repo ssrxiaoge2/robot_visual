@@ -246,11 +246,13 @@ UCS：Base
 ```text
 接口：HRIF_WayPointRel
 运动类型：MoveL
-相对模式：叠加值
+相对模式：Tool 模式（nrelMoveType=2）
 启用轴：X、Y、Rz
 禁用轴：Z、Rx、Ry
 输入：toolX、-toolY、-normalizedRz
 ```
+
+华沿 `HR_Pro.h` 对 `nrelMoveType` 的注释只列出 0 和 1，但配套完整 SDK 接口文档 3.10.3 明确列出 `2: tool 模式`，并明确 `nPointList=0` 时空间位姿和关节基准参数均传 0。本设计以完整接口文档为准，使用 `nrelMoveType=2`，不得误用普通叠加模式 1。
 
 精修使用 MoveL 的原因：
 

@@ -550,7 +550,7 @@ requireContainsInOrder(source,
 
 - `nType = 1`，表示线性运动；
 - `nPointList = 0`；
-- `nrelMoveType = 1`，表示叠加相对量；
+- `nrelMoveType = 2`，表示沿 Tool 坐标系执行相对量；
 - X、Y、Rz 掩码为 1；
 - Z、Rx、Ry 掩码为 0；
 - TCP 名称和 UCS 名称沿用当前调度器实际配置；
@@ -613,7 +613,7 @@ HRIF_WayPointRel(
     1, 0,
     0, 0, 0, 0, 0, 0,
     0, 0, 0, 0, 0, 0,
-    1,
+    2,
     1, 1, 0, 0, 0, 1,
     cmd.targetPose.x,
     cmd.targetPose.y,
@@ -626,7 +626,7 @@ HRIF_WayPointRel(
     0, 0, 0, 0, commandId);
 ```
 
-SDK 参数含义必须用中文逐项注释，尤其说明该命令是“工具位姿叠加量、X/Y/Rz 三轴在同一个线性轨迹命令中完成”，避免后续误改为三个 `HRIF_MoveRelL`。
+SDK 参数含义必须用中文逐项注释，尤其说明 `nrelMoveType=2` 来自完整 SDK 接口文档 3.10.3 的 Tool 模式定义，`nPointList=0` 时 `dPos_X～Rz` 和 `dPos_J1～J6` 均传 0；X/Y/Rz 三轴在同一个线性轨迹命令中完成，避免后续误改为普通叠加模式 1 或三个 `HRIF_MoveRelL`。
 
 - [ ] **步骤 6：运行契约测试和现有调度契约**
 
