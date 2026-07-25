@@ -337,6 +337,35 @@ int main()
         QStringLiteral(
             "void HuayanScheduler::emitOperationError(const QString &msg)"),
         "必须能定位统一错误收口 emitOperationError() 函数体");
+    const QString actionErrorBranch = requireBracedScopeAfter(
+        emitOperationErrorBody,
+        QStringLiteral("if (m_action != Action::None)"),
+        "必须能定位统一错误出口中的独立 Action 分流");
+    requireContainsInOrder(
+        actionErrorBranch,
+        {QStringLiteral("actionError(msg);"),
+         QStringLiteral("return;")},
+        "独立 Action 错误必须沿用 actionError() 原有语义并立即返回");
+    requireTrue(
+        !actionErrorBranch.contains(QStringLiteral("[阶段一][安全停止]"))
+            && !actionErrorBranch.contains(QStringLiteral("emit stageError(msg);"))
+            && !actionErrorBranch.contains(QStringLiteral("stop();")),
+        "独立 Action 分流不得伪装成阶段一安全停止或升级为阶段停止");
+
+    const qsizetype actionSplitIndex = emitOperationErrorBody.indexOf(
+        QStringLiteral("if (m_action != Action::None)"));
+    const qsizetype safeStopLogIndex = emitOperationErrorBody.indexOf(
+        QStringLiteral("[阶段一][安全停止]"));
+    const qsizetype stageErrorIndex = emitOperationErrorBody.indexOf(
+        QStringLiteral("emit stageError(msg);"));
+    const qsizetype stageStopIndex = emitOperationErrorBody.indexOf(
+        QStringLiteral("stop();"), stageErrorIndex);
+    requireTrue(
+        actionSplitIndex >= 0
+            && safeStopLogIndex > actionSplitIndex
+            && stageErrorIndex > safeStopLogIndex
+            && stageStopIndex > stageErrorIndex,
+        "必须先分流独立 Action，再为真正进入 stageError/stop 的阶段一错误输出安全停止日志");
     requireContainsInOrder(
         emitOperationErrorBody,
         {QStringLiteral("[阶段一][安全停止]"),

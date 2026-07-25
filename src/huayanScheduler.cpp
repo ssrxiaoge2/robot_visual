@@ -1607,8 +1607,14 @@ void HuayanScheduler::requestRobotStop()
 
 void HuayanScheduler::emitOperationError(const QString &msg)
 {
+    if (m_action != Action::None) {
+        actionError(msg);
+        return;
+    }
+
     if (m_stage == Stage::StageOne) {
-        // 必须在 stop() 清理锚点和窗口前记录现场信息，便于定位串工位、跳目标或视觉旧帧。
+        // 独立 Action 已在上方按原语义返回；只有真正进入 stageError/stop 的阶段一
+        // 错误才能记录“安全停止”。日志必须在 stop() 清理锚点和窗口前输出。
         emit logMessage(
             QStringLiteral("[阶段一][安全停止] station=%1 "
                            "anchor=(X=%2mm,Y=%3mm) reason=%4")
@@ -1616,11 +1622,6 @@ void HuayanScheduler::emitOperationError(const QString &msg)
                 .arg(m_anchorPreviousTargetX, 0, 'f', 1)
                 .arg(m_anchorPreviousTargetY, 0, 'f', 1)
                 .arg(msg));
-    }
-
-    if (m_action != Action::None) {
-        actionError(msg);
-        return;
     }
 
     emit stageError(msg);
