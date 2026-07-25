@@ -1,5 +1,22 @@
 find_package(Qt6 REQUIRED COMPONENTS Core Test Network Gui)
 
+add_executable(vision_alignment_decision_tests
+    test_vision_alignment_decision.cpp
+    ../src/visionalignmentdecision.cpp
+)
+
+target_include_directories(vision_alignment_decision_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(vision_alignment_decision_tests PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+
+add_test(NAME vision_alignment_decision_tests
+         COMMAND vision_alignment_decision_tests)
+
 add_executable(runtime_settings_tests
     test_runtime_settings.cpp
     ../src/runtimesettings.cpp
