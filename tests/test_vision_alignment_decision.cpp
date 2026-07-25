@@ -50,6 +50,12 @@ private slots:
         QTest::newRow("精修次数耗尽则停止")
             << 4000LL << false << true << 1
             << VisionAlignment::WindowAction::Stop;
+        QTest::newRow("八秒边界即使完全稳定也停止")
+            << 8000LL << true << true << 0
+            << VisionAlignment::WindowAction::Stop;
+        QTest::newRow("超过八秒即使完全稳定也停止")
+            << 8001LL << true << true << 0
+            << VisionAlignment::WindowAction::Stop;
         QTest::newRow("八秒Z仍不稳定则停止")
             << 8000LL << true << false << 0
             << VisionAlignment::WindowAction::Stop;

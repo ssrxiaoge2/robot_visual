@@ -49,6 +49,13 @@ VisionAlignment::decideWindow(const WindowInput &input,
         return {WindowAction::Stop, {}, QStringLiteral("锁定目标无效或已丢失")};
     }
 
+    // 8 秒是不可越过的硬截止点。边界时刻即使本帧刚好同时满足对准和 Z 稳定，
+    // 也必须停止，避免视觉回调与超时定时器的事件先后顺序改变机械臂最终动作。
+    if (input.elapsedMs >= policy.maxElapsedMs) {
+        return {WindowAction::Stop, {},
+                QStringLiteral("观察窗口达到8秒硬上限")};
+    }
+
     const bool aligned = isPlanarAligned(input.latest, policy);
 
     // 最小观察时间到达前只积累稳定性证据，避免过早下探或精修。
@@ -57,12 +64,6 @@ VisionAlignment::decideWindow(const WindowInput &input,
 
     if (aligned && input.zStable)
         return {WindowAction::Descend, {}, QString()};
-
-    // 到达硬窗口终点时，只有已同时满足平面对准和 Z 稳定的情况才能越过此前分支下探。
-    if (input.elapsedMs >= policy.maxElapsedMs) {
-        return {WindowAction::Stop, {},
-                QStringLiteral("观察窗口达到8秒仍未同时满足对准与Z稳定")};
-    }
 
     if (!aligned
         && input.completedFineCorrectionCount < policy.maxFineCorrectionCount) {
