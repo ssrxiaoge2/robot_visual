@@ -145,6 +145,28 @@ int main()
                     && setGrabOffsetBody.contains(QStringLiteral(
                         "VisionAlignment::decideWindow(input, policy)")),
                 "每个真实新帧必须同时把XY/Rz、Z稳定性、耗时和已完成精修次数交给统一判定");
+    requireTrue(
+        setGrabOffsetBody.contains(QStringLiteral("[阶段一][视觉输入]"))
+            && setGrabOffsetBody.contains(QStringLiteral("frame=%1"))
+            && setGrabOffsetBody.contains(
+                QStringLiteral("anchor=(X=%2mm,Y=%3mm)"))
+            && setGrabOffsetBody.contains(QStringLiteral(
+                "raw=(X=%4mm,Y=%5mm,Z=%6mm,Rz=%7°)"))
+            && setGrabOffsetBody.contains(
+                QStringLiteral("normalizedRz=%8°")),
+        "每个视觉输入必须记录真实帧号、锁定锚点、原始四维量和规范化Rz，并标注单位");
+    requireTrue(
+        setGrabOffsetBody.contains(QStringLiteral("[阶段一][统一窗口]"))
+            && setGrabOffsetBody.contains(QStringLiteral("elapsed=%1ms"))
+            && setGrabOffsetBody.contains(
+                QStringLiteral("uniqueFrames=%2"))
+            && setGrabOffsetBody.contains(QStringLiteral(
+                "XY/Rz=(X=%3mm,Y=%4mm,Rz=%5°)"))
+            && setGrabOffsetBody.contains(
+                QStringLiteral("ZRange=%6mm"))
+            && setGrabOffsetBody.contains(
+                QStringLiteral("action=%7")),
+        "统一窗口必须结构化记录耗时、真实帧数、XY/Rz、Z极差与判定动作");
 
     const qsizetype continueAction = setGrabOffsetBody.indexOf(
         QStringLiteral("case VisionAlignment::WindowAction::ContinueObserving:"));
@@ -201,6 +223,9 @@ int main()
     requireTrue(!enterValidationBody.contains(QStringLiteral(
                     "m_completedFineCorrectionCount = 0")),
                 "重启观察窗口不得清空已完成联合精修次数");
+    requireTrue(!enterValidationBody.contains(QStringLiteral(
+                    "m_stageOneLargeRzExecutionCount = 0")),
+                "重启观察窗口不得清空初始MoveJ和精修MoveL共用的大角度执行次数");
 
     const QString noObjectBody = requireBracedScopeAfter(
         source,
@@ -231,6 +256,44 @@ int main()
         "必须能定位 stop() 函数体");
     requireTrue(stopBody.contains(QStringLiteral("resetStableZValidation();")),
                 "停止阶段时必须清空 Z 稳定验证状态");
+    requireTrue(stopBody.contains(QStringLiteral("stopVisionWaitTimeout();"))
+                    && stopBody.contains(
+                        QStringLiteral("m_pendingAlignmentCorrection = {};")),
+                "停止阶段时必须终止视觉等待并清空尚未确认到位的联合修正");
+
+    const QString timeoutBody = requireBracedScopeAfter(
+        source,
+        QStringLiteral("void HuayanScheduler::onStepTimeout()"),
+        "必须能定位阶段超时失败入口");
+    const QString noObjectBodyForSafety = requireBracedScopeAfter(
+        source,
+        QStringLiteral("void HuayanScheduler::onVisionNoObject()"),
+        "必须能定位验证期间无目标失败入口");
+    const QString visionErrorBody = requireBracedScopeAfter(
+        source,
+        QStringLiteral(
+            "void HuayanScheduler::onVisionErrorForPickup(const QString &msg)"),
+        "必须能定位视觉推理失败入口");
+    requireTrue(
+        timeoutBody.contains(QStringLiteral("emitOperationError"))
+            && noObjectBodyForSafety.contains(
+                QStringLiteral("emitOperationError"))
+            && visionErrorBody.contains(QStringLiteral("emitOperationError")),
+        "观察超时、锁定目标消失和视觉推理失败必须全部经统一错误出口停止");
+    const QString validationFailureScope =
+        setGrabOffsetBody + enterValidationBody + timeoutBody
+        + noObjectBodyForSafety + visionErrorBody;
+    requireTrue(
+        !validationFailureScope.contains(QStringLiteral("MoveToSurvey"))
+            && !validationFailureScope.contains(
+                QStringLiteral("startStageOne()"))
+            && !validationFailureScope.contains(
+                QStringLiteral("m_grabIterations"))
+            && !validationFailureScope.contains(
+                QStringLiteral("maxGrabIterations"))
+            && !validationFailureScope.contains(
+                QStringLiteral("CloseGripper")),
+        "联合观察失败不得返回拍照位、自动重启、复用旧循环或进入夹爪闭合");
 
     return 0;
 }

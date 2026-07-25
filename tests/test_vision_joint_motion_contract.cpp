@@ -515,6 +515,15 @@ int main()
         normalizedQueueBody.count(QStringLiteral("emitOperationError(")) >= 2
             && normalizedQueueBody.count(QStringLiteral("returnfalse;")) >= 2,
         "读取或位姿组合失败必须经统一错误出口停止调度");
+    requireContainsInOrder(
+        queueBody,
+        {QStringLiteral("composeVisionPregraspPose"),
+         QStringLiteral("[阶段一][位姿组合]"),
+         QStringLiteral("captureBase=(X=%1mm,Y=%2mm,Z=%3mm"),
+         QStringLiteral("toolDelta=(X=%7mm,Y=%8mm,Z=0mm"),
+         QStringLiteral("pregraspBase=(X=%10mm,Y=%11mm,Z=%12mm"),
+         QStringLiteral("beginCommandWhenReady")},
+        "绝对位姿组合成功后、运动排队前必须记录带mm和角度单位的拍照位、工具修正与预抓取位");
 
     const QString fineQueueBody = requireFunctionBody(
         source,
@@ -537,6 +546,14 @@ int main()
     requireTrue(
         normalizedFineQueueBody.count(pendingCorrectionAssignment) == 1,
         "联合精修函数内必须且只能登记一次待确认修正量");
+    requireTrue(
+        normalizedQueueBody.contains(QStringLiteral(
+            "m_pendingLargeRzExecution=qAbs(correction.rzDeg)>="
+            "m_runtimeSettings.vision.largeRzJumpThresholdDeg;"))
+            && normalizedFineQueueBody.contains(QStringLiteral(
+                "m_pendingLargeRzExecution=qAbs(cmd.targetPose.rz)>="
+                "m_runtimeSettings.vision.largeRzJumpThresholdDeg;")),
+        "首次MoveJ与精修MoveL必须共用同一个待完成大角度Rz执行标记");
     const qsizetype fineQueueGateIndex = normalizedFineQueueBody.indexOf(
         QStringLiteral("constboolqueued=beginCommandWhenReady(cmd);"));
     requireTrue(
@@ -595,6 +612,16 @@ int main()
             && !normalizedRecordCompletedBody.contains(QStringLiteral(
                 "m_anchorAccumulatedToolY+=m_pendingAlignmentCorrection.rzDeg")),
         "Rz 修正不得加入拍照锚点 XY 累计量");
+    requireContainsInOrder(
+        recordCompletedBody,
+        {QStringLiteral("m_anchorAccumulatedToolX +="),
+         QStringLiteral("m_anchorAccumulatedToolY +="),
+         QStringLiteral("[阶段一][联合运动完成]"),
+         QStringLiteral("kind=%1"),
+         QStringLiteral("accumulatedToolXY=(X=%2mm,Y=%3mm)"),
+         QStringLiteral("completedFine=%4/%5"),
+         QStringLiteral("m_pendingAlignmentCorrection = {};")},
+        "联合运动到位后必须在清空待修正前记录类型、累计工具XY和已完成精修次数");
     requireTrue(
         header.contains(QStringLiteral(
             "bool m_pendingLargeRzExecution = false;"))
@@ -607,6 +634,24 @@ int main()
         normalizedSetGrabOffsetBody.count(
             QStringLiteral("++m_stageOneLargeRzExecutionCount;")) == 0,
         "视觉帧确认大角度方向时不得提前消耗实际执行次数");
+    requireTrue(
+        normalizedSetGrabOffsetBody.contains(QStringLiteral(
+            "qAbs(rz)>=m_runtimeSettings.vision.largeRzJumpThresholdDeg"))
+            && normalizedSetGrabOffsetBody.contains(QStringLiteral(
+                "m_stageOneLargeRzExecutionCount>="
+                "m_runtimeSettings.vision.maxLargeRzExecutions"))
+            && normalizedSetGrabOffsetBody.contains(QStringLiteral(
+                "qAbs(qAbs(m_pendingLargeRz)-qAbs(rz))>"
+                "m_runtimeSettings.vision.largeRzDeltaToleranceDeg"))
+            && normalizedSetGrabOffsetBody.contains(
+                QStringLiteral("m_pendingLargeRzConfirmation=true;"))
+            && normalizedSetGrabOffsetBody.contains(
+                QStringLiteral("m_pendingLargeRzConfirmation=false;")),
+        "大角度Rz必须由阈值触发、两帧差值确认并受同一目标最大执行次数限制");
+    requireTrue(
+        !normalizeCppCode(enterValidationBody).contains(QStringLiteral(
+            "m_stageOneLargeRzExecutionCount=0;")),
+        "每次联合运动后重开观察窗口不得清零初始MoveJ与精修MoveL共用的大角度执行计数");
 
     const QString initialCompletionBranch = requireSegmentBetween(
         normalizedRecordCompletedBody,
@@ -738,6 +783,12 @@ int main()
                 "cmd.cmdId.toStdString())"),
         "初始联合 MoveJ 必须完整锁定笛卡尔目标、六轴逆解参考、坐标系、运动参数和四个控制参数");
     const QString normalizedPregraspBody = normalizeCppCode(pregraspBody);
+    requireTrue(
+        pregraspBody.contains(QStringLiteral("[阶段一][初始联合MoveJ]"))
+            && pregraspBody.contains(QStringLiteral("command=%1"))
+            && pregraspBody.contains(QStringLiteral(
+                "referenceJoints=(J1=%8°,J2=%9°,J3=%10°,J4=%11°,J5=%12°,J6=%13°)")),
+        "初始联合MoveJ下发前必须记录命令号和带角度单位的六轴逆解参考");
     requireContainsInOrder(
         normalizedPregraspBody,
         {QStringLiteral("if(nRet!=0){"),

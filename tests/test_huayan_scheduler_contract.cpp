@@ -331,6 +331,93 @@ int main()
         {QStringLiteral("stopVisionWaitTimeout();"),
          QStringLiteral("emitOperationError")},
         "HuayanScheduler 收到锚点可信拒绝后必须停止视觉等待并直接阶段失败");
+
+    const QString emitOperationErrorBody = requireBracedScopeAfter(
+        source,
+        QStringLiteral(
+            "void HuayanScheduler::emitOperationError(const QString &msg)"),
+        "必须能定位统一错误收口 emitOperationError() 函数体");
+    requireContainsInOrder(
+        emitOperationErrorBody,
+        {QStringLiteral("[阶段一][安全停止]"),
+         QStringLiteral("station=%1"),
+         QStringLiteral("anchor=(X=%2mm,Y=%3mm)"),
+         QStringLiteral("reason=%4"),
+         QStringLiteral("emit stageError(msg);"),
+         QStringLiteral("stop();")},
+        "阶段一失败必须先用仍保留的工位和锚点输出安全停止日志，再发出错误并停止调度");
+    requireTrue(
+        !emitOperationErrorBody.contains(QStringLiteral("CloseGripper"))
+            && !emitOperationErrorBody.contains(
+                QStringLiteral("startStageOne()"))
+            && !emitOperationErrorBody.contains(
+                QStringLiteral("MoveToSurvey")),
+        "统一错误出口不得闭合夹爪、重启阶段一或自动返回拍照位");
+
+    const QString stopBody = requireBracedScopeAfter(
+        source,
+        QStringLiteral("void HuayanScheduler::stop(bool emitStoppedLog)"),
+        "必须能定位 HuayanScheduler::stop() 函数体");
+    requireContainsInOrder(
+        stopBody,
+        {QStringLiteral("stopVisionWaitTimeout();"),
+         QStringLiteral("stopPollingAndTimers();"),
+         QStringLiteral("requestRobotStop();"),
+         QStringLiteral("m_pendingAlignmentCorrection = {};"),
+         QStringLiteral("resetStableZValidation();"),
+         QStringLiteral("resetVisionAnchorTracking();"),
+         QStringLiteral("m_stage = Stage::None;"),
+         QStringLiteral("emit schedulerStopped();")},
+        "停止路径必须依次停止视觉/运动等待、停止机器人、清空待修正与窗口，再清锚点并发出停止信号");
+    requireTrue(
+        !stopBody.contains(QStringLiteral("++m_commandSeq"))
+            && !stopBody.contains(QStringLiteral("CloseGripper"))
+            && !stopBody.contains(QStringLiteral("surveyReady"))
+            && !stopBody.contains(QStringLiteral("startStageOne")),
+        "stop() 不得重复增加命令序号，也不得闭合夹爪、请求新视觉帧或自动重启");
+
+    const QString stopPollingBody = requireBracedScopeAfter(
+        source,
+        QStringLiteral("void HuayanScheduler::stopPollingAndTimers()"),
+        "必须能定位统一计时器清理入口");
+    requireContainsInOrder(
+        stopPollingBody,
+        {QStringLiteral("m_pollTimer->stop();"),
+         QStringLiteral("m_timeoutTimer->stop();"),
+         QStringLiteral("m_commandReadyTimer->stop();"),
+         QStringLiteral("nextCallbackSeq();")},
+        "统一清理必须停止运动、视觉和门控计时器，并使旧 singleShot 回调失效");
+    requireTrue(
+        stopPollingBody.count(QStringLiteral("nextCallbackSeq();")) == 1
+            && !stopPollingBody.contains(QStringLiteral("++m_commandSeq")),
+        "一次停止清理必须且只能通过 nextCallbackSeq() 作废一次旧异步回调");
+
+    const QString queueInitialBody = requireBracedScopeAfter(
+        source,
+        QStringLiteral("bool HuayanScheduler::queueInitialVisionPregrasp("),
+        "必须能定位首次联合 MoveJ 排队入口");
+    const QString queueFineBody = requireBracedScopeAfter(
+        source,
+        QStringLiteral("bool HuayanScheduler::queueVisionFineCorrection("),
+        "必须能定位联合精修 MoveL 排队入口");
+    const QString enterValidationBody = requireBracedScopeAfter(
+        source,
+        QStringLiteral("void HuayanScheduler::enterVisionAlignmentValidation()"),
+        "必须能定位联合观察窗口入口");
+    const QString alignmentFailureScope =
+        queueInitialBody + queueFineBody + enterValidationBody
+        + rejectedSlotBody;
+    requireTrue(
+        !alignmentFailureScope.contains(QStringLiteral("MoveToSurvey"))
+            && !alignmentFailureScope.contains(
+                QStringLiteral("startStageOne()"))
+            && !alignmentFailureScope.contains(
+                QStringLiteral("m_grabIterations"))
+            && !alignmentFailureScope.contains(
+                QStringLiteral("maxGrabIterations"))
+            && !alignmentFailureScope.contains(
+                QStringLiteral("CloseGripper")),
+        "联合观察和精修失败路径不得返回拍照位、重启、复用旧循环或闭合夹爪");
     requireContainsInOrder(
         deviceManagerSource,
         {QStringLiteral("connect(m_visionClient,"),

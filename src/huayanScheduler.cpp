@@ -649,24 +649,29 @@ void HuayanScheduler::completeStage()
 
 void HuayanScheduler::stop(bool emitStoppedLog)
 {
+    // 先按当前阶段状态停止视觉等待，随后统一停止运动轮询和门控计时器。
+    // stopPollingAndTimers() 内部只作废一次命令序号，避免重复递增掩盖回调归属。
+    stopVisionWaitTimeout();
     stopPollingAndTimers();
     requestRobotStop();
-    ++m_commandSeq; // 让已经排队的 singleShot 回调全部失效，避免旧阶段推进新阶段。
     clearActionState();
     m_searchDescendCount = 0;
     m_searchDescendedMm = 0.0;
+    // 未确认到位的修正不得进入锚点累计；停止后也不能被旧运动完成回调再次消费。
+    m_pendingAlignmentCorrection = {};
+    m_pendingLargeRzExecution = false;
     resetStableZValidation();
     resetDepthDescentState();
     m_pendingLargeRzConfirmation = false;
     m_pendingLargeRz = 0.0;
-    m_stageOneLargeRzExecutionCount = 0;
     m_waitingPreGripScan = false;
     m_preGripScanSearchCurrentY = 0.0;
     m_preGripScanSearchTargetY = 0.0;
     m_initialVisionMoveCompleted = false;
     m_completedFineCorrectionCount = 0;
-    m_pendingAlignmentCorrection = {};
-    m_pendingLargeRzExecution = false;
+    // 错误路径已在 emitOperationError() 中输出工位和锁定目标；到这里再清理现场锚点，
+    // 既保留故障诊断信息，又保证下一任务不会继承本轮目标。
+    resetVisionAnchorTracking();
     m_stage = Stage::None;
     m_stageStep = StageStep::None;
     if (emitStoppedLog) {
@@ -1213,11 +1218,23 @@ void HuayanScheduler::recordCompletedVisionAlignmentMove()
         ++m_stageOneLargeRzExecutionCount;
     }
 
+    QString completedKind = QStringLiteral("未知");
     if (m_stageStep == StageStep::MoveToPregrasp) {
         m_initialVisionMoveCompleted = true;
+        completedKind = QStringLiteral("初始");
     } else if (m_stageStep == StageStep::FineCorrectAlignment) {
         ++m_completedFineCorrectionCount;
+        completedKind = QStringLiteral("精修");
     }
+
+    emit logMessage(
+        QStringLiteral("[阶段一][联合运动完成] kind=%1 "
+                       "accumulatedToolXY=(X=%2mm,Y=%3mm) completedFine=%4/%5")
+            .arg(completedKind)
+            .arg(m_anchorAccumulatedToolX, 0, 'f', 1)
+            .arg(m_anchorAccumulatedToolY, 0, 'f', 1)
+            .arg(m_completedFineCorrectionCount)
+            .arg(m_runtimeSettings.vision.maxFineCorrectionCount));
 
     m_pendingAlignmentCorrection = {};
     m_pendingLargeRzExecution = false;
@@ -1574,7 +1591,8 @@ void HuayanScheduler::stopPollingAndTimers()
     m_loggedRunFuncScriptRunning = false;
     m_commandReadyElapsedMs = 0;
     m_commandResetIssued = false;
-    ++m_commandSeq;
+    // 所有延时回调都携带命令序号；统一递增一次即可让旧 singleShot 安全失效。
+    nextCallbackSeq();
 }
 
 void HuayanScheduler::requestRobotStop()
@@ -1589,6 +1607,17 @@ void HuayanScheduler::requestRobotStop()
 
 void HuayanScheduler::emitOperationError(const QString &msg)
 {
+    if (m_stage == Stage::StageOne) {
+        // 必须在 stop() 清理锚点和窗口前记录现场信息，便于定位串工位、跳目标或视觉旧帧。
+        emit logMessage(
+            QStringLiteral("[阶段一][安全停止] station=%1 "
+                           "anchor=(X=%2mm,Y=%3mm) reason=%4")
+                .arg(m_captureFuncName)
+                .arg(m_anchorPreviousTargetX, 0, 'f', 1)
+                .arg(m_anchorPreviousTargetY, 0, 'f', 1)
+                .arg(msg));
+    }
+
     if (m_action != Action::None) {
         actionError(msg);
         return;
@@ -1749,8 +1778,10 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 
     stopVisionWaitTimeout();
 
-    qint64 frameId = -1;
-    qint64 timestampMs = -1;
+    qint64 frameId =
+        m_visionClient ? m_visionClient->lastInferenceFrameId() : -1;
+    qint64 timestampMs =
+        m_visionClient ? m_visionClient->lastInferenceTimestampMs() : -1;
     if (validatingVisionAlignment) {
         if (!m_visionClient) {
             const VisionAlignment::Sample invalidSample{x, y, z, rz, false};
@@ -1760,8 +1791,6 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
             return;
         }
 
-        frameId = m_visionClient->lastInferenceFrameId();
-        timestampMs = m_visionClient->lastInferenceTimestampMs();
         if (frameId < 0 || timestampMs < 0) {
             const VisionAlignment::Sample invalidSample{x, y, z, rz, false};
             emitOperationError(formatVisionAlignmentFailure(
@@ -1859,6 +1888,20 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
         m_pendingLargeRz = 0.0;
     }
 
+    emit logMessage(
+        QStringLiteral("[阶段一][视觉输入] frame=%1 "
+                       "anchor=(X=%2mm,Y=%3mm) "
+                       "raw=(X=%4mm,Y=%5mm,Z=%6mm,Rz=%7°) "
+                       "normalizedRz=%8°")
+            .arg(frameId)
+            .arg(m_anchorPreviousTargetX, 0, 'f', 1)
+            .arg(m_anchorPreviousTargetY, 0, 'f', 1)
+            .arg(x, 0, 'f', 1)
+            .arg(y, 0, 'f', 1)
+            .arg(z, 0, 'f', 1)
+            .arg(rz, 0, 'f', 1)
+            .arg(effectiveRz, 0, 'f', 1));
+
     m_grabOffset = { x, y, z, 0.0, 0.0, effectiveRz };
     emit logMessage(QStringLiteral("[阶段一] 视觉偏移(工具系) X=%1 Y=%2 Z=%3 Rz=%4（首次MoveJ=%5，已完成精修=%6/%7）")
                         .arg(x, 0, 'f', 1).arg(y, 0, 'f', 1)
@@ -1955,19 +1998,36 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
             decision.reason = QStringLiteral("等待Rz大角度连续帧确认");
         }
 
+        QString actionText;
+        switch (decision.action) {
+        case VisionAlignment::WindowAction::ContinueObserving:
+            actionText = QStringLiteral("继续观察");
+            break;
+        case VisionAlignment::WindowAction::Descend:
+            actionText = QStringLiteral("Z下探");
+            break;
+        case VisionAlignment::WindowAction::FineCorrect:
+            actionText = QStringLiteral("联合精修");
+            break;
+        case VisionAlignment::WindowAction::Stop:
+            actionText = QStringLiteral("安全停止");
+            break;
+        }
+
         emit logMessage(
-            QStringLiteral("[阶段一][联合对准] 新帧=%1，窗口=%2/%3ms，真实新帧=%4，"
-                           "当前=(X=%5,Y=%6,Z=%7,Rz=%8)，Z窗口=[%9]，极差=%10mm")
-                .arg(frameId)
+            QStringLiteral("[阶段一][统一窗口] elapsed=%1ms uniqueFrames=%2 "
+                           "XY/Rz=(X=%3mm,Y=%4mm,Rz=%5°) ZRange=%6mm "
+                           "action=%7 reason=%8 frame=%9 ZSamples=[%10]")
                 .arg(elapsedMs)
-                .arg(kStableZMaxElapsedMs)
                 .arg(m_stableZUniqueFrames)
                 .arg(sample.xMm, 0, 'f', 1)
                 .arg(sample.yMm, 0, 'f', 1)
-                .arg(sample.zMm, 0, 'f', 1)
                 .arg(sample.rzDeg, 0, 'f', 1)
-                .arg(sampleTexts.join(QStringLiteral(", ")))
-                .arg(windowRange, 0, 'f', 1));
+                .arg(windowRange, 0, 'f', 1)
+                .arg(actionText)
+                .arg(decision.reason)
+                .arg(frameId)
+                .arg(sampleTexts.join(QStringLiteral(", "))));
 
         switch (decision.action) {
         case VisionAlignment::WindowAction::ContinueObserving:
@@ -2443,6 +2503,27 @@ bool HuayanScheduler::queueInitialVisionPregrasp(
         return false;
     }
 
+    emit logMessage(
+        QStringLiteral("[阶段一][位姿组合] "
+                       "captureBase=(X=%1mm,Y=%2mm,Z=%3mm,Rx=%4°,Ry=%5°,Rz=%6°) "
+                       "toolDelta=(X=%7mm,Y=%8mm,Z=0mm,Rx=0°,Ry=0°,Rz=%9°) "
+                       "pregraspBase=(X=%10mm,Y=%11mm,Z=%12mm,Rx=%13°,Ry=%14°,Rz=%15°)")
+            .arg(snapshot.actualTcp.x, 0, 'f', 3)
+            .arg(snapshot.actualTcp.y, 0, 'f', 3)
+            .arg(snapshot.actualTcp.z, 0, 'f', 3)
+            .arg(snapshot.actualTcp.rx, 0, 'f', 3)
+            .arg(snapshot.actualTcp.ry, 0, 'f', 3)
+            .arg(snapshot.actualTcp.rz, 0, 'f', 3)
+            .arg(correction.xMm, 0, 'f', 3)
+            .arg(correction.yMm, 0, 'f', 3)
+            .arg(correction.rzDeg, 0, 'f', 3)
+            .arg(pregraspPose.x, 0, 'f', 3)
+            .arg(pregraspPose.y, 0, 'f', 3)
+            .arg(pregraspPose.z, 0, 'f', 3)
+            .arg(pregraspPose.rx, 0, 'f', 3)
+            .arg(pregraspPose.ry, 0, 'f', 3)
+            .arg(pregraspPose.rz, 0, 'f', 3));
+
     PendingCommand cmd;
     cmd.kind = PendingCommandKind::VisionPregraspMoveJ;
     cmd.label = QStringLiteral("视觉初始绝对预抓取");
@@ -2814,8 +2895,10 @@ bool HuayanScheduler::dispatchReadyCommand(const PendingCommand &cmd)
 bool HuayanScheduler::dispatchVisionPregraspMoveJ(const PendingCommand &cmd)
 {
     emit logMessage(
-        QStringLiteral("[阶段一][初始联合MoveJ] Base目标=(%1,%2,%3,%4,%5,%6)，"
-                       "关节参考=(%7,%8,%9,%10,%11,%12)，命令=%13")
+        QStringLiteral("[阶段一][初始联合MoveJ] command=%1 "
+                       "targetBase=(X=%2mm,Y=%3mm,Z=%4mm,Rx=%5°,Ry=%6°,Rz=%7°) "
+                       "referenceJoints=(J1=%8°,J2=%9°,J3=%10°,J4=%11°,J5=%12°,J6=%13°)")
+            .arg(cmd.diagnosticCommandId)
             .arg(cmd.targetPose.x, 0, 'f', 3)
             .arg(cmd.targetPose.y, 0, 'f', 3)
             .arg(cmd.targetPose.z, 0, 'f', 3)
@@ -2827,8 +2910,7 @@ bool HuayanScheduler::dispatchVisionPregraspMoveJ(const PendingCommand &cmd)
             .arg(cmd.referenceJoints[2], 0, 'f', 3)
             .arg(cmd.referenceJoints[3], 0, 'f', 3)
             .arg(cmd.referenceJoints[4], 0, 'f', 3)
-            .arg(cmd.referenceJoints[5], 0, 'f', 3)
-            .arg(cmd.diagnosticCommandId));
+            .arg(cmd.referenceJoints[5], 0, 'f', 3));
 
     const int nRet = HRIF_WayPoint(
         // 控制盒编号和机器人编号沿用当前调度器连接配置。
