@@ -21,11 +21,7 @@ static constexpr double kMoveVelocity = 50.0;
 static constexpr double kMoveAcceleration = 100.0;
 static constexpr double kMoveRadius = 0.0;
 
-// 闭环视觉矫正参数
-static constexpr double kGrabTolerance     = 2.0;    // XY 偏移收敛阈值(mm)
-static constexpr double kRzTolerance       = 1.0;    // Rz 旋转收敛阈值(度)
-static constexpr int    kMaxGrabIterations = 15;      // 最大矫正迭代次数（防死循环）
-static constexpr int    kVisionSettleMs    = 2000;   // 移动后等视觉出新帧(ms)
+// 联合视觉对准窗口参数。XY/Rz 容差和精修次数来自运行时配置，不能在调度器中硬编码。
 static constexpr int kStableZWindowFrames = 3; // 达到最少观察时间后，用最近三个真实新帧判断是否稳定。
 static constexpr qint64 kStableZMinElapsedMs = 4000; // 现场观察约 4 秒后深度才稳定；按时间而非易变 FPS 控制。
 static constexpr qint64 kStableZMaxElapsedMs = 8000; // 8 秒仍无稳定窗口或新帧则安全失败，禁止盲目下探。
@@ -519,6 +515,7 @@ void HuayanScheduler::startStageOne()
     m_initialVisionMoveCompleted = false;
     m_completedFineCorrectionCount = 0;
     m_pendingAlignmentCorrection = {};
+    m_pendingLargeRzExecution = false;
     m_searchDescendCount = 0;
     m_searchDescendedMm = 0.0;
     resetStableZValidation();
@@ -669,6 +666,7 @@ void HuayanScheduler::stop(bool emitStoppedLog)
     m_initialVisionMoveCompleted = false;
     m_completedFineCorrectionCount = 0;
     m_pendingAlignmentCorrection = {};
+    m_pendingLargeRzExecution = false;
     m_stage = Stage::None;
     m_stageStep = StageStep::None;
     if (emitStoppedLog) {
@@ -860,6 +858,19 @@ void HuayanScheduler::onPollTick()
 void HuayanScheduler::onStepTimeout()
 {
     m_pollTimer->stop();
+    if (m_stage == Stage::StageOne
+        && m_stageStep == StageStep::ValidateVisionAlignment) {
+        const VisionAlignment::Sample sample{
+            m_grabOffset.x,
+            m_grabOffset.y,
+            m_grabOffset.z,
+            m_grabOffset.rz,
+            false};
+        emitOperationError(formatVisionAlignmentFailure(
+            sample,
+            QStringLiteral("观察窗口达到8秒仍未获得可判定的真实新帧")));
+        return;
+    }
     emitOperationError(QStringLiteral("步骤超时，机器人未在预期时间内完成动作"));
 }
 
@@ -940,7 +951,6 @@ int HuayanScheduler::stepIndexFor(StageStep step)
     switch (step) {
     case StageStep::MoveToSurvey:
     case StageStep::WaitForVision:
-    case StageStep::ValidateStableZ:
     case StageStep::SearchDescend:           return 0;
     case StageStep::DepthDescent:            return 0;
     case StageStep::ValidateVisionAlignment: return 0;
@@ -980,14 +990,9 @@ void HuayanScheduler::executeCurrentStep()
             emit surveyReady();
             m_timeoutTimer->start(10000);
             break;
-        case StageStep::ValidateStableZ:
-            // Z 稳定验证的下一次请求由 requestNextStableZFrame() 定时发起；
-            // 此状态绝不下发机械臂运动，确保全部观察帧来自同一静止位姿。
-            break;
         case StageStep::ValidateVisionAlignment:
-            // 正常路径由运动完成分支直接调用 enterVisionAlignmentValidation()；
-            // 若兼容推进路径进入此状态，也统一启动相同的稳定等待，避免新增枚举成为死状态。
-            enterVisionAlignmentValidation();
+            // 下一次视觉请求由 enterVisionAlignmentValidation() 或上一帧的动作分支发起；
+            // 此状态不下发额外机械臂运动，确保一个窗口内的所有样本来自同一静止位姿。
             break;
         case StageStep::SearchDescend:
         case StageStep::DepthDescent:
@@ -1202,6 +1207,11 @@ void HuayanScheduler::recordCompletedVisionAlignmentMove()
     // 才能把 X/Y 写入拍照锚点。Rz 只改变姿态，不得污染锚点平面累计量。
     m_anchorAccumulatedToolX += m_pendingAlignmentCorrection.xMm;
     m_anchorAccumulatedToolY += m_pendingAlignmentCorrection.yMm;
+    if (m_pendingLargeRzExecution) {
+        // 大角度次数表达“机械臂已实际执行”，不能在视觉连续帧确认时提前消耗。
+        // 否则统一窗口等待4秒期间，后续大角度帧会被旧保护逻辑置零并形成假对准。
+        ++m_stageOneLargeRzExecutionCount;
+    }
 
     if (m_stageStep == StageStep::MoveToPregrasp) {
         m_initialVisionMoveCompleted = true;
@@ -1210,29 +1220,72 @@ void HuayanScheduler::recordCompletedVisionAlignmentMove()
     }
 
     m_pendingAlignmentCorrection = {};
+    m_pendingLargeRzExecution = false;
 }
 
 void HuayanScheduler::enterVisionAlignmentValidation()
 {
-    // 任务 6 将在 ValidateVisionAlignment 内统一 XY/Rz 与 Z 窗口判定。本任务先把新状态
-    // 兼容映射到现有 WaitForVision → ValidateStableZ 路径，确保中间提交可运行且无死状态。
+    if (!m_visionClient
+        || m_visionClient->lastInferenceFrameId() < 0
+        || m_visionClient->lastInferenceTimestampMs() < 0) {
+        const VisionAlignment::Sample sample{
+            m_grabOffset.x,
+            m_grabOffset.y,
+            m_grabOffset.z,
+            m_grabOffset.rz,
+            false};
+        emitOperationError(formatVisionAlignmentFailure(
+            sample,
+            QStringLiteral("算法响应缺少 frame_id 或 timestamp，无法建立运动后新帧基线")));
+        return;
+    }
+
+    // 每次 MoveJ/MoveL 真正到位后都丢弃上一个窗口的全部 Z 样本，并把当前算法帧
+    // 记录为基线。下一次仅接受 frame_id 与 timestamp 同时递增的帧，因而无需附加
+    // settle 延迟或“再等一帧”，同时也不会把运动前缓存误算成运动后观测。
+    resetStableZValidation();
+    m_stableZLastFrameId = m_visionClient->lastInferenceFrameId();
+    m_stableZLastTimestampMs = m_visionClient->lastInferenceTimestampMs();
+    m_stableZElapsedTimer.start();
     m_stageStep = StageStep::ValidateVisionAlignment;
+    requestNextStableZFrame();
+
     emit logMessage(
-        QStringLiteral("[阶段一] 联合运动已到位，等待视觉稳定后验证（已完成精修 %1/%2）")
+        QStringLiteral("[阶段一][联合对准] 联合运动已到位，立即开启4～8秒观察窗口：基线帧=%1，"
+                       "已完成精修=%2/%3")
+            .arg(m_stableZLastFrameId)
             .arg(m_completedFineCorrectionCount)
             .arg(m_runtimeSettings.vision.maxFineCorrectionCount));
+}
 
-    const quint64 seq = nextCallbackSeq();
-    QTimer::singleShot(m_runtimeSettings.vision.settleMs, this, [this, seq] {
-        if (seq != m_commandSeq
-            || m_stage != Stage::StageOne
-            || m_stageStep != StageStep::ValidateVisionAlignment) {
-            return;
-        }
+QString HuayanScheduler::formatVisionAlignmentFailure(
+    const VisionAlignment::Sample &sample,
+    const QString &reason) const
+{
+    const qint64 elapsedMs = m_stableZElapsedTimer.isValid()
+        ? m_stableZElapsedTimer.elapsed()
+        : 0;
 
-        m_stageStep = StageStep::WaitForVision;
-        proceedStage();
-    });
+    // m_captureFuncName 是当前任务按工位注入的固定拍照位函数，可稳定定位现场工位；
+    // anchorPreviousTarget 是视觉端最后一次确认的锁定目标坐标，便于排查串工位或跳目标。
+    return QStringLiteral(
+               "[阶段一][联合对准] 工位=%1，锁定目标锚点=(%2,%3)，"
+               "当前=(X=%4,Y=%5,Z=%6,Rz=%7)，阈值=(XY≤%8mm,Rz≤%9°)，"
+               "精修=%10/%11，窗口耗时=%12ms，真实新帧=%13，停止原因=%14")
+        .arg(m_captureFuncName)
+        .arg(m_anchorPreviousTargetX, 0, 'f', 1)
+        .arg(m_anchorPreviousTargetY, 0, 'f', 1)
+        .arg(sample.xMm, 0, 'f', 1)
+        .arg(sample.yMm, 0, 'f', 1)
+        .arg(sample.zMm, 0, 'f', 1)
+        .arg(sample.rzDeg, 0, 'f', 1)
+        .arg(m_runtimeSettings.vision.xyToleranceMm, 0, 'f', 1)
+        .arg(m_runtimeSettings.vision.rzToleranceDeg, 0, 'f', 1)
+        .arg(m_completedFineCorrectionCount)
+        .arg(m_runtimeSettings.vision.maxFineCorrectionCount)
+        .arg(elapsedMs)
+        .arg(m_stableZUniqueFrames)
+        .arg(reason);
 }
 
 void HuayanScheduler::proceedAction()
@@ -1594,22 +1647,32 @@ void HuayanScheduler::requestNextStableZFrame()
     QTimer::singleShot(kStableZPollIntervalMs, this, [this, seq] {
         if (seq != m_commandSeq
             || m_stage != Stage::StageOne
-            || m_stageStep != StageStep::ValidateStableZ) {
+            || m_stageStep != StageStep::ValidateVisionAlignment) {
             return;
         }
 
         if (m_stableZElapsedTimer.isValid()
             && m_stableZElapsedTimer.elapsed() >= kStableZMaxElapsedMs) {
-            emitOperationError(QStringLiteral("[阶段一][Z稳定] 已静止等待 %1ms，算法真实新帧仍不足或 Z 未稳定，拒绝 Z 下探")
-                                   .arg(m_stableZElapsedTimer.elapsed()));
+            const VisionAlignment::Sample sample{
+                m_grabOffset.x,
+                m_grabOffset.y,
+                m_grabOffset.z,
+                m_grabOffset.rz,
+                false};
+            emitOperationError(formatVisionAlignmentFailure(
+                sample,
+                QStringLiteral("观察窗口达到8秒，真实新帧不足或尚未同时满足XY/Rz与Z稳定")));
             return;
         }
 
         if (m_visionClient)
             m_visionClient->setTargetSelectionContext(makeVisionTargetSelectionContext());
-        // 先启动本帧等待保护，再发请求；若配置错误导致 errorOccurred 同步返回，
-        // 错误槽仍能立即停止该定时器，不会在阶段结束后遗留一次假超时。
-        m_timeoutTimer->start(10000);
+        // 单次 HTTP 请求的等待保护不能越过本窗口 8 秒硬上限。视觉客户端自身仍保留
+        // 5 秒传输超时；这里取窗口剩余时间，确保低帧率或丢帧时不会额外等待。
+        const qint64 elapsedMs = m_stableZElapsedTimer.elapsed();
+        const int remainingWindowMs = static_cast<int>(
+            qMax<qint64>(1, kStableZMaxElapsedMs - elapsedMs));
+        m_timeoutTimer->start(remainingWindowMs);
         emit surveyReady();
     });
 }
@@ -1676,131 +1739,83 @@ void HuayanScheduler::executeDepthDescent(double moveMm)
 
 void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 {
-    const bool validatingStableZ = m_stageStep == StageStep::ValidateStableZ;
+    const bool validatingVisionAlignment =
+        m_stageStep == StageStep::ValidateVisionAlignment;
     if (m_stage != Stage::StageOne
-        || (m_stageStep != StageStep::WaitForVision && !validatingStableZ)) {
+        || (m_stageStep != StageStep::WaitForVision
+            && !validatingVisionAlignment)) {
         return;
     }
 
     stopVisionWaitTimeout();
 
-    if (validatingStableZ) {
+    qint64 frameId = -1;
+    qint64 timestampMs = -1;
+    if (validatingVisionAlignment) {
         if (!m_visionClient) {
-            emitOperationError(QStringLiteral("[阶段一][Z稳定] 未注入视觉客户端，无法校验真实帧"));
+            const VisionAlignment::Sample invalidSample{x, y, z, rz, false};
+            emitOperationError(formatVisionAlignmentFailure(
+                invalidSample,
+                QStringLiteral("未注入视觉客户端，无法校验真实新帧")));
             return;
         }
 
-        const qint64 frameId = m_visionClient->lastInferenceFrameId();
-        const qint64 timestampMs = m_visionClient->lastInferenceTimestampMs();
+        frameId = m_visionClient->lastInferenceFrameId();
+        timestampMs = m_visionClient->lastInferenceTimestampMs();
         if (frameId < 0 || timestampMs < 0) {
-            emitOperationError(QStringLiteral("[阶段一][Z稳定] 算法响应缺少 frame_id 或 timestamp，无法排除缓存重复帧"));
+            const VisionAlignment::Sample invalidSample{x, y, z, rz, false};
+            emitOperationError(formatVisionAlignmentFailure(
+                invalidSample,
+                QStringLiteral("算法响应缺少 frame_id 或 timestamp，无法排除缓存重复帧")));
             return;
         }
 
         if (frameId <= m_stableZLastFrameId) {
             if (frameId < m_stableZLastFrameId) {
-                emitOperationError(QStringLiteral("[阶段一][Z稳定] frame_id 从 %1 回退到 %2，疑似视觉服务重启，拒绝 Z 下探")
-                                       .arg(m_stableZLastFrameId)
-                                       .arg(frameId));
+                const VisionAlignment::Sample invalidSample{x, y, z, rz, false};
+                emitOperationError(formatVisionAlignmentFailure(
+                    invalidSample,
+                    QStringLiteral("frame_id 从 %1 回退到 %2，疑似视觉服务重启")
+                        .arg(m_stableZLastFrameId)
+                        .arg(frameId)));
                 return;
             }
 
-            emit logMessage(QStringLiteral("[阶段一][Z稳定] frame_id=%1 为重复缓存帧，不计入样本；已获得 %2 个真实新帧，已等待 %3ms")
+            const qint64 elapsedMs = m_stableZElapsedTimer.elapsed();
+            if (elapsedMs >= kStableZMaxElapsedMs) {
+                const VisionAlignment::Sample invalidSample{x, y, z, rz, false};
+                emitOperationError(formatVisionAlignmentFailure(
+                    invalidSample,
+                    QStringLiteral("观察窗口达到8秒，重复缓存帧不能形成新的联合判定样本")));
+                return;
+            }
+
+            emit logMessage(QStringLiteral("[阶段一][联合对准] frame_id=%1 为重复缓存帧，不计入样本；真实新帧=%2，窗口耗时=%3ms")
                                 .arg(frameId)
                                 .arg(m_stableZUniqueFrames)
-                                .arg(m_stableZElapsedTimer.elapsed()));
+                                .arg(elapsedMs));
             requestNextStableZFrame();
             return;
         }
 
         if (timestampMs <= m_stableZLastTimestampMs) {
-            emitOperationError(QStringLiteral("[阶段一][Z稳定] 新 frame_id=%1 的 timestamp=%2 未大于上一帧 %3，帧元数据异常，拒绝 Z 下探")
-                                   .arg(frameId)
-                                   .arg(timestampMs)
-                                   .arg(m_stableZLastTimestampMs));
+            const VisionAlignment::Sample invalidSample{x, y, z, rz, false};
+            emitOperationError(formatVisionAlignmentFailure(
+                invalidSample,
+                QStringLiteral("新 frame_id=%1 的 timestamp=%2 未大于上一帧 %3")
+                    .arg(frameId)
+                    .arg(timestampMs)
+                    .arg(m_stableZLastTimestampMs)));
             return;
         }
 
         m_stableZLastFrameId = frameId;
         m_stableZLastTimestampMs = timestampMs;
-        const bool remainsAligned =
-            qAbs(x) < m_runtimeSettings.vision.xyToleranceMm
-            && qAbs(y) < m_runtimeSettings.vision.xyToleranceMm
-            && qAbs(rz) < kRzTolerance;
-        if (remainsAligned) {
-            ++m_stableZUniqueFrames;
-            m_stableZSamples.append(z);
-            if (m_stableZSamples.size() > kStableZWindowFrames)
-                m_stableZSamples.removeFirst();
-
-            QStringList sampleTexts;
-            for (double sample : m_stableZSamples)
-                sampleTexts.append(QString::number(sample, 'f', 1));
-
-            const qint64 elapsedMs = m_stableZElapsedTimer.elapsed();
-            double windowRange = 0.0;
-            bool hasFullWindow = m_stableZSamples.size() == kStableZWindowFrames;
-            if (hasFullWindow) {
-                const auto [windowMinIt, windowMaxIt] =
-                    std::minmax_element(m_stableZSamples.cbegin(), m_stableZSamples.cend());
-                const double windowMin = *windowMinIt;
-                const double windowMax = *windowMaxIt;
-                windowRange = windowMax - windowMin;
-            }
-
-            if (elapsedMs >= kStableZMinElapsedMs
-                && hasFullWindow
-                && windowRange <= kStableZMaxRangeMm) {
-                QList<double> sortedSamples = m_stableZSamples;
-                std::sort(sortedSamples.begin(), sortedSamples.end());
-                m_grabOffset = {x, y, z, 0.0, 0.0, rz};
-                m_grabOffset.z = sortedSamples.at(1);
-                emit logMessage(QStringLiteral("[阶段一][Z稳定] 验证通过：已等待 %1ms，真实新帧 %2 个，窗口=[%3]，极差=%4mm，中位数 Z=%5mm，开始 Z 下探")
-                                    .arg(elapsedMs)
-                                    .arg(m_stableZUniqueFrames)
-                                    .arg(sampleTexts.join(QStringLiteral(", ")))
-                                    .arg(windowRange, 0, 'f', 1)
-                                    .arg(m_grabOffset.z, 0, 'f', 1));
-                resetStableZValidation();
-                m_stageStep = StageStep::DescendZ;
-                proceedStage();
-                return;
-            }
-
-            if (elapsedMs >= kStableZMaxElapsedMs) {
-                emitOperationError(QStringLiteral("[阶段一][Z稳定] 已等待 %1ms、获得 %2 个真实新帧，最近窗口=[%3] 仍未满足极差≤%4mm，拒绝 Z 下探")
-                                       .arg(elapsedMs)
-                                       .arg(m_stableZUniqueFrames)
-                                       .arg(sampleTexts.join(QStringLiteral(", ")))
-                                       .arg(kStableZMaxRangeMm, 0, 'f', 1));
-                return;
-            }
-
-            emit logMessage(QStringLiteral("[阶段一][Z稳定] 新帧 frame_id=%1，真实新帧 %2 个，已等待 %3/%4ms，Z=%5mm，窗口=[%6]%7")
-                                .arg(frameId)
-                                .arg(m_stableZUniqueFrames)
-                                .arg(elapsedMs)
-                                .arg(kStableZMinElapsedMs)
-                                .arg(z, 0, 'f', 1)
-                                .arg(sampleTexts.join(QStringLiteral(", ")))
-                                .arg(hasFullWindow
-                                         ? QStringLiteral("，极差=%1mm").arg(windowRange, 0, 'f', 1)
-                                         : QStringLiteral("，窗口尚不足三帧")));
-            requestNextStableZFrame();
-            return;
-        }
-
-        // 验证期间重新失准说明目标或姿态发生变化，旧 Z 窗口不能继续使用；
-        // 切回原有 WaitForVision 路径，让本帧按既有 XY/Rz 规则生成微调动作。
-        emit logMessage(QStringLiteral("[阶段一][Z稳定] 验证期间重新失准（X=%1 Y=%2 Rz=%3），清空 Z 样本并恢复闭环矫正")
-                            .arg(x, 0, 'f', 1)
-                            .arg(y, 0, 'f', 1)
-                            .arg(rz, 0, 'f', 1));
-        resetStableZValidation();
-        m_stageStep = StageStep::WaitForVision;
     }
 
-    if (handleExcessiveVisionDepth(z))
+    // 深度自动下探只属于首次绝对预抓取前的原流程。进入联合验证窗口后，
+    // 当前 Z 仅作为最终抓取深度样本，不能绕开统一判定另起一条运动路径。
+    if (!validatingVisionAlignment && handleExcessiveVisionDepth(z))
         return;
 
     auto sameDirection = [](double a, double b) {
@@ -1832,8 +1847,7 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
             emit logMessage(QStringLiteral("[阶段一] 检测到疑似 Rz 大角度跳变 Rz=%1，等待下一帧确认，本轮不执行 Rz 旋转")
                                 .arg(rz, 0, 'f', 1));
         } else {
-            ++m_stageOneLargeRzExecutionCount;
-            emit logMessage(QStringLiteral("[阶段一] Rz 大角度跳变已连续确认 Rz=%1，允许执行旋转（本目标大角度次数 %2/%3）")
+            emit logMessage(QStringLiteral("[阶段一] Rz 大角度跳变已连续确认 Rz=%1，允许纳入下一条联合运动（已执行大角度 %2/%3）")
                                 .arg(rz, 0, 'f', 1)
                                 .arg(m_stageOneLargeRzExecutionCount)
                                 .arg(m_runtimeSettings.vision.maxLargeRzExecutions));
@@ -1857,7 +1871,7 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 
     // Rz 大角度的第一帧只允许登记候选值，不能让 X/Y 先行运动后消耗唯一一次首次 MoveJ。
     // 等下一真实帧通过原有方向和幅值确认后，再把完整 X/Y/Rz 作为一条联合命令下发。
-    if (suppressLargeRzRotation) {
+    if (suppressLargeRzRotation && !validatingVisionAlignment) {
         const quint64 seq = nextCallbackSeq();
         QTimer::singleShot(m_runtimeSettings.vision.settleMs, this, [this, seq] {
             if (seq == m_commandSeq
@@ -1871,69 +1885,115 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz)
 
     const VisionAlignment::Sample sample{x, y, z, effectiveRz, true};
 
-    // 首次可信目标无论是否已经落在容差内，都必须走同一条绝对预抓取 MoveJ。
-    // 这保证首次运动固定且仅固定一次，并且不会从初始帧直接绕过到 Z 下探。
-    if (!m_initialVisionMoveCompleted) {
-        if (!queueInitialVisionPregrasp(sample))
-            return;
+    if (!validatingVisionAlignment) {
+        // 首次可信目标无论是否已经落在容差内，都必须走同一条绝对预抓取 MoveJ。
+        // 这保证首次运动固定且仅固定一次，并且不会从初始帧直接绕过到 Z 下探。
+        if (!m_initialVisionMoveCompleted) {
+            if (!queueInitialVisionPregrasp(sample))
+                return;
 
-        m_stageStep = StageStep::MoveToPregrasp;
-        emit logMessage(QStringLiteral("[阶段一] 首次可信目标已排队为单条联合 MoveJ，等待控制器确认到位"));
-        return;
-    }
-
-    const bool aligned = !suppressLargeRzRotation
-        && qAbs(x) < m_runtimeSettings.vision.xyToleranceMm
-        && qAbs(y) < m_runtimeSettings.vision.xyToleranceMm
-        && qAbs(effectiveRz) < kRzTolerance;
-
-    // 闭环收敛后不再直接使用当前帧 Z；以当前算法帧为基线并保持机械臂静止，
-    // 至少等待真实 4 秒，再用最近三个不同 frame_id 的结果判断稳定性。
-    if (aligned) {
-        if (!m_visionClient
-            || m_visionClient->lastInferenceFrameId() < 0
-            || m_visionClient->lastInferenceTimestampMs() < 0) {
-            emitOperationError(QStringLiteral("[阶段一][Z稳定] 算法响应缺少 frame_id 或 timestamp，无法开始真实跨帧验证"));
+            m_stageStep = StageStep::MoveToPregrasp;
+            emit logMessage(QStringLiteral("[阶段一] 首次可信目标已排队为单条联合 MoveJ，等待控制器确认到位"));
             return;
         }
 
-        emit logMessage(QStringLiteral("[阶段一] 视觉对准完成（X=%1 Y=%2 Rz=%3），以 frame_id=%4 为基线静止等待至少 %5ms")
-                            .arg(x, 0, 'f', 1)
-                            .arg(y, 0, 'f', 1)
-                            .arg(effectiveRz, 0, 'f', 1)
-                            .arg(m_visionClient->lastInferenceFrameId())
-                            .arg(kStableZMinElapsedMs));
-        resetStableZValidation();
-        m_stableZLastFrameId = m_visionClient->lastInferenceFrameId();
-        m_stableZLastTimestampMs = m_visionClient->lastInferenceTimestampMs();
-        m_stableZElapsedTimer.start();
-        m_stageStep = StageStep::ValidateStableZ;
-        requestNextStableZFrame();
+        // WaitForVision 在首次 MoveJ 完成后不再承担闭环判定；若外部状态迁移错误地回到这里，
+        // 直接失败比复用旧逐轴路径更安全，也防止绕过每次运动后的统一4～8秒窗口。
+        emitOperationError(formatVisionAlignmentFailure(
+            sample,
+            QStringLiteral("首次联合MoveJ已完成，但视觉回调不在联合验证状态")));
         return;
     }
 
-    if (m_completedFineCorrectionCount
-        >= m_runtimeSettings.vision.maxFineCorrectionCount) {
-        emitOperationError(QStringLiteral("[阶段一] 联合精修次数已耗尽：完成 %1/%2 次后仍未收敛（X=%3 Y=%4 Rz=%5，阈值 XY<%6mm/Rz<%7°）")
-                               .arg(m_completedFineCorrectionCount)
-                               .arg(m_runtimeSettings.vision.maxFineCorrectionCount)
-                               .arg(x, 0, 'f', 1)
-                               .arg(y, 0, 'f', 1)
-                               .arg(effectiveRz, 0, 'f', 1)
-                               .arg(m_runtimeSettings.vision.xyToleranceMm, 0, 'f', 1)
-                               .arg(kRzTolerance, 0, 'f', 1));
-        return;
+    if (validatingVisionAlignment) {
+        // frame_id 与 timestamp 均已通过严格递增检查，本帧才有资格同时更新
+        // 平面对准偏差和最近三帧 Z 窗口；HTTP 重复缓存响应不会增加计数。
+        ++m_stableZUniqueFrames;
+        m_stableZSamples.append(z);
+        if (m_stableZSamples.size() > kStableZWindowFrames)
+            m_stableZSamples.removeFirst();
+
+        QStringList sampleTexts;
+        for (double zSample : m_stableZSamples)
+            sampleTexts.append(QString::number(zSample, 'f', 1));
+
+        const bool hasFullWindow =
+            m_stableZSamples.size() == kStableZWindowFrames;
+        double windowRange = 0.0;
+        if (hasFullWindow) {
+            const auto [windowMinIt, windowMaxIt] =
+                std::minmax_element(
+                    m_stableZSamples.cbegin(), m_stableZSamples.cend());
+            const double windowMin = *windowMinIt;
+            const double windowMax = *windowMaxIt;
+            windowRange = windowMax - windowMin;
+        }
+        const bool zStable =
+            hasFullWindow && windowRange <= kStableZMaxRangeMm;
+        const qint64 elapsedMs = m_stableZElapsedTimer.elapsed();
+
+        VisionAlignment::WindowPolicy policy;
+        policy.xyToleranceMm = m_runtimeSettings.vision.xyToleranceMm;
+        policy.rzToleranceDeg = m_runtimeSettings.vision.rzToleranceDeg;
+        policy.maxFineCorrectionCount = m_runtimeSettings.vision.maxFineCorrectionCount;
+        policy.minElapsedMs = kStableZMinElapsedMs;
+        policy.maxElapsedMs = kStableZMaxElapsedMs;
+
+        VisionAlignment::WindowInput input;
+        input.latest = sample;
+        input.zStable = zStable;
+        input.elapsedMs = elapsedMs;
+        input.completedFineCorrectionCount = m_completedFineCorrectionCount;
+        VisionAlignment::WindowDecision decision =
+            VisionAlignment::decideWindow(input, policy);
+
+        // Rz 大角度候选的首帧只建立确认状态，不能因 effectiveRz 被临时抑制为 0
+        // 而误判为已对准并下探。8 秒 Stop 仍保持最高安全约束，不会被该保护延长。
+        if (suppressLargeRzRotation
+            && decision.action != VisionAlignment::WindowAction::Stop) {
+            decision.action = VisionAlignment::WindowAction::ContinueObserving;
+            decision.reason = QStringLiteral("等待Rz大角度连续帧确认");
+        }
+
+        emit logMessage(
+            QStringLiteral("[阶段一][联合对准] 新帧=%1，窗口=%2/%3ms，真实新帧=%4，"
+                           "当前=(X=%5,Y=%6,Z=%7,Rz=%8)，Z窗口=[%9]，极差=%10mm")
+                .arg(frameId)
+                .arg(elapsedMs)
+                .arg(kStableZMaxElapsedMs)
+                .arg(m_stableZUniqueFrames)
+                .arg(sample.xMm, 0, 'f', 1)
+                .arg(sample.yMm, 0, 'f', 1)
+                .arg(sample.zMm, 0, 'f', 1)
+                .arg(sample.rzDeg, 0, 'f', 1)
+                .arg(sampleTexts.join(QStringLiteral(", ")))
+                .arg(windowRange, 0, 'f', 1));
+
+        switch (decision.action) {
+        case VisionAlignment::WindowAction::ContinueObserving:
+            requestNextStableZFrame();
+            return;
+        case VisionAlignment::WindowAction::Descend:
+            // decideWindow() 已同时确认达到最短4秒、XY/Rz对准和最近三帧Z稳定。
+            // 这里只更新既有下探入口的视觉深度，不改变工具Z方向或安全上限公式。
+            m_grabOffset.z = sample.zMm;
+            resetStableZValidation();
+            m_stageStep = StageStep::DescendZ;
+            proceedStage();
+            return;
+        case VisionAlignment::WindowAction::FineCorrect:
+            // 当前窗口证据在排队前立即作废；命令排队失败会由统一错误出口停止，
+            // 排队成功后必须等 onPollTick() 确认 MoveL 到位，才能开启新窗口。
+            resetStableZValidation();
+            queueVisionFineCorrection(decision.correction);
+            return;
+        case VisionAlignment::WindowAction::Stop:
+            emitOperationError(
+                formatVisionAlignmentFailure(sample, decision.reason));
+            return;
+        }
     }
 
-    // 首次 MoveJ 后仍未收敛时，只允许一条 Tool 模式 MoveL 联合修正 X/Y/Rz。
-    // 已完成次数只在 onPollTick() 确认到位后递增，排队、SDK 下发或运动失败均不消耗次数。
-    const VisionAlignment::ToolCorrection correction =
-        VisionAlignment::toToolCorrection(sample);
-    if (queueVisionFineCorrection(correction)) {
-        emit logMessage(QStringLiteral("[阶段一] 已排队第 %1/%2 条联合精修 MoveL，等待控制器确认到位")
-                            .arg(m_completedFineCorrectionCount + 1)
-                            .arg(m_runtimeSettings.vision.maxFineCorrectionCount));
-    }
 }
 
 void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz,
@@ -1941,7 +2001,7 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz,
 {
     if (m_stage != Stage::StageOne
         || (m_stageStep != StageStep::WaitForVision
-            && m_stageStep != StageStep::ValidateStableZ)) {
+            && m_stageStep != StageStep::ValidateVisionAlignment)) {
         return;
     }
 
@@ -1955,9 +2015,18 @@ void HuayanScheduler::setGrabOffset(double x, double y, double z, double rz,
 
 void HuayanScheduler::onVisionNoObject()
 {
-    if (m_stage == Stage::StageOne && m_stageStep == StageStep::ValidateStableZ) {
+    if (m_stage == Stage::StageOne
+        && m_stageStep == StageStep::ValidateVisionAlignment) {
         stopVisionWaitTimeout();
-        emitOperationError(QStringLiteral("[阶段一][Z稳定] 验证期间未检测到锁定目标，拒绝搜索下移并停止本次取料"));
+        const VisionAlignment::Sample invalidSample{
+            m_grabOffset.x,
+            m_grabOffset.y,
+            m_grabOffset.z,
+            m_grabOffset.rz,
+            false};
+        emitOperationError(formatVisionAlignmentFailure(
+            invalidSample,
+            QStringLiteral("验证期间未检测到锁定目标，拒绝搜索下移")));
         return;
     }
 
@@ -2011,16 +2080,25 @@ void HuayanScheduler::onVisionTargetRejectedForPickup(VisionHttpClient::TargetSe
 {
     if (m_stage != Stage::StageOne
         || (m_stageStep != StageStep::WaitForVision
-            && m_stageStep != StageStep::ValidateStableZ)) {
+            && m_stageStep != StageStep::ValidateVisionAlignment)) {
         emit logMessage(QStringLiteral("[阶段一] 收到锚点可信拒绝，但当前不在等待视觉阶段，忽略：%1").arg(msg));
         return;
     }
 
-    const bool validatingStableZ = m_stageStep == StageStep::ValidateStableZ;
+    const bool validatingVisionAlignment =
+        m_stageStep == StageStep::ValidateVisionAlignment;
     stopVisionWaitTimeout();
-    if (validatingStableZ) {
-        emitOperationError(QStringLiteral("[阶段一][Z稳定] 锁定目标被可信规则拒绝：%1，拒绝搜索下移并停止本次取料")
-                               .arg(msg));
+    if (validatingVisionAlignment) {
+        const VisionAlignment::Sample invalidSample{
+            m_grabOffset.x,
+            m_grabOffset.y,
+            m_grabOffset.z,
+            m_grabOffset.rz,
+            false};
+        emitOperationError(formatVisionAlignmentFailure(
+            invalidSample,
+            QStringLiteral("锁定目标被可信规则拒绝：%1，拒绝搜索下移")
+                .arg(msg)));
         return;
     }
 
@@ -2077,7 +2155,7 @@ void HuayanScheduler::onVisionErrorForPickup(const QString &msg)
 {
     if (m_stage != Stage::StageOne
         || (m_stageStep != StageStep::WaitForVision
-            && m_stageStep != StageStep::ValidateStableZ)) {
+            && m_stageStep != StageStep::ValidateVisionAlignment)) {
         emit logMessage(QStringLiteral("[阶段一] 收到视觉错误，但当前不在等待视觉阶段，忽略：%1").arg(msg));
         return;
     }
@@ -2085,6 +2163,18 @@ void HuayanScheduler::onVisionErrorForPickup(const QString &msg)
     stopVisionWaitTimeout();
 
     // 通信/解析错误不代表目标不在视野内，继续下移没有意义，应直接按视觉异常失败处理。
+    if (m_stageStep == StageStep::ValidateVisionAlignment) {
+        const VisionAlignment::Sample invalidSample{
+            m_grabOffset.x,
+            m_grabOffset.y,
+            m_grabOffset.z,
+            m_grabOffset.rz,
+            false};
+        emitOperationError(formatVisionAlignmentFailure(
+            invalidSample,
+            QStringLiteral("视觉推理失败：%1").arg(msg)));
+        return;
+    }
     emitOperationError(QStringLiteral("[阶段一] 视觉推理失败：%1").arg(msg));
 }
 
@@ -2183,7 +2273,7 @@ bool HuayanScheduler::hasActiveRobotCommand() const
     return m_pollTimer->isActive()
         || (m_timeoutTimer->isActive()
             && m_stageStep != StageStep::WaitForVision
-            && m_stageStep != StageStep::ValidateStableZ);
+            && m_stageStep != StageStep::ValidateVisionAlignment);
 }
 
 // 同时读取 flags 和 FSM，是为了定位 Cleanup 20561 前控制器是否仍在脚本运行态。
@@ -2372,6 +2462,9 @@ bool HuayanScheduler::queueInitialVisionPregrasp(
     // 修正量在运动确认前仅作为“待完成”状态保存，绝不能提前写入
     // m_anchorAccumulatedToolX/Y；实际累计统一由 onPollTick() 的到位分支完成。
     m_pendingAlignmentCorrection = correction;
+    m_pendingLargeRzExecution =
+        qAbs(correction.rzDeg)
+        >= m_runtimeSettings.vision.largeRzJumpThresholdDeg;
     return true;
 }
 
@@ -2414,6 +2507,9 @@ bool HuayanScheduler::queueVisionFineCorrection(
     }
 
     m_pendingAlignmentCorrection = correction;
+    m_pendingLargeRzExecution =
+        qAbs(cmd.targetPose.rz)
+        >= m_runtimeSettings.vision.largeRzJumpThresholdDeg;
     m_stageStep = StageStep::FineCorrectAlignment;
     return true;
 }
@@ -2513,7 +2609,7 @@ void HuayanScheduler::stopVisionWaitTimeout()
 {
     if (m_stage == Stage::StageOne
         && (m_stageStep == StageStep::WaitForVision
-            || m_stageStep == StageStep::ValidateStableZ)
+            || m_stageStep == StageStep::ValidateVisionAlignment)
         && m_timeoutTimer->isActive()) {
         emit logMessage(QStringLiteral("[阶段一] 已收到视觉结果，停止视觉等待超时定时器"));
         m_timeoutTimer->stop();

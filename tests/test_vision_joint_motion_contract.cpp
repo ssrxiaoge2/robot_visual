@@ -232,6 +232,8 @@ int main()
          QStringLiteral("ValidateVisionAlignment,"),
          QStringLiteral("FineCorrectAlignment,")},
         "阶段一必须声明初始联合对准、运动后验证和联合精修三个独立状态");
+    requireTrue(!header.contains(QStringLiteral("ValidateStableZ")),
+                "统一联合窗口接入后不得继续保留旧 ValidateStableZ 状态");
     requireContainsInOrder(
         header,
         {QStringLiteral("bool m_initialVisionMoveCompleted = false;"),
@@ -296,33 +298,37 @@ int main()
          QStringLiteral("return;"),
          QStringLiteral("m_stageStep=StageStep::MoveToPregrasp;"),
          QStringLiteral("return;"),
-         QStringLiteral("constboolaligned=")},
-        "首次样本即使已在容差内也必须先排队联合 MoveJ，不能直接进入对准或 Z 下探分支");
+         QStringLiteral("VisionAlignment::decideWindow(input,policy)")},
+        "首次样本即使已在容差内也必须先排队联合 MoveJ，后续只能进入统一窗口判定");
     requireContainsInOrder(
         normalizedSetGrabOffsetBody,
-        {QStringLiteral(
-             "m_completedFineCorrectionCount>="
-             "m_runtimeSettings.vision.maxFineCorrectionCount"),
-         QStringLiteral("emitOperationError("),
-         QStringLiteral("return;"),
-         QStringLiteral(
-             "VisionAlignment::toToolCorrection(sample)"),
-         QStringLiteral("queueVisionFineCorrection(correction)")},
-        "首次 MoveJ 后只有已完成精修次数未达上限时才允许排队下一条联合 MoveL");
+        {QStringLiteral("VisionAlignment::decideWindow(input,policy)"),
+         QStringLiteral("caseVisionAlignment::WindowAction::FineCorrect:"),
+         QStringLiteral("queueVisionFineCorrection(decision.correction)")},
+        "首次 MoveJ 后是否允许精修必须完全由统一窗口判定并排队一条联合 MoveL");
 
     const QString enterValidationBody = requireFunctionBody(
         source,
         QStringLiteral(
             "void HuayanScheduler::enterVisionAlignmentValidation()"),
-        "必须实现联合运动后的兼容视觉验证入口");
+        "必须实现联合运动后的统一视觉验证入口");
     requireContainsInOrder(
         enterValidationBody,
-        {QStringLiteral(
+        {QStringLiteral("resetStableZValidation();"),
+         QStringLiteral(
+             "m_stableZLastFrameId = m_visionClient->lastInferenceFrameId();"),
+         QStringLiteral(
+             "m_stableZLastTimestampMs = m_visionClient->lastInferenceTimestampMs();"),
+         QStringLiteral("m_stableZElapsedTimer.start();"),
+         QStringLiteral(
              "m_stageStep = StageStep::ValidateVisionAlignment;"),
-         QStringLiteral("QTimer::singleShot("),
-         QStringLiteral("m_stageStep = StageStep::WaitForVision;"),
-         QStringLiteral("proceedStage();")},
-        "联合运动完成后必须经过新验证状态并回到现有视觉回调路径，不能形成死状态");
+         QStringLiteral("requestNextStableZFrame();")},
+        "联合运动确认完成后必须立即以当前帧为基线开启新的统一窗口");
+    requireTrue(!enterValidationBody.contains(QStringLiteral(
+                    "m_runtimeSettings.vision.settleMs"))
+                    && !enterValidationBody.contains(QStringLiteral(
+                        "m_completedFineCorrectionCount = 0")),
+                "新窗口不得增加settle延迟，也不得清空已完成精修次数");
 
     requireContainsInOrder(
         header,
@@ -585,8 +591,22 @@ int main()
         "联合运动只允许在确认完成后累计工具 XY，并分别记录首次 MoveJ 或精修完成次数");
     requireTrue(
         !normalizedRecordCompletedBody.contains(QStringLiteral(
-            "m_pendingAlignmentCorrection.rzDeg")),
+            "m_anchorAccumulatedToolX+=m_pendingAlignmentCorrection.rzDeg"))
+            && !normalizedRecordCompletedBody.contains(QStringLiteral(
+                "m_anchorAccumulatedToolY+=m_pendingAlignmentCorrection.rzDeg")),
         "Rz 修正不得加入拍照锚点 XY 累计量");
+    requireTrue(
+        header.contains(QStringLiteral(
+            "bool m_pendingLargeRzExecution = false;"))
+            && normalizedRecordCompletedBody.contains(
+                QStringLiteral("if(m_pendingLargeRzExecution){"))
+            && normalizedRecordCompletedBody.contains(
+                QStringLiteral("++m_stageOneLargeRzExecutionCount;")),
+        "Rz大角度执行次数只能在联合运动确认到位后递增");
+    requireTrue(
+        normalizedSetGrabOffsetBody.count(
+            QStringLiteral("++m_stageOneLargeRzExecutionCount;")) == 0,
+        "视觉帧确认大角度方向时不得提前消耗实际执行次数");
 
     const QString initialCompletionBranch = requireSegmentBetween(
         normalizedRecordCompletedBody,

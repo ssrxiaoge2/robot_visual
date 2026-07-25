@@ -249,11 +249,10 @@ private:
         None,                    ///< 当前阶段步骤耗尽，下一次执行将完成阶段。
         MoveToSurvey,            ///< 调用拍照位示教函数。
         WaitForVision,           ///< 机械臂静止，等待视觉成功/无目标/错误回调。
-        ValidateStableZ,         ///< X/Y/Rz 对准后保持静止，连续验证多帧 Z 深度。
         SearchDescend,           ///< 无目标时沿 Z 搜索下移。
         DepthDescent,            ///< 视觉深度过大时自动下探并重新检测。
         MoveToPregrasp,          ///< 根据首次可信目标，一次绝对 MoveJ 到目标正上方。
-        ValidateVisionAlignment, ///< 联合运动完成后保持静止，兼容进入现有视觉验证流程。
+        ValidateVisionAlignment, ///< 联合运动完成后保持静止，在同一窗口验证 XY/Rz 与 Z。
         FineCorrectAlignment,    ///< 使用单条工具坐标系 MoveL 联合精修 X/Y/Rz。
         DescendZ,                ///< 根据视觉深度向夹取高度下探。
         WaitPreGripScan,         ///< 夹紧前安全暂停，等待扫码决策。
@@ -306,9 +305,9 @@ private:
     void executeCurrentStep();
     /// 清零阶段一固定拍照锚点状态；每次 startStageOne() 必须调用一次。
     void resetVisionAnchorTracking();
-    /// 清空当前任务的 Z 跨帧样本；阶段启动、停止、重新失准时都必须调用，避免复用旧帧。
+    /// 清空当前联合观察窗口的跨帧样本与计时状态，避免复用上次运动前的视觉结果。
     void resetStableZValidation();
-    /// 机械臂保持静止，在上一帧响应完成后请求下一帧 Z 稳定验证结果。
+    /// 机械臂保持静止，在上一帧响应完成后请求下一帧联合对准结果。
     void requestNextStableZFrame();
     void resetDepthDescentState();
     bool handleExcessiveVisionDepth(double depthMm);
@@ -317,8 +316,12 @@ private:
     VisionHttpClient::TargetSelectionContext makeVisionTargetSelectionContext() const;
     /// 记录已确认到位的首次 MoveJ 或联合精修 MoveL；只累计工具 X/Y，Rz 不改变锚点平面位置。
     void recordCompletedVisionAlignmentMove();
-    /// 联合运动到位后进入短暂稳定等待，再复用现有 WaitForVision/ValidateStableZ 验证路径。
+    /// 联合运动到位后立即以当前算法帧为基线，开启新的 4～8 秒联合观察窗口。
     void enterVisionAlignmentValidation();
+    /// 生成联合窗口统一失败日志，完整记录工位、锚点、当前偏差、阈值、次数和窗口状态。
+    QString formatVisionAlignmentFailure(
+        const VisionAlignment::Sample &sample,
+        const QString &reason) const;
     void proceedAction();
     void advanceActionStep();
     void startPalletPlaceInternal(const PalletPose &targetOffset,
@@ -510,11 +513,12 @@ private:
     bool m_initialVisionMoveCompleted = false; ///< 首次联合 MoveJ 已被控制器确认到位；未到位不得进入精修或下探。
     int m_completedFineCorrectionCount = 0; ///< 已被控制器确认到位的联合 MoveL 次数，不统计排队或下发失败。
     VisionAlignment::ToolCorrection m_pendingAlignmentCorrection; ///< 当前联合运动待确认的工具 X/Y/Rz；到位前不得累计到锚点。
-    QList<double> m_stableZSamples; ///< Z 稳定验证最近三个真实新帧样本(mm)，只在 ValidateStableZ 状态使用。
+    bool m_pendingLargeRzExecution = false; ///< 当前联合命令是否含大角度Rz；仅在运动确认到位后消费并计数。
+    QList<double> m_stableZSamples; ///< 联合窗口最近三个真实新帧 Z 样本(mm)，只在 ValidateVisionAlignment 状态使用。
     qint64 m_stableZLastFrameId = -1; ///< 最近接收的算法真实 frame_id；相同值属于重复缓存，不能计入窗口。
     qint64 m_stableZLastTimestampMs = -1; ///< 最近真实帧的算法 timestamp(ms)，用于防止帧编号异常复用。
-    QElapsedTimer m_stableZElapsedTimer; ///< 从 X/Y/Rz 对准开始计时，不受 HTTP 缓存响应次数影响。
-    int m_stableZUniqueFrames = 0; ///< 对准后真正接收的不同 frame_id 数量，仅用于现场日志。
+    QElapsedTimer m_stableZElapsedTimer; ///< 从每次联合运动确认到位开始计时，不受 HTTP 缓存响应次数影响。
+    int m_stableZUniqueFrames = 0; ///< 当前联合窗口真正接收的不同 frame_id 数量，仅用于现场日志。
     int m_searchDescendCount = 0;   // 找目标保护搜索的次数，不参与抓取闭环迭代
     double m_searchDescendedMm = 0.0;  // 找目标累计下移量(mm)，不是抓取 Z 下探量
     double m_depthDescentAccumulatedMm = 0.0; ///< 深度过大自动下探的已完成累计量。
