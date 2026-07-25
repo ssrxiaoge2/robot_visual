@@ -225,6 +225,21 @@ int main()
         "必须实现同一调度时刻的实际 TCP 与 J1～J6 快照读取");
     const QString normalizedReadSnapshotBody =
         normalizeCppCode(readSnapshotBody);
+    requireTrue(
+        normalizedReadSnapshotBody.count(
+            QStringLiteral("HRIF_ReadActTcpPos(")) == 1
+            && normalizedReadSnapshotBody.count(
+                QStringLiteral("HRIF_ReadActJointPos(")) == 1,
+        "实际快照必须且只能各读取一次 TCP 与 J1～J6，禁止提前或重复读取");
+    requireContainsInOrder(
+        normalizedReadSnapshotBody,
+        {QStringLiteral("HRIF_ReadActTcpPos("),
+         QStringLiteral("if(tcpRet!=0){"),
+         QStringLiteral("returnfalse;"),
+         QStringLiteral("HRIF_ReadActJointPos("),
+         QStringLiteral("if(jointsRet!=0){"),
+         QStringLiteral("returnfalse;")},
+        "实际快照必须严格按 TCP读取、TCP失败返回、关节读取、关节失败返回的全局顺序执行");
     const QString tcpFailureBranch = requireSegmentBetween(
         normalizedReadSnapshotBody,
         QStringLiteral("if(tcpRet!=0){"),
