@@ -69,6 +69,21 @@ private slots:
         QVERIFY(!validateChargeSettings(s).ok);
     }
 
+    void optionalRegisterValuesMustFitUnsignedSixteenBits()
+    {
+        ChargeSettings settings = ChargeSettings::defaults();
+        settings.cutoffCurrentA = 6553.5;
+        settings.maxChargeSeconds = 65535;
+        QVERIFY(validateChargeSettings(settings).ok);
+
+        settings.cutoffCurrentA = 6553.6;
+        QVERIFY(!validateChargeSettings(settings).ok);
+
+        settings = ChargeSettings::defaults();
+        settings.maxChargeSeconds = 65536;
+        QVERIFY(!validateChargeSettings(settings).ok);
+    }
+
     void persistsOptionalValuesAndRestoresInvalidFieldsToDefaults()
     {
         QTemporaryDir dir;

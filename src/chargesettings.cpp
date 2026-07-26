@@ -92,10 +92,14 @@ ChargeSettingsValidation validateChargeSettings(const ChargeSettings &settings)
     appendError(result, isFinite(settings.currentA) && settings.currentA > 0.0 && settings.currentA <= 120.0,
                 QStringLiteral("充电电流必须为大于零且不超过 120 的有限数值。"));
     appendError(result, !settings.cutoffCurrentA.has_value()
-                            || (isFinite(*settings.cutoffCurrentA) && *settings.cutoffCurrentA > 0.0),
-                QStringLiteral("截止电流启用时必须为正的有限数值。"));
-    appendError(result, !settings.maxChargeSeconds.has_value() || *settings.maxChargeSeconds > 0,
-                QStringLiteral("最大充电时长启用时必须大于零。"));
+                            || (isFinite(*settings.cutoffCurrentA)
+                                && *settings.cutoffCurrentA > 0.0
+                                && *settings.cutoffCurrentA <= 6553.5),
+                QStringLiteral("截止电流启用时必须为正且乘十后不超过 65535 的有限数值。"));
+    appendError(result, !settings.maxChargeSeconds.has_value()
+                            || (*settings.maxChargeSeconds > 0
+                                && *settings.maxChargeSeconds <= 65535),
+                QStringLiteral("最大充电时长启用时必须在 1 至 65535 秒之间。"));
 
     appendError(result, settings.responseTimeoutMs > 0, QStringLiteral("响应超时必须大于零。"));
     appendError(result, settings.connectTimeoutMs > 0, QStringLiteral("连接超时必须大于零。"));

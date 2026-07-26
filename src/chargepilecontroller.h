@@ -181,7 +181,17 @@ private:
         WaitForStartPoll,
         MonitoringPoll,
         WaitForNoOutputPoll,
-        WaitForRetractedPoll
+        WaitForRetractedPoll,
+        RecoveryReconnect
+    };
+
+    /** 只读通信失败后从最近一个已唯一确认的写命令里程碑继续。 */
+    enum class RecoveryAction {
+        None,
+        BeginSafeStop,
+        ResumeWaitingForNoOutput,
+        ReleaseRetractAndFail,
+        RetryFinalSafetyQuery
     };
 
     void enqueueRead(quint8 function, quint16 address, quint16 count,
@@ -218,6 +228,12 @@ private:
     void sendRetractCommand();
     void pollWaitingForRetracted();
     void sendResetAndFinalCheck();
+    void beginFinalSafetyQuery();
+    void handleReadFailure(const QString &reason);
+    void beginCommunicationRecovery(RecoveryAction action, const QString &reason);
+    void startRecoveryConnection();
+    void resumeAfterRecovery();
+    void releaseRetractAfterFailure(const QString &reason);
     void schedulePhase(DeferredPhase phase, int delayMs);
     bool snapshotHasBlockingFault(quint16 ignoredMask) const;
     bool snapshotHasNoOutput() const;
@@ -272,6 +288,16 @@ private:
     bool m_safeShutdownStarted = false;
     bool m_applicationShutdownRequested = false;
     bool m_sessionFinishedEmitted = false;
+    bool m_startCommandConfirmed = false;
+    bool m_stopCommandConfirmed = false;
+    bool m_retractOnConfirmed = false;
+    bool m_retractOffConfirmed = false;
+    bool m_resetCommandConfirmed = false;
+    bool m_unknownGate = false;
+    RecoveryAction m_recoveryAction = RecoveryAction::None;
+    int m_recoveryAttempts = 0;
+    QString m_recoveryReason;
+    QString m_terminalFailureAfterRetractOff;
     quint16 m_expectedVoltageRaw = 0;
     quint16 m_expectedCurrentRaw = 0;
     std::optional<quint16> m_expectedCutoffRaw;
