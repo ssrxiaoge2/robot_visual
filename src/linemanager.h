@@ -35,6 +35,8 @@ public:
     LineSystemState state() const;
     QList<Task> queueSnapshot() const;
     Task currentTask() const;
+    /// 返回自动充电是否正在保持 FIFO 派单；默认 false 时不改变原调度路径。
+    bool chargeDispatchHeld() const;
     void applyRuntimeSettings(const RuntimeSettings &settings);
     /// 注入兼容旧整线是否运行的只读判定；用于拒绝两个顶层调度同时控制 AGV/机械臂。
     void setExternalWorkflowRunning(std::function<bool()> predicate);
@@ -46,6 +48,22 @@ public slots:
     void stop();
     /// 仅 Error 状态有效；回 Idle，但不自动重新启动任务。
     void resetError();
+    /**
+     * @brief 设置自动充电派单保持电平。
+     *
+     * 保持只阻止取出新的 FIFO 队首，不中断正在执行的任务，也不清空 Pending。
+     * 从 true 解除为 false 时，仅在主调度 Running 且执行器空闲时恢复取队首。
+     */
+    void setChargeDispatchHold(bool hold, const QString &reason);
+    /**
+     * @brief 由自动充电协调器请求使用 LineManager 的唯一返航入口回 LM1。
+     *
+     * 只有已建立派单保持且主调度 Running 时才接受；实际导航仍由既有
+     * agvDispatchRequested 信号下发，充电模块不能绕过调度直接控制 AGV。
+     */
+    void requestChargeReturnHome();
+    /// 将充电等外部子系统的致命故障汇入既有 Error/清队列/停止设备语义。
+    void raiseExternalSystemError(const QString &reason);
     /// 接收一次独立缺料事件；同一工位允许重复调用并生成不同 taskId。
     void reportShortage(int stationId);
     /// 仅转发调度专用扫码结果给当前 TaskExecutor。
@@ -100,6 +118,8 @@ private:
     LineSystemState m_state = LineSystemState::Idle;    ///< 整线状态。
     QString m_stateText = QStringLiteral("未启动");     ///< 面向现场 UI 的状态文案。
 
+    bool m_chargeDispatchHold = false; ///< 自动充电保持；false 时所有既有派单分支原样执行。
+    QString m_chargeDispatchHoldReason; ///< 最近保持原因，仅用于现场日志，不参与状态判断。
     bool m_manualStopInProgress = false; ///< 防止 Stop 内同步信号重复处理任务终态。
     bool m_returnHomeActive = false;     ///< 当前是否由 LineManager 独立跟踪回 LM1。
     bool m_returnHomeSeenMoving = false; ///< 已看到回站导航进入 Waiting/Running。

@@ -1960,7 +1960,10 @@ private slots:
 
         ChargePileController controller;
         ChargeSettings settings = loopbackSettings(pile);
-        settings.responseTimeoutMs = 50;
+        // 本用例验证的是“Start 已确认后的状态读失败”。50ms 在 Windows
+        // 高负载/重复运行时可能先误伤正常的参数写回显，使测试落入写结果未知；
+        // 200ms 仍能快速制造读超时，同时给本机 TCP/Qt 事件循环留下确定余量。
+        settings.responseTimeoutMs = 200;
         controller.applySettings(settings);
         QSignalSpy finishedSpy(
             &controller, &ChargePileController::chargeSessionFinished);

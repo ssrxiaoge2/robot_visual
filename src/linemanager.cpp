@@ -72,6 +72,11 @@ Task LineManager::currentTask() const
     return m_currentTask;
 }
 
+bool LineManager::chargeDispatchHeld() const
+{
+    return m_chargeDispatchHold;
+}
+
 void LineManager::applyRuntimeSettings(const RuntimeSettings &settings)
 {
     Q_ASSERT(m_state == LineSystemState::Idle);
@@ -120,6 +125,13 @@ void LineManager::start()
 
 void LineManager::stop()
 {
+    if (m_chargeDispatchHold) {
+        emit logMessage(QStringLiteral("[LineManager] 人工 Stop 清除充电派单保持：%1")
+                            .arg(m_chargeDispatchHoldReason));
+        m_chargeDispatchHold = false;
+        m_chargeDispatchHoldReason.clear();
+    }
+
     if (m_state == LineSystemState::Error) {
         emit logMessage(QStringLiteral("[LineManager] Stop 被忽略：系统已在报警状态"));
         return;
@@ -169,9 +181,65 @@ void LineManager::resetError()
     }
 
     stopReturnHomeTracking();
+    if (m_chargeDispatchHold) {
+        m_chargeDispatchHold = false;
+        m_chargeDispatchHoldReason.clear();
+    }
     clearCurrentTask();
     setState(LineSystemState::Idle, QStringLiteral("未启动"));
     emit logMessage(QStringLiteral("[LineManager] 已复位到 Idle，等待重新 Start"));
+}
+
+void LineManager::setChargeDispatchHold(const bool hold, const QString &reason)
+{
+    const bool wasHeld = m_chargeDispatchHold;
+    if (wasHeld == hold) {
+        if (hold && !reason.trimmed().isEmpty())
+            m_chargeDispatchHoldReason = reason.trimmed();
+        return;
+    }
+
+    m_chargeDispatchHold = hold;
+    m_chargeDispatchHoldReason = hold ? reason.trimmed() : QString();
+    emit logMessage(
+        hold
+            ? QStringLiteral("[LineManager] 已保持新任务派单：%1")
+                  .arg(m_chargeDispatchHoldReason.isEmpty()
+                           ? QStringLiteral("自动充电请求")
+                           : m_chargeDispatchHoldReason)
+            : QStringLiteral("[LineManager] 已解除充电派单保持：%1").arg(reason));
+
+    // 解除保持不负责启动主调度，也不能在返航或 Error 期间抢占状态；
+    // 只有本来就在 Running 等待的队列才恢复既有 FIFO 入口。
+    if (wasHeld && !hold
+        && m_state == LineSystemState::Running
+        && !m_executor->isBusy()
+        && m_queue.hasPending()) {
+        tryStartNext();
+    }
+}
+
+void LineManager::requestChargeReturnHome()
+{
+    if (!m_chargeDispatchHold) {
+        emit logMessage(QStringLiteral("[LineManager] 忽略未建立派单保持的充电返航请求"));
+        return;
+    }
+    if (m_state != LineSystemState::Running || m_executor->isBusy())
+        return;
+
+    returnHomeIfNeeded();
+}
+
+void LineManager::raiseExternalSystemError(const QString &reason)
+{
+    if (m_state == LineSystemState::Error)
+        return;
+
+    const QString detail = reason.trimmed().isEmpty()
+                               ? QStringLiteral("外部子系统发生未知故障")
+                               : reason.trimmed();
+    enterError(detail);
 }
 
 void LineManager::reportShortage(int stationId)
@@ -198,6 +266,12 @@ void LineManager::reportShortage(int stationId)
     }
 
     if (m_state == LineSystemState::ReturningHome) {
+        if (m_chargeDispatchHold) {
+            // 低电量返航优先于后到任务；任务只追加到 FIFO，不能取消本次回 LM1。
+            emit logMessage(QStringLiteral(
+                "[LineManager] 充电返航途中收到新任务，保留返航并继续保持队列"));
+            return;
+        }
         // 新任务优先于空闲回站；取消回 LM1 是正常调度切换，不属于 AGV 故障。
         cancelReturnHomeForNewTask();
         tryStartNext();
@@ -232,6 +306,13 @@ void LineManager::onExecutorTaskSucceeded(const Task &task)
 
     emit logMessage(QStringLiteral("工位%1送料完成").arg(task.stationId));
 
+    if (m_chargeDispatchHold) {
+        // 当前任务已经安全结束；低电策略只禁止取下一单，并保留完整 FIFO 后返 LM1。
+        clearCurrentTask();
+        returnHomeIfNeeded();
+        return;
+    }
+
     // 连续任务之间不回 LM1，直接启动队首可减少无效往返。
     if (m_queue.hasPending()) {
         tryStartNext();
@@ -250,6 +331,13 @@ void LineManager::onExecutorTaskFailed(const Task &task, const QString &reason)
 
     // 任务失败只影响当前单，不影响后续 FIFO 调度；后面有单就继续，没有单再回 LM1。
     emit logMessage(QStringLiteral("工位%1送料失败：%2").arg(task.stationId).arg(reason));
+
+    if (m_chargeDispatchHold) {
+        // 普通任务失败已由 TaskExecutor 完成安全收姿态，仍按低电优先规则返 LM1。
+        clearCurrentTask();
+        returnHomeIfNeeded();
+        return;
+    }
 
     // 能走到此信号说明 TaskExecutor 已成功完成安全收姿态，因此允许继续队列。
     if (m_queue.hasPending()) {
@@ -307,6 +395,8 @@ void LineManager::onAgvMonitorUpdated(const AgvMonitorData &data)
         stopReturnHomeTracking();
         setState(LineSystemState::Running, QStringLiteral("等待缺料"));
         emit logMessage(QStringLiteral("[LineManager] AGV 已回到 LM1，等待缺料"));
+        if (!m_chargeDispatchHold && m_queue.hasPending())
+            tryStartNext();
     }
 }
 
@@ -363,6 +453,10 @@ void LineManager::tryStartNext()
         return;
     }
 
+    // 必须在 takeNext() 之前检查：保持期间 FIFO 队首仍是 Pending，不能先取出再回滚。
+    if (m_chargeDispatchHold)
+        return;
+
     if (m_executor->isBusy() || !m_queue.hasPending()) {
         return;
     }
@@ -385,7 +479,8 @@ void LineManager::returnHomeIfNeeded()
         return;
     }
 
-    if (m_executor->isBusy() || m_queue.hasPending()) {
+    if (m_executor->isBusy()
+        || (!m_chargeDispatchHold && m_queue.hasPending())) {
         return;
     }
 
@@ -439,6 +534,12 @@ void LineManager::stopReturnHomeTracking()
 void LineManager::enterError(const QString &reason)
 {
     // 整线 Error 是设备安全边界：先停止所有在途动作，再清 Pending，最后通知 UI。
+    if (m_chargeDispatchHold) {
+        emit logMessage(QStringLiteral("[LineManager] 系统 Error 清除充电派单保持：%1")
+                            .arg(m_chargeDispatchHoldReason));
+        m_chargeDispatchHold = false;
+        m_chargeDispatchHoldReason.clear();
+    }
     stopReturnHomeTracking();
 
     if (m_agv) {

@@ -10,6 +10,8 @@
 
 #include <memory>
 
+#include "chargepilecontroller.h"
+#include "chargesettings.h"
 #include "customSysScheduler.h"
 #include "lineconfig.h"
 #include "linemanager.h"
@@ -17,6 +19,7 @@
 #include "runtimesettings.h"
 
 class AgvController;
+class AutoChargeCoordinator;
 class VisionHttpClient;
 class HuayanScheduler;
 class LineOrchestrator;
@@ -61,6 +64,16 @@ public:
     NScanScheduler   *nscanScheduler() const { return m_nscanScheduler.get(); }
     PalletScheduler  *palletScheduler() const { return m_palletScheduler; }
     CustomSysScheduler *customSysScheduler() const { return m_customSysScheduler; }
+    /// 返回 DeviceManager 唯一拥有的充电桩控制器；UI/协调器不得另建通信实例。
+    ChargePileController *chargePileController() const { return m_chargePileController; }
+    /// 返回只产生业务意图、不直接发送 AGV 或 Modbus 命令的自动充电协调器。
+    AutoChargeCoordinator *autoChargeCoordinator() const { return m_autoChargeCoordinator; }
+    /// 返回已通过校验并成功持久化的当前充电参数快照。
+    const ChargeSettings &chargeSettings() const { return m_chargeSettings; }
+    /// 是否已取得一轮字段一致的 AGV 监控快照。
+    bool hasAgvMonitor() const { return m_hasAgvMonitor; }
+    /// 最近一轮完整 AGV 快照；hasAgvMonitor()==false 时调用方不得据此做安全决策。
+    AgvMonitorData lastAgvMonitor() const { return m_lastAgvMonitor; }
     bool              lightIsOn()        const { return m_lightOn;      }
     bool              nscanTestRunning() const { return m_nscanTestRunning; }
     const Config     &config()           const { return m_cfg;          }
@@ -68,6 +81,27 @@ public:
     bool runtimeSettingsLocked() const;
     bool applyRuntimeSettingsCandidate(const RuntimeSettings &candidate,
                                        QString *error);
+    /**
+     * @brief 校验、原子保存并事务式应用一份充电候选设置。
+     *
+     * 查询/会话/恢复在途或控制器处于 Fault/Unknown 时拒绝。只有文件原子提交
+     * 成功后才同时更新控制器、协调器和本对象快照，保存失败不会改变运行参数。
+     */
+    bool applyChargeSettingsCandidate(const ChargeSettings &candidate,
+                                      QString *error);
+    /**
+     * @brief 执行业务层手动开始门禁并向唯一控制器提交 Manual 会话。
+     *
+     * 界面控件禁用不能替代这里对 LineManager Idle、LM1、导航空闲、自动模式
+     * 关闭以及控制器非忙碌/非未知状态的复核。
+     */
+    bool startManualCharge(QString *error);
+    /// 提交只读五组状态查询；不会发送任何写寄存器或写线圈命令。
+    bool queryChargePileStatus(QString *error);
+    /// 将当前活动充电会话汇入控制器唯一的安全停止状态机。
+    void stopChargePile();
+    /// 设置本次进程的自动授权；该值默认关闭且绝不写入 charge-settings.ini。
+    bool setAutoChargeEnabled(bool enabled, QString *error);
 
     void setConfig(const Config &cfg) { m_cfg = cfg; }
 
@@ -136,6 +170,8 @@ private:
     HuayanScheduler  *m_huayanScheduler = nullptr;  ///< QObject 子对象，唯一机械臂状态机。
     LineOrchestrator *m_lineOrch = nullptr;          ///< 旧单工位参考流程，不是新调度主线。
     LineManager      *m_lineManager = nullptr;       ///< 12 工位连续补料主调度。
+    ChargePileController *m_chargePileController = nullptr; ///< 唯一 RTU-over-TCP 充电桩控制器。
+    AutoChargeCoordinator *m_autoChargeCoordinator = nullptr; ///< 自动阈值策略协调器，不拥有设备。
     PalletScheduler  *m_palletScheduler = nullptr;   ///< 主流程和配置 UI 共用的码垛缓存。
     CustomSysScheduler *m_customSysScheduler = nullptr;
     std::shared_ptr<NScanScheduler> m_nscanScheduler;
@@ -151,6 +187,12 @@ private:
     bool              m_nscanTestRunning = false;
     QHash<int, int>   m_stationMap;
     SettingsManager  *m_settingsManager = nullptr;
+    QString m_chargeSettingsPath; ///< AppConfigLocation 下的原子充电参数文件路径。
+    ChargeSettings m_chargeSettings = ChargeSettings::defaults(); ///< 已持久化且已生效的快照。
+    bool m_hasAgvMonitor = false; ///< 业务层手动门禁不得使用未完整更新的 AGV 默认值。
+    AgvMonitorData m_lastAgvMonitor; ///< 最近完整 AGV 电量、位置和导航状态。
+    ChargePileController::State m_chargePileState =
+        ChargePileController::State::Idle; ///< 缓存同步 stateChanged，供事务门禁使用。
 };
 
 #endif // DEVICEMANAGER_H

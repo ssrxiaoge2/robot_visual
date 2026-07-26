@@ -450,6 +450,34 @@ target_link_libraries(navigation_timeout_contract_tests PRIVATE
 add_test(NAME navigation_timeout_contract_tests
          COMMAND navigation_timeout_contract_tests)
 
+add_executable(line_manager_charge_hold_contract_tests
+    test_line_manager_charge_hold_contract.cpp
+    ../src/linemanager.cpp
+    # 测试目标保留真实 LineManager；TaskExecutor、AGV 和华沿方法只在测试文件
+    # 提供最小设备替身，避免单元测试装载或调用现场 SDK。
+    ../src/linemanager.h
+    ../src/taskexecutor.h
+    ../src/agvcontroller.h
+    ../src/runtimesettings.cpp
+    ../src/chargebusinessrules.cpp
+)
+
+target_include_directories(line_manager_charge_hold_contract_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+    "${CMAKE_SOURCE_DIR}/3rd/HuaYansdk/HuayanRobotLibrary-C++-V1.0.15.0/include"
+)
+
+target_link_libraries(line_manager_charge_hold_contract_tests PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Network
+    Qt6::SerialBus
+    Qt6::Test
+)
+
+add_test(NAME line_manager_charge_hold_contract_tests
+         COMMAND line_manager_charge_hold_contract_tests)
+
 add_executable(depth_descent_contract_tests
     test_depth_descent_contract.cpp
 )

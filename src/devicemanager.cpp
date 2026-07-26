@@ -1,5 +1,9 @@
 #include "devicemanager.h"
 #include "agvcontroller.h"
+#include "autochargecoordinator.h"
+#include "chargebusinessrules.h"
+#include "chargepilecontroller.h"
+#include "chargesettings.h"
 #include "customSysScheduler.h"
 #include "huayanScheduler.h"
 #include "linemanager.h"
@@ -88,6 +92,12 @@ DeviceManager::DeviceManager(QObject *parent)
     qRegisterMetaType<Task>("Task");
     qRegisterMetaType<QList<Task>>("QList<Task>");
     qRegisterMetaType<LineSystemState>("LineSystemState");
+    qRegisterMetaType<ChargePileSnapshot>("ChargePileSnapshot");
+    qRegisterMetaType<ChargePileController::State>("ChargePileController::State");
+    qRegisterMetaType<ChargePileController::SessionOrigin>(
+        "ChargePileController::SessionOrigin");
+    qRegisterMetaType<ChargePileController::StopReason>(
+        "ChargePileController::StopReason");
 
     QString settingsDir =
         QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
@@ -249,6 +259,99 @@ DeviceManager::DeviceManager(QObject *parent)
     connect(lineScanWorker, &NScanWorker::finished,
             m_lineManager, &LineManager::onScanFinished, Qt::QueuedConnection);
 
+    // 充电参数与运行参数使用同一 AppConfigLocation，自动授权开关刻意不在
+    // ChargeSettings 中，因此每次进程启动都保持关闭。
+    m_chargeSettingsPath =
+        QDir(settingsDir).filePath(QStringLiteral("charge-settings.ini"));
+    const ChargeSettingsLoadResult chargeLoaded =
+        loadChargeSettings(m_chargeSettingsPath);
+    m_chargeSettings = chargeLoaded.settings;
+    for (const QString &warning : chargeLoaded.warnings)
+        qWarning().noquote() << QStringLiteral("[充电参数] %1").arg(warning);
+
+    // 所有充电入口共享这一组对象：控制器唯一持有套接字，协调器只产生意图。
+    // 创建顺序固定为 AgvController -> LineManager -> ChargePileController ->
+    // AutoChargeCoordinator，避免协调器在依赖尚未建立时收到初始状态。
+    m_chargePileController = new ChargePileController(this);
+    m_chargePileController->applySettings(m_chargeSettings);
+    m_autoChargeCoordinator = new AutoChargeCoordinator(this);
+    m_autoChargeCoordinator->applySettings(m_chargeSettings);
+
+    connect(m_agvCtrl, &AgvController::monitorUpdated, this,
+            [this](const AgvMonitorData &data) {
+        // monitorUpdated 保证六个字段属于同一轮读取；业务层只保存这种完整快照。
+        m_lastAgvMonitor = data;
+        m_hasAgvMonitor = true;
+        m_autoChargeCoordinator->onAgvMonitorUpdated(data);
+    });
+    connect(m_lineManager, &LineManager::systemStateChanged,
+            m_autoChargeCoordinator, &AutoChargeCoordinator::onLineStateChanged);
+    connect(m_lineManager, &LineManager::queueChanged,
+            m_autoChargeCoordinator, &AutoChargeCoordinator::onQueueChanged);
+    connect(m_chargePileController, &ChargePileController::stateChanged, this,
+            [this](ChargePileController::State state, const QString &text) {
+        m_chargePileState = state;
+        m_autoChargeCoordinator->onChargeControllerStateChanged(state, text);
+    });
+    connect(m_chargePileController, &ChargePileController::chargeSessionFinished,
+            m_autoChargeCoordinator, &AutoChargeCoordinator::onChargeSessionFinished);
+
+    connect(m_autoChargeCoordinator, &AutoChargeCoordinator::dispatchHoldRequested,
+            m_lineManager, &LineManager::setChargeDispatchHold);
+    connect(m_autoChargeCoordinator, &AutoChargeCoordinator::returnHomeRequested,
+            m_lineManager, &LineManager::requestChargeReturnHome);
+    connect(m_autoChargeCoordinator,
+            &AutoChargeCoordinator::automaticChargeStartRequested,
+            this, [this] {
+        // 协调器在发意图前已锁存 startIntentPending；这里同步反馈一次接受结果，
+        // 即使 startCharge 内同步发布 Connecting，也不会丢失或重复接受回执。
+        QString error;
+        const bool accepted = m_chargePileController->startCharge(
+            ChargePileController::SessionOrigin::Automatic, &error);
+        m_autoChargeCoordinator->onAutomaticChargeStartResult(
+            accepted,
+            accepted ? QStringLiteral("控制器已接受自动充电会话") : error);
+    });
+    connect(m_autoChargeCoordinator,
+            &AutoChargeCoordinator::automaticChargeSafeStopRequested,
+            this, [this](ChargePileController::StopReason reason) {
+        // 只允许协调器自己拥有的 Automatic 会话触发此通道；手动会话绝不能
+        // 因自动策略的一次迟到输入被错误停止。
+        if (m_autoChargeCoordinator->automaticSessionActive())
+            m_chargePileController->requestSafeStop(reason);
+    });
+    connect(m_autoChargeCoordinator,
+            &AutoChargeCoordinator::automaticChargeConservativeRecoveryRequested,
+            this,
+            [this](ChargePileController::SessionOrigin origin,
+                   ChargePileController::StopReason reason) {
+        if (!m_autoChargeCoordinator->automaticSessionActive())
+            return;
+        QString error;
+        const bool accepted =
+            m_chargePileController->requestConservativeRecovery(origin, reason, &error);
+        emit logMessage(
+            accepted
+                ? QStringLiteral("[自动充电] 控制器已接受保守安全恢复")
+                : QStringLiteral("[自动充电] 保守安全恢复被拒绝：%1").arg(error));
+    });
+    connect(m_autoChargeCoordinator, &AutoChargeCoordinator::lineErrorRequested,
+            m_lineManager, &LineManager::raiseExternalSystemError);
+
+    // 充电子系统日志统一从 DeviceManager 出口进入现有主窗口日志；协调器的
+    // criticalBatteryAlarm 同时会发布详细 logMessage，不在这里重复打印。
+    connect(m_chargePileController, &ChargePileController::logMessage,
+            this, &DeviceManager::logMessage);
+    connect(m_autoChargeCoordinator, &AutoChargeCoordinator::logMessage,
+            this, &DeviceManager::logMessage);
+
+    // LineManager 构造期的初始信号早于上述连接，显式补齐同一份初始快照。
+    m_autoChargeCoordinator->onLineStateChanged(
+        m_lineManager->state(), QStringLiteral("初始化"));
+    m_autoChargeCoordinator->onQueueChanged(m_lineManager->queueSnapshot());
+    m_autoChargeCoordinator->onChargeControllerStateChanged(
+        m_chargePileState, QStringLiteral("初始化"));
+
     m_lineOrch = new LineOrchestrator(m_agvCtrl, m_huayanScheduler, this);
     // 编排器请求派单 → 经映射表解析后下发（复用 dispatchAgv）
     connect(m_lineOrch, &LineOrchestrator::agvDispatchRequested,
@@ -322,6 +425,146 @@ bool DeviceManager::applyRuntimeSettingsCandidate(
     }
 
     emit logMessage(QStringLiteral("[运行参数] 已保存并应用"));
+    return true;
+}
+
+bool DeviceManager::applyChargeSettingsCandidate(
+    const ChargeSettings &candidate, QString *error)
+{
+    if (error)
+        error->clear();
+
+    const ChargeSettingsValidation validation = validateChargeSettings(candidate);
+    if (!validation.ok) {
+        if (error)
+            *error = validation.errors.join(QStringLiteral("；"));
+        return false;
+    }
+    if (!m_chargePileController || !m_autoChargeCoordinator) {
+        if (error)
+            *error = QStringLiteral("充电业务对象尚未初始化");
+        return false;
+    }
+    if (m_chargePileController->isBusy()
+        || m_autoChargeCoordinator->automaticSessionActive()) {
+        if (error)
+            *error = QStringLiteral("充电查询、会话或安全收尾正在执行，不能修改参数");
+        return false;
+    }
+    if (m_chargePileState == ChargePileController::State::Unknown
+        || m_chargePileState == ChargePileController::State::Fault) {
+        if (error)
+            *error = QStringLiteral("充电桩状态未知或存在故障，必须先完成安全恢复");
+        return false;
+    }
+
+    // saveChargeSettings 内部使用同目录临时文件和 QSaveFile 原子替换；
+    // 在它成功前不能调用 applySettings，确保写盘失败时运行快照完全不变。
+    if (!saveChargeSettings(m_chargeSettingsPath, candidate, error))
+        return false;
+
+    m_chargePileController->applySettings(candidate);
+    m_autoChargeCoordinator->applySettings(candidate);
+    m_chargeSettings = candidate;
+    emit logMessage(QStringLiteral("[充电参数] 已原子保存并应用"));
+    return true;
+}
+
+bool DeviceManager::startManualCharge(QString *error)
+{
+    if (error)
+        error->clear();
+    const auto reject = [this, error](const QString &reason) {
+        if (error)
+            *error = reason;
+        emit logMessage(QStringLiteral("[手动充电] 拒绝启动：%1").arg(reason));
+        return false;
+    };
+
+    if (!m_lineManager || !m_chargePileController || !m_autoChargeCoordinator)
+        return reject(QStringLiteral("充电业务对象尚未初始化"));
+
+    ManualChargeStartContext context;
+    context.lineState = m_lineManager->state();
+    context.hasAgvMonitor = m_hasAgvMonitor;
+    context.agv = m_lastAgvMonitor;
+    context.controllerBusy = m_chargePileController->isBusy();
+    context.controllerState = m_chargePileState;
+    context.automaticEnabled = m_autoChargeCoordinator->isEnabled();
+    context.automaticSessionActive =
+        m_autoChargeCoordinator->automaticSessionActive();
+    const QString rejection = manualChargeStartRejectionReason(context);
+    if (!rejection.isEmpty())
+        return reject(rejection);
+
+    QString controllerError;
+    const bool accepted = m_chargePileController->startCharge(
+        ChargePileController::SessionOrigin::Manual, &controllerError);
+    if (!accepted)
+        return reject(controllerError);
+
+    emit logMessage(QStringLiteral("[手动充电] 控制器已接受启动请求"));
+    return true;
+}
+
+bool DeviceManager::queryChargePileStatus(QString *error)
+{
+    if (error)
+        error->clear();
+    if (!m_chargePileController) {
+        if (error)
+            *error = QStringLiteral("充电控制器尚未初始化");
+        return false;
+    }
+    if (m_chargePileController->isBusy()) {
+        if (error)
+            *error = QStringLiteral("充电控制器正在执行其他操作");
+        return false;
+    }
+
+    m_chargePileController->queryStatus();
+    return true;
+}
+
+void DeviceManager::stopChargePile()
+{
+    if (m_chargePileController)
+        m_chargePileController->requestSafeStop(
+            ChargePileController::StopReason::Manual);
+}
+
+bool DeviceManager::setAutoChargeEnabled(const bool enabled, QString *error)
+{
+    if (error)
+        error->clear();
+    if (!m_autoChargeCoordinator || !m_chargePileController) {
+        if (error)
+            *error = QStringLiteral("自动充电业务对象尚未初始化");
+        return false;
+    }
+
+    // 关闭授权永远允许；若存在 Automatic 会话，协调器会保持派单并请求同一
+    // 控制器安全收尾。关闭且无活动会话时，决策严格旁路原主调度。
+    if (!enabled) {
+        m_autoChargeCoordinator->setEnabled(false);
+        return true;
+    }
+    if (m_chargePileController->isBusy()
+        || m_autoChargeCoordinator->automaticSessionActive()) {
+        if (error)
+            *error = QStringLiteral("手动查询或充电会话正在执行，不能开启自动模式");
+        return false;
+    }
+    if (m_chargePileState == ChargePileController::State::Unknown
+        || m_chargePileState == ChargePileController::State::Fault) {
+        if (error)
+            *error = QStringLiteral("充电桩状态未知或存在故障，不能开启自动模式");
+        return false;
+    }
+
+    // 这里只授权策略，不调用 LineManager::start()；Idle 时协调器会继续等待
+    // 用户显式启动主调度，保证自动开关不改变既有 Start/Stop 生命周期。
+    m_autoChargeCoordinator->setEnabled(true);
     return true;
 }
 
