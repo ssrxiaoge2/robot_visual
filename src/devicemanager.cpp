@@ -548,6 +548,8 @@ bool DeviceManager::startManualCharge(QString *error)
     context.agv = m_lastAgvMonitor;
     context.controllerBusy = m_chargePileController->isBusy();
     context.controllerState = m_chargePileState;
+    context.controllerShutdownRequired =
+        m_chargePileController->shutdownRequired();
     context.automaticEnabled = m_autoChargeCoordinator->isEnabled();
     context.automaticSessionActive =
         m_autoChargeCoordinator->automaticSessionActive();
@@ -679,16 +681,17 @@ bool DeviceManager::setAutoChargeEnabled(const bool enabled, QString *error)
         m_autoChargeCoordinator->setEnabled(false);
         return true;
     }
-    if (m_chargePileController->isBusy()
-        || m_autoChargeCoordinator->automaticSessionActive()) {
+    AutomaticChargeEnableContext context;
+    context.controllerBusy = m_chargePileController->isBusy();
+    context.controllerState = m_chargePileState;
+    context.automaticSessionActive =
+        m_autoChargeCoordinator->automaticSessionActive();
+    context.controllerShutdownRequired =
+        m_chargePileController->shutdownRequired();
+    const QString rejection = automaticChargeEnableRejectionReason(context);
+    if (!rejection.isEmpty()) {
         if (error)
-            *error = QStringLiteral("手动查询或充电会话正在执行，不能开启自动模式");
-        return false;
-    }
-    if (m_chargePileState == ChargePileController::State::Unknown
-        || m_chargePileState == ChargePileController::State::Fault) {
-        if (error)
-            *error = QStringLiteral("充电桩状态未知或存在故障，不能开启自动模式");
+            *error = rejection;
         return false;
     }
 

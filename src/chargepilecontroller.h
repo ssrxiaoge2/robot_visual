@@ -59,6 +59,16 @@ std::optional<ChargePileWriteIdentity>
 chargePileWriteIdentity(QByteArrayView frame);
 
 /**
+ * @brief 计算有限阶段下一轮查询的确定性等待时间。
+ *
+ * deadlineMs 为0表示无限监控，返回完整 pollIntervalMs；有限阶段返回轮询间隔与
+ * 剩余截止时间的较小值。截止时间已经到达时返回1ms，让现有阶段回调立即进入
+ * 超时分支，且不在0ms定时器中形成忙循环。
+ */
+int boundedChargePhasePollDelayMs(int pollIntervalMs, int deadlineMs,
+                                  qint64 elapsedMs);
+
+/**
  * @brief 充电桩通信与后续充电流程共用的唯一控制器。
  *
  * 所有只读查询、参数写入和线圈命令都经过同一个串行请求出口。完整充电会话严格
@@ -312,6 +322,13 @@ private:
     void resumeAfterRecovery();
     void releaseRetractAfterFailure(const QString &reason);
     void schedulePhase(DeferredPhase phase, int delayMs);
+    /**
+     * @brief 按轮询间隔与当前有限阶段剩余时间的较小值安排下一轮。
+     *
+     * deadlineMs 为0时表示无限监控并沿用完整轮询间隔；有限阶段必须避免在接近
+     * 截止点时再等待一个完整周期，否则停止和推杆超时会被配置的轮询值放大。
+     */
+    void schedulePhaseBeforeDeadline(DeferredPhase phase, int deadlineMs);
     bool snapshotHasBlockingFault(quint16 ignoredMask) const;
     bool snapshotHasNoOutput() const;
     bool validatePrestartSnapshot(QString *reason) const;

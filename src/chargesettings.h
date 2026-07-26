@@ -24,7 +24,7 @@ struct ChargeSettings
     int monitorTimeoutMs = 500000;
     int stopTimeoutMs = 20000;
     int motionTimeoutMs = 30000;
-    double safeCurrentA = 1.0;
+    double safeCurrentA = 1.0; ///< 现场 Python 已验证的无输出判定，上限固定为 1.0A。
     double chargeDetectCurrentA = 0.5;
     int startChargePercent = 15;
     int dispatchReadyPercent = 20;

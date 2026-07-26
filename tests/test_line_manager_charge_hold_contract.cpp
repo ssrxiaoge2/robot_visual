@@ -442,6 +442,36 @@ private slots:
         QVERIFY(!manualChargeStartRejectionReason(context).isEmpty());
     }
 
+    void unresolvedControllerSafetyContextRejectsManualAndAutomaticAuthorization()
+    {
+        ManualChargeStartContext manual;
+        manual.lineState = LineSystemState::Idle;
+        manual.hasAgvMonitor = true;
+        manual.agv.curStation = 1;
+        manual.agv.navStatus =
+            static_cast<quint16>(AgvController::NavStatus::None);
+        manual.controllerState = ChargePileController::State::SafeComplete;
+        manual.controllerShutdownRequired = true;
+        QVERIFY(manualChargeStartRejectionReason(manual)
+                    .contains(QStringLiteral("安全")));
+
+        AutomaticChargeEnableContext automatic;
+        automatic.controllerState = ChargePileController::State::SafeComplete;
+        automatic.controllerShutdownRequired = true;
+        QVERIFY(automaticChargeEnableRejectionReason(automatic)
+                    .contains(QStringLiteral("安全")));
+    }
+
+    void phasePollingDelayUsesRemainingDeadlineDeterministically()
+    {
+        // 与控制器实际调度共用同一纯函数：有限阶段只等待剩余120ms，不能再
+        // 追加完整250ms；无限监控则保留原轮询间隔。
+        QCOMPARE(boundedChargePhasePollDelayMs(250, 650, 530), 120);
+        QCOMPARE(boundedChargePhasePollDelayMs(250, 650, 649), 1);
+        QCOMPARE(boundedChargePhasePollDelayMs(250, 650, 650), 1);
+        QCOMPARE(boundedChargePhasePollDelayMs(250, 0, 5000), 250);
+    }
+
     void deviceManagerKeepsChargingOutOfTaskExecutorAndAddsBusinessGates()
     {
         const QString taskHeader = readSource(QStringLiteral("src/taskexecutor.h"));

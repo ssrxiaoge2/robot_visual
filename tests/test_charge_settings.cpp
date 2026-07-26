@@ -67,6 +67,68 @@ private slots:
         s = ChargeSettings::defaults();
         s.monitorTimeoutMs = -1;
         QVERIFY(!validateChargeSettings(s).ok);
+        s = ChargeSettings::defaults();
+        s.safeCurrentA = 50.0;
+        QVERIFY(!validateChargeSettings(s).ok);
+    }
+
+    void rejectsPollIntervalsLongerThanFinitePhaseTimeouts()
+    {
+        ChargeSettings settings = ChargeSettings::defaults();
+        settings.startTimeoutMs = settings.pollIntervalMs - 1;
+        QVERIFY(!validateChargeSettings(settings).ok);
+
+        settings = ChargeSettings::defaults();
+        settings.monitorTimeoutMs = settings.pollIntervalMs - 1;
+        QVERIFY(!validateChargeSettings(settings).ok);
+
+        settings = ChargeSettings::defaults();
+        settings.stopTimeoutMs = settings.pollIntervalMs - 1;
+        QVERIFY(!validateChargeSettings(settings).ok);
+
+        settings = ChargeSettings::defaults();
+        settings.motionTimeoutMs = settings.pollIntervalMs - 1;
+        QVERIFY(!validateChargeSettings(settings).ok);
+
+        settings = ChargeSettings::defaults();
+        settings.monitorTimeoutMs = 0;
+        QVERIFY(validateChargeSettings(settings).ok);
+    }
+
+    void restoresOnlyInvalidTimeoutGroupAndPreservesThresholds()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("charge.ini"));
+        QSettings ini(path, QSettings::IniFormat);
+        ini.setValue(QStringLiteral("charge/voltageV"), 55.5);
+        ini.setValue(QStringLiteral("timeout/responseTimeoutMs"), 1234);
+        ini.setValue(QStringLiteral("timeout/connectTimeoutMs"), 2345);
+        ini.setValue(QStringLiteral("timeout/pollIntervalMs"), 6000);
+        ini.setValue(QStringLiteral("timeout/startTimeoutMs"), 5000);
+        ini.setValue(QStringLiteral("timeout/monitorTimeoutMs"), 500000);
+        ini.setValue(QStringLiteral("timeout/stopTimeoutMs"), 20000);
+        ini.setValue(QStringLiteral("timeout/motionTimeoutMs"), 30000);
+        ini.setValue(QStringLiteral("threshold/startChargePercent"), 16);
+        ini.setValue(QStringLiteral("threshold/dispatchReadyPercent"), 25);
+        ini.setValue(QStringLiteral("threshold/stopChargePercent"), 85);
+        ini.sync();
+
+        const ChargeSettingsLoadResult loaded = loadChargeSettings(path);
+        const ChargeSettings defaults = ChargeSettings::defaults();
+        QCOMPARE(loaded.settings.responseTimeoutMs, defaults.responseTimeoutMs);
+        QCOMPARE(loaded.settings.connectTimeoutMs, defaults.connectTimeoutMs);
+        QCOMPARE(loaded.settings.pollIntervalMs, defaults.pollIntervalMs);
+        QCOMPARE(loaded.settings.startTimeoutMs, defaults.startTimeoutMs);
+        QCOMPARE(loaded.settings.monitorTimeoutMs, defaults.monitorTimeoutMs);
+        QCOMPARE(loaded.settings.stopTimeoutMs, defaults.stopTimeoutMs);
+        QCOMPARE(loaded.settings.motionTimeoutMs, defaults.motionTimeoutMs);
+        QCOMPARE(loaded.settings.voltageV, 55.5);
+        QCOMPARE(loaded.settings.startChargePercent, 16);
+        QCOMPARE(loaded.settings.dispatchReadyPercent, 25);
+        QCOMPARE(loaded.settings.stopChargePercent, 85);
+        QVERIFY(loaded.warnings.join(QStringLiteral("；"))
+                    .contains(QStringLiteral("超时与轮询")));
     }
 
     void optionalRegisterValuesMustFitUnsignedSixteenBits()

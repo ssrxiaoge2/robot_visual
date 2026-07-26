@@ -585,6 +585,81 @@ private:
     }
 
 private slots:
+    void rejectsSafeCurrentAbovePythonAuthorityAndNeverRetractsAtFiftyAmps()
+    {
+        FakeChargePile pile;
+        QVERIFY(pile.listen());
+        pile.enableChargeScenario();
+        // 500 原始值即 50.0A。即使操作员尝试把“无输出安全电流”误设为
+        // 50A，控制器也必须保留现场 Python 已验证的 1.0A 上限并禁止缩回。
+        pile.setCurrentAfterStop(500);
+
+        ChargePileController controller;
+        ChargeSettings accepted = loopbackSettings(pile);
+        accepted.stopTimeoutMs = 500;
+        QString error;
+        QVERIFY(controller.applySettings(accepted, &error));
+
+        ChargeSettings unsafe = accepted;
+        unsafe.safeCurrentA = 50.0;
+        QVERIFY2(!controller.applySettings(unsafe, &error),
+                 "50A 不能被解释为安全无输出阈值");
+        QCOMPARE(controller.appliedSettings().safeCurrentA, 1.0);
+
+        QSignalSpy finishedSpy(
+            &controller, &ChargePileController::chargeSessionFinished);
+        QVERIFY(controller.startCharge(
+            ChargePileController::SessionOrigin::Manual, &error));
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 12000);
+        QVERIFY(!finishedSpy.last().at(0).toBool());
+        QCOMPARE(pile.coilCount(kCoilRetract), 0);
+    }
+
+    void rejectsPollIntervalsLongerThanFinitePhaseDeadlines()
+    {
+        ChargePileController controller;
+        QString error;
+
+        for (const QString &phase : {
+                 QStringLiteral("启动"),
+                 QStringLiteral("监控"),
+                 QStringLiteral("停止"),
+                 QStringLiteral("推杆")}) {
+            ChargeSettings invalid = ChargeSettings::defaults();
+            invalid.pollIntervalMs = 5000;
+            if (phase == QStringLiteral("启动"))
+                invalid.startTimeoutMs = 4999;
+            else if (phase == QStringLiteral("监控"))
+                invalid.monitorTimeoutMs = 4999;
+            else if (phase == QStringLiteral("停止"))
+                invalid.stopTimeoutMs = 4999;
+            else
+                invalid.motionTimeoutMs = 4999;
+
+            QVERIFY2(!controller.applySettings(invalid, &error),
+                     qPrintable(QStringLiteral("%1阶段不能接受大于截止期限的轮询间隔")
+                                    .arg(phase)));
+        }
+
+        ChargeSettings monitorDisabled = ChargeSettings::defaults();
+        monitorDisabled.monitorTimeoutMs = 0;
+        QVERIFY2(controller.applySettings(monitorDisabled, &error),
+                 qPrintable(error));
+    }
+
+    void phasePollingDelayUsesRemainingDeadlineDeterministically()
+    {
+        // 剩余120ms时必须缩短原250ms轮询等待；该断言不受 Windows 定时器
+        // 调度抖动、TCP回环和五帧快照耗时影响，并直接覆盖生产调度调用的纯函数。
+        QCOMPARE(boundedChargePhasePollDelayMs(250, 650, 530), 120);
+        QCOMPARE(boundedChargePhasePollDelayMs(250, 650, 649), 1);
+        QCOMPARE(boundedChargePhasePollDelayMs(250, 650, 650), 1);
+        QCOMPARE(boundedChargePhasePollDelayMs(250, 650, 700), 1);
+
+        // monitorTimeoutMs=0 表示无限监控，只能沿用完整轮询间隔。
+        QCOMPARE(boundedChargePhasePollDelayMs(250, 0, 5000), 250);
+    }
+
     void queryReadsFiveGroupsSeriallyAndNeverWrites()
     {
         // 若控制器改为并发收发、寄存器地址错误或误发写命令，本测试的顺序和功能码断言会失败。
@@ -1113,6 +1188,7 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(queryFinished.count(), 1, 5000);
         QVERIFY(queryFinished.last().at(0).toBool());
         QVERIFY(controller.shutdownRequired());
+        QCOMPARE(controller.state(), ChargePileController::State::Unknown);
 
         QString blockedError;
         QVERIFY(!controller.startCharge(
@@ -1342,11 +1418,11 @@ private slots:
         // 先尝试切到 B，再尝试只修改 A 的安全电流和收尾时序。两次都必须
         // 被未安全上下文整体拒绝，不能出现“目标冻结但阈值已变化”的半冻结。
         ChargeSettings settingsB = loopbackSettings(pileB);
-        settingsB.safeCurrentA = 10.0;
+        settingsB.safeCurrentA = 0.8;
         settingsB.stopTimeoutMs = 10;
         controller.applySettings(settingsB);
         ChargeSettings changedSafetyOnA = settingsA;
-        changedSafetyOnA.safeCurrentA = 10.0;
+        changedSafetyOnA.safeCurrentA = 0.8;
         changedSafetyOnA.stopTimeoutMs = 10;
         controller.applySettings(changedSafetyOnA);
 

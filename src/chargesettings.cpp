@@ -72,6 +72,25 @@ void appendWarning(QStringList &warnings, const char *key)
                         .arg(QLatin1String(key)));
 }
 
+bool timeoutGroupIsValid(const ChargeSettings &settings)
+{
+    // 每个有限阶段至少要允许在截止点前发起下一轮查询；无限监控用0显式关闭
+    // 上位机监控期限，因此不参与该项交叉约束。
+    return settings.pollIntervalMs <= settings.startTimeoutMs
+           && settings.pollIntervalMs <= settings.stopTimeoutMs
+           && settings.pollIntervalMs <= settings.motionTimeoutMs
+           && (settings.monitorTimeoutMs == 0
+               || settings.pollIntervalMs <= settings.monitorTimeoutMs);
+}
+
+bool thresholdGroupIsValid(const ChargeSettings &settings)
+{
+    return settings.startChargePercent > 10
+           && settings.startChargePercent < settings.dispatchReadyPercent
+           && settings.dispatchReadyPercent < settings.stopChargePercent
+           && settings.stopChargePercent <= 100;
+}
+
 } // namespace
 
 ChargeSettings ChargeSettings::defaults()
@@ -109,9 +128,15 @@ ChargeSettingsValidation validateChargeSettings(const ChargeSettings &settings)
                 QStringLiteral("监控超时必须大于等于零，零表示不按上位机时间停止。"));
     appendError(result, settings.stopTimeoutMs > 0, QStringLiteral("停止超时必须大于零。"));
     appendError(result, settings.motionTimeoutMs > 0, QStringLiteral("运动超时必须大于零。"));
+    appendError(result, timeoutGroupIsValid(settings),
+                QStringLiteral("轮询间隔不能大于启动、停止、推杆动作或已启用的监控超时。"));
 
-    appendError(result, isFinite(settings.safeCurrentA) && settings.safeCurrentA >= 0.0,
-                QStringLiteral("安全电流必须为大于等于零的有限数值。"));
+    // 1.0A 是现场已验证 Python 流程用于“确认无输出后才允许缩回”的硬上限，
+    // 不能把充电桩额定电流或操作员录入值当作可放宽的安全判断。
+    appendError(result, isFinite(settings.safeCurrentA)
+                            && settings.safeCurrentA >= 0.0
+                            && settings.safeCurrentA <= 1.0,
+                QStringLiteral("安全电流必须为 0 至 1.0A 的有限数值。"));
     appendError(result, isFinite(settings.chargeDetectCurrentA) && settings.chargeDetectCurrentA > 0.0,
                 QStringLiteral("充电检测电流必须为正的有限数值。"));
     // 启动阈值必须严格高于 10%，三个阈值必须严格递增，防止状态切换抖动。
@@ -182,7 +207,8 @@ ChargeSettingsLoadResult loadChargeSettings(const QString &iniPath)
     readAndValidate(kMonitorTimeoutMs, result.settings.monitorTimeoutMs, defaults.monitorTimeoutMs, [](int v) { return v >= 0; });
     readAndValidate(kStopTimeoutMs, result.settings.stopTimeoutMs, defaults.stopTimeoutMs, [](int v) { return v > 0; });
     readAndValidate(kMotionTimeoutMs, result.settings.motionTimeoutMs, defaults.motionTimeoutMs, [](int v) { return v > 0; });
-    readAndValidate(kSafeCurrentA, result.settings.safeCurrentA, defaults.safeCurrentA, [](double v) { return v >= 0.0; });
+    readAndValidate(kSafeCurrentA, result.settings.safeCurrentA, defaults.safeCurrentA,
+                    [](double v) { return v >= 0.0 && v <= 1.0; });
     readAndValidate(kChargeDetectCurrentA, result.settings.chargeDetectCurrentA, defaults.chargeDetectCurrentA, [](double v) { return v > 0.0; });
     readAndValidate(kStartChargePercent, result.settings.startChargePercent, defaults.startChargePercent, [](int v) { return v > 10 && v < 100; });
     readAndValidate(kDispatchReadyPercent, result.settings.dispatchReadyPercent, defaults.dispatchReadyPercent, [](int v) { return v >= 0 && v < 100; });
@@ -210,14 +236,27 @@ ChargeSettingsLoadResult loadChargeSettings(const QString &iniPath)
         }
     }
 
-    if (!validateChargeSettings(result.settings).ok) {
-        // 所有独立字段已在上方逐项验证；剩余的失败只能是三个阈值的相互关系。
-        // 仅恢复这个约束组，不能因为电量阈值录入错误而丢失有效的网络、电气和超时配置。
+    if (!timeoutGroupIsValid(result.settings)) {
+        // 超时字段逐项合法仍可能形成 poll > deadline 的危险组合。整组恢复能避免
+        // 混用部分现场值和部分默认值，同时保留网络、电气与电量阈值配置。
+        result.settings.responseTimeoutMs = defaults.responseTimeoutMs;
+        result.settings.connectTimeoutMs = defaults.connectTimeoutMs;
+        result.settings.pollIntervalMs = defaults.pollIntervalMs;
+        result.settings.startTimeoutMs = defaults.startTimeoutMs;
+        result.settings.monitorTimeoutMs = defaults.monitorTimeoutMs;
+        result.settings.stopTimeoutMs = defaults.stopTimeoutMs;
+        result.settings.motionTimeoutMs = defaults.motionTimeoutMs;
+        result.warnings.append(QStringLiteral(
+            "超时与轮询组合不合法，已恢复该参数组的默认值。"));
+    }
+    if (!thresholdGroupIsValid(result.settings)) {
+        // 仅恢复相互依赖的阈值组，不能因阈值录入错误丢失有效的网络、电气和超时配置。
         result.settings.startChargePercent = defaults.startChargePercent;
         result.settings.dispatchReadyPercent = defaults.dispatchReadyPercent;
         result.settings.stopChargePercent = defaults.stopChargePercent;
         result.warnings.append(QStringLiteral("充电阈值组合不合法，已恢复该阈值组的默认值。"));
     }
+    Q_ASSERT(validateChargeSettings(result.settings).ok);
     return result;
 }
 

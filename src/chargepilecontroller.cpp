@@ -58,6 +58,18 @@ chargePileWriteIdentity(const QByteArrayView frame)
     };
 }
 
+int boundedChargePhasePollDelayMs(const int pollIntervalMs,
+                                  const int deadlineMs,
+                                  const qint64 elapsedMs)
+{
+    if (deadlineMs <= 0)
+        return qMax(1, pollIntervalMs);
+
+    const qint64 remainingMs = qint64(deadlineMs) - elapsedMs;
+    return qMin(qMax(1, pollIntervalMs),
+                int(qMax<qint64>(1, remainingMs)));
+}
+
 ChargePileController::ChargePileController(QObject *parent)
     : QObject(parent)
 {
@@ -871,14 +883,22 @@ void ChargePileController::finishQuery()
         return;
     m_queryInProgress = false;
     if (snapshotConfirmsSafe(m_snapshot, m_settings)) {
-        m_unknownGate = false;
         if (safeSnapshotResolvesRecoveryContext()) {
             // Start/Stop/Reset/参数写的效果都能由“明确缩到位且无输出”的完整
             // 快照充分覆盖；此时只读权威查询可以结束旧上下文。缩回线圈
-            // ON/OFF 则不能仅凭位置证明电平已释放，助手会保留上下文。
+            // ON/OFF 则不能仅凭位置证明电平已释放。
+            m_unknownGate = false;
             clearSafetyRecoveryContext();
+            setState(State::SafeComplete, QStringLiteral("充电桩状态确认安全。"));
+        } else {
+            // 缩回 ON 已确认而 OFF 未确认（或缩回写入结果不确定）时，机械位置
+            // 到位不能证明线圈电平已经释放。此时即使电压、电流和位置快照均安全，
+            // 也必须保留恢复上下文与未知门禁，禁止发布误导性的 SafeComplete。
+            m_unknownGate = true;
+            setState(
+                State::Unknown,
+                QStringLiteral("充电桩快照安全，但缩回线圈恢复上下文尚未解除。"));
         }
-        setState(State::SafeComplete, QStringLiteral("充电桩状态确认安全。"));
     } else if (m_unknownGate) {
         setState(State::Unknown,
                  QStringLiteral("完整只读查询完成，但状态仍不安全，未知门禁保持。"));
@@ -1088,16 +1108,18 @@ void ChargePileController::pollWaitingForStart()
             setState(State::Monitoring,
                      QStringLiteral("步骤4/5：进入充电监控。"));
             m_phaseElapsedTimer.restart();
-            schedulePhase(DeferredPhase::MonitoringPoll,
-                          m_settings.pollIntervalMs);
+            schedulePhaseBeforeDeadline(
+                DeferredPhase::MonitoringPoll,
+                m_settings.monitorTimeoutMs);
             return;
         }
         if (m_phaseElapsedTimer.elapsed() >= m_settings.startTimeoutMs) {
             requestSafeStop(StopReason::MonitorTimeout);
             return;
         }
-        schedulePhase(DeferredPhase::WaitForStartPoll,
-                      m_settings.pollIntervalMs);
+        schedulePhaseBeforeDeadline(
+            DeferredPhase::WaitForStartPoll,
+            m_settings.startTimeoutMs);
     });
     beginNextRequest();
 }
@@ -1132,8 +1154,9 @@ void ChargePileController::pollMonitoring()
             requestSafeStop(StopReason::MonitorTimeout);
             return;
         }
-        schedulePhase(DeferredPhase::MonitoringPoll,
-                      m_settings.pollIntervalMs);
+        schedulePhaseBeforeDeadline(
+            DeferredPhase::MonitoringPoll,
+            m_settings.monitorTimeoutMs);
     });
     beginNextRequest();
 }
@@ -1198,8 +1221,9 @@ void ChargePileController::pollWaitingForNoOutput()
             failOperation(QStringLiteral("等待停止输出超时，禁止发送缩回。"));
             return;
         }
-        schedulePhase(DeferredPhase::WaitForNoOutputPoll,
-                      m_settings.pollIntervalMs);
+        schedulePhaseBeforeDeadline(
+            DeferredPhase::WaitForNoOutputPoll,
+            m_settings.stopTimeoutMs);
     });
     beginNextRequest();
 }
@@ -1258,8 +1282,9 @@ void ChargePileController::pollWaitingForRetracted()
             releaseRetractAfterFailure(QStringLiteral("等待缩到位超时。"));
             return;
         }
-        schedulePhase(DeferredPhase::WaitForRetractedPoll,
-                      m_settings.pollIntervalMs);
+        schedulePhaseBeforeDeadline(
+            DeferredPhase::WaitForRetractedPoll,
+            m_settings.motionTimeoutMs);
     });
     beginNextRequest();
 }
@@ -1593,6 +1618,18 @@ void ChargePileController::schedulePhase(
         return;
     m_deferredPhase = phase;
     m_phaseTimer.start(qMax(1, delayMs));
+}
+
+void ChargePileController::schedulePhaseBeforeDeadline(
+    const DeferredPhase phase, const int deadlineMs)
+{
+    const qint64 elapsedMs =
+        m_phaseElapsedTimer.isValid() ? m_phaseElapsedTimer.elapsed() : 0;
+    // 回调已经先检查过“期限已到”，纯计算函数中的至少1ms只处理检查与调度
+    // 之间的毫秒级边界；下一次回调会立即进入超时分支，不再等待完整poll。
+    const int delayMs = boundedChargePhasePollDelayMs(
+        m_settings.pollIntervalMs, deadlineMs, elapsedMs);
+    schedulePhase(phase, delayMs);
 }
 
 bool ChargePileController::snapshotHasBlockingFault(

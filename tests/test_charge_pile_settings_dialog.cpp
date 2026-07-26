@@ -41,6 +41,7 @@ class ChargePileSettingsDialogTest : public QObject
 
 private slots:
     void defaultsPopulateFieldVerifiedValues();
+    void safeCurrentEditorCannotExceedPythonAuthority();
     void optionalRegistersOnlyEnableAfterExplicitOptIn();
     void invalidThresholdCombinationDoesNotRequestSave();
     void lockedDialogCannotRequestSave();
@@ -62,6 +63,18 @@ void ChargePileSettingsDialogTest::defaultsPopulateFieldVerifiedValues()
     QVERIFY(!requiredChild<QDoubleSpinBox>(dialog, "cutoffCurrentSpin")->isEnabled());
     QVERIFY(!requiredChild<QCheckBox>(dialog, "maxChargeSecondsCheck")->isChecked());
     QVERIFY(!requiredChild<QSpinBox>(dialog, "maxChargeSecondsSpin")->isEnabled());
+}
+
+void ChargePileSettingsDialogTest::safeCurrentEditorCannotExceedPythonAuthority()
+{
+    ChargePileSettingsDialog dialog(ChargeSettings::defaults(), false);
+    auto *safeCurrentSpin =
+        requiredChild<QDoubleSpinBox>(dialog, "safeCurrentSpin");
+
+    QCOMPARE(safeCurrentSpin->value(), 1.0);
+    QCOMPARE(safeCurrentSpin->maximum(), 1.0);
+    safeCurrentSpin->setValue(50.0);
+    QCOMPARE(safeCurrentSpin->value(), 1.0);
 }
 
 void ChargePileSettingsDialogTest::optionalRegistersOnlyEnableAfterExplicitOptIn()

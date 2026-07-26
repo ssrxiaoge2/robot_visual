@@ -21,6 +21,9 @@ struct ManualChargeStartContext
     bool controllerBusy = false;
     ChargePileController::State controllerState =
         ChargePileController::State::Idle;
+    // true 表示控制器仍保留未完成/不确定的写入恢复上下文；即使界面缓存状态
+    // 暂时显示 SafeComplete，也不得据此建立新的手动充电会话。
+    bool controllerShutdownRequired = false;
     bool automaticEnabled = false;
     bool automaticSessionActive = false;
 };
@@ -33,3 +36,25 @@ struct ManualChargeStartContext
  */
 QString manualChargeStartRejectionReason(
     const ManualChargeStartContext &context);
+
+/**
+ * @brief 开启自动充电授权前的控制器安全快照。
+ *
+ * 关闭自动充电不使用此门禁，确保操作员始终能够撤销授权；该结构只约束从关闭
+ * 到开启的方向，避免状态文本与控制器内部恢复上下文短暂不同步时误开自动策略。
+ */
+struct AutomaticChargeEnableContext
+{
+    bool controllerBusy = false;
+    ChargePileController::State controllerState =
+        ChargePileController::State::Idle;
+    bool automaticSessionActive = false;
+    // 控制器仍需安全收尾时必须优先拒绝，不允许仅凭枚举状态开启自动充电。
+    bool controllerShutdownRequired = false;
+};
+
+/**
+ * @brief 返回自动充电授权不能开启的中文原因；空字符串表示门禁通过。
+ */
+QString automaticChargeEnableRejectionReason(
+    const AutomaticChargeEnableContext &context);

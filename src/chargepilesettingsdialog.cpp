@@ -202,7 +202,7 @@ QWidget *ChargePileSettingsDialog::createChargeGroup()
     maximumLayout->addWidget(m_maxChargeSecondsSpin);
 
     m_safeCurrentSpin =
-        makeDecimalSpin("safeCurrentSpin", 0.0, 120.0, 1,
+        makeDecimalSpin("safeCurrentSpin", 0.0, 1.0, 1,
                         QStringLiteral(" A"), group);
     m_chargeDetectCurrentSpin =
         makeDecimalSpin("chargeDetectCurrentSpin", 0.1, 120.0, 1,

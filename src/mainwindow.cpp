@@ -1929,6 +1929,7 @@ bool MainWindow::chargeSettingsLocked() const
         return true;
     const ChargePileController::State state = controller->state();
     return controller->isBusy()
+        || controller->shutdownRequired()
         || coordinator->automaticSessionActive()
         || state == ChargePileController::State::Unknown
         || state == ChargePileController::State::Fault;
