@@ -1,5 +1,25 @@
 find_package(Qt6 REQUIRED COMPONENTS Core Test Network Gui)
 
+add_executable(charge_pile_controller_tests
+    test_charge_pile_controller.cpp
+    ../src/chargesettings.cpp
+    ../src/chargepileprotocol.cpp
+    ../src/chargepilecontroller.cpp
+)
+
+target_include_directories(charge_pile_controller_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(charge_pile_controller_tests PRIVATE
+    Qt6::Core
+    Qt6::Network
+    Qt6::Test
+)
+
+add_test(NAME charge_pile_controller_tests
+         COMMAND charge_pile_controller_tests)
+
 add_executable(charge_pile_protocol_tests
     test_charge_pile_protocol.cpp
     ../src/chargepileprotocol.cpp
