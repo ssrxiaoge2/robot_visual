@@ -39,8 +39,8 @@ Q_DECLARE_METATYPE(ChargePileSnapshot)
 /**
  * @brief 充电桩通信与后续充电流程共用的唯一控制器。
  *
- * 当前任务只允许五组功能码 0x04 的状态读取。状态枚举提前覆盖完整充电流程，
- * 供后续任务扩展，但本类此阶段不会排队或发送任何功能码 0x05、0x06 的写命令。
+ * 所有只读查询、参数写入和线圈命令都经过同一个串行请求出口。完整充电会话严格
+ * 复现现场 Python 脚本的预检、设参回读、启动监控、停止缩回复位五阶段顺序。
  */
 class ChargePileController : public QObject
 {
@@ -67,6 +67,31 @@ public:
     };
     Q_ENUM(State)
 
+    /** @brief 标识会话由调试面板手动发起，还是由自动充电协调器发起。 */
+    enum class SessionOrigin {
+        Manual,
+        Automatic
+    };
+    Q_ENUM(SessionOrigin)
+
+    /**
+     * @brief 统一安全收尾的原因。
+     *
+     * 后到的高优先级原因可以升级当前停止原因，但不会重新发送已经在途或已经确认
+     * 的停止、缩回、复位命令。ApplicationShutdown 始终具有最高优先级。
+     */
+    enum class StopReason {
+        Manual,
+        AutomaticTaskReady,
+        AutomaticTargetReached,
+        AutomaticDisabled,
+        LineStop,
+        ApplicationShutdown,
+        Fault,
+        MonitorTimeout
+    };
+    Q_ENUM(StopReason)
+
     explicit ChargePileController(QObject *parent = nullptr);
 
     /**
@@ -86,6 +111,25 @@ public:
      */
     void queryStatus();
 
+    /**
+     * @brief 启动一个完整五阶段充电会话。
+     * @param origin 会话来源，完成信号会原样携带该值供上层解除互斥。
+     * @param error 同步拒绝时返回中文原因；异步协议故障通过完成信号报告。
+     * @return 请求是否被控制器接受。已有查询/会话在途或配置无效时返回 false。
+     */
+    bool startCharge(SessionOrigin origin, QString *error);
+
+    /** @brief 请求所有活动阶段汇入唯一安全收尾状态机。 */
+    void requestSafeStop(StopReason reason);
+
+    /**
+     * @brief 请求程序关闭前完成安全收尾。
+     *
+     * 若已有较低优先级停止在进行，仅升级原因并等待同一在途命令完成；绝不创建
+     * 第二套并发收尾。最终由 applicationShutdownFinished 明确报告是否已安全。
+     */
+    void requestApplicationShutdown();
+
     /** @brief 返回连接、等待响应或排队发送状态读取请求时的忙碌状态。 */
     bool isBusy() const;
 
@@ -104,6 +148,9 @@ signals:
     void stateChanged(ChargePileController::State state, const QString &text);
     void snapshotChanged(const ChargePileSnapshot &snapshot);
     void queryFinished(bool ok, const QString &message);
+    void chargeSessionFinished(bool safe, ChargePileController::SessionOrigin origin,
+                               const QString &message);
+    void applicationShutdownFinished(bool safe, const QString &message);
     void logMessage(const QString &message);
 
 private:
@@ -123,8 +170,30 @@ private:
         std::function<void(const QByteArray &response)> onSuccess;
     };
 
-    void enqueueRead(quint16 address, quint16 count,
+    enum class FlowMode {
+        None,
+        Query,
+        Charge
+    };
+
+    enum class DeferredPhase {
+        None,
+        WaitForStartPoll,
+        MonitoringPoll,
+        WaitForNoOutputPoll,
+        WaitForRetractedPoll
+    };
+
+    void enqueueRead(quint8 function, quint16 address, quint16 count,
                      std::function<void(const QByteArray &response)> onSuccess);
+    void enqueueInputRead(quint16 address, quint16 count,
+                          std::function<void(const QByteArray &response)> onSuccess);
+    void enqueueWriteRegister(quint16 address, quint16 value,
+                              std::function<void()> onSuccess = {});
+    void enqueueWriteCoil(quint16 address, bool on,
+                          std::function<void()> onSuccess = {});
+    void enqueueSnapshotReads(State state, const QString &text,
+                              std::function<void()> onComplete);
     void beginNextRequest();
     void scheduleCurrentRequest();
     void sendCurrentRequest();
@@ -133,9 +202,31 @@ private:
     void handleSocketError(QAbstractSocket::SocketError socketError);
     void handleResponseTimeout();
     void handleActionTimer();
+    void handlePhaseTimer();
     void setState(State state, const QString &text);
-    void failQuery(const QString &reason);
+    void failOperation(const QString &reason, bool commandResultUnknown = false);
     void finishQuery();
+    void finishChargeSession(bool safe, const QString &message);
+    void beginParameterWrites();
+    void beginParameterReadback();
+    void beginSecondPrecheck();
+    void sendStartCommand();
+    void pollWaitingForStart();
+    void pollMonitoring();
+    void beginSafeShutdown();
+    void pollWaitingForNoOutput();
+    void sendRetractCommand();
+    void pollWaitingForRetracted();
+    void sendResetAndFinalCheck();
+    void schedulePhase(DeferredPhase phase, int delayMs);
+    bool snapshotHasBlockingFault(quint16 ignoredMask) const;
+    bool snapshotHasNoOutput() const;
+    bool validatePrestartSnapshot(QString *reason) const;
+    void publishSnapshot();
+    void clearTransportWork();
+    static int stopReasonPriority(StopReason reason);
+    static QString stopReasonText(StopReason reason);
+    static QString originText(SessionOrigin origin);
     void invalidateCommunicationContext(const QString &reason);
     static bool communicationTargetChanged(const ChargeSettings &previous,
                                            const ChargeSettings &next);
@@ -151,6 +242,8 @@ private:
      * 可在同一串行出口上扩展为动作轮询，仍不会产生第二个并发发送器。
      */
     QTimer m_actionPollTimer;
+    /** 机械动作与监控的轮询定时器；与 RTU 发送节流定时器完全分离。 */
+    QTimer m_phaseTimer;
     QByteArray m_receiveBuffer;
     QQueue<Request> m_requestQueue;
     /**
@@ -164,7 +257,27 @@ private:
      */
     std::optional<Request> m_inFlightRequest;
     QElapsedTimer m_lastSendTimer;
+    QElapsedTimer m_phaseElapsedTimer;
     bool m_queryInProgress = false;
+    FlowMode m_flowMode = FlowMode::None;
+    std::function<void()> m_onQueueDrained;
+    DeferredPhase m_deferredPhase = DeferredPhase::None;
+
+    /** 以下字段只属于当前充电会话，每次 startCharge() 接受请求时完整重置。 */
+    quint64 m_sessionId = 0;
+    SessionOrigin m_sessionOrigin = SessionOrigin::Manual;
+    StopReason m_stopReason = StopReason::Manual;
+    bool m_seenChargingOutput = false;
+    bool m_safeStopRequested = false;
+    bool m_safeShutdownStarted = false;
+    bool m_applicationShutdownRequested = false;
+    bool m_sessionFinishedEmitted = false;
+    quint16 m_expectedVoltageRaw = 0;
+    quint16 m_expectedCurrentRaw = 0;
+    std::optional<quint16> m_expectedCutoffRaw;
+    std::optional<quint16> m_expectedMaxSecondsRaw;
 };
 
 Q_DECLARE_METATYPE(ChargePileController::State)
+Q_DECLARE_METATYPE(ChargePileController::SessionOrigin)
+Q_DECLARE_METATYPE(ChargePileController::StopReason)
