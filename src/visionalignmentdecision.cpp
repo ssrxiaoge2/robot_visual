@@ -1,5 +1,8 @@
 #include "visionalignmentdecision.h"
 
+#include <algorithm>
+#include <cmath>
+
 namespace {
 
 /**
@@ -36,6 +39,38 @@ VisionAlignment::toToolCorrection(const Sample &sample)
 {
     // 工具系与视觉系的约定：X 同向，Y 与绕 Z 轴旋转方向相反。
     return {sample.xMm, -sample.yMm, -sample.rzDeg};
+}
+
+VisionAlignment::StableDepthEvaluation
+VisionAlignment::evaluateStableDepth(const QList<double> &samples,
+                                     int requiredSamples,
+                                     double maxCoreRangeMm)
+{
+    Q_ASSERT(requiredSamples >= 3);
+    Q_ASSERT(requiredSamples % 2 == 1);
+    Q_ASSERT(maxCoreRangeMm > 0.0);
+
+    StableDepthEvaluation result;
+    if (samples.size() != requiredSamples)
+        return result;
+
+    QList<double> sortedSamples = samples;
+    for (double sample : sortedSamples) {
+        // 视觉客户端正常路径已经拒绝非有限数值；这里仍保持纯判定函数自身完备，
+        // 防止未来其他调用方把 NaN/Inf 排序后误判为稳定深度。
+        if (!std::isfinite(sample))
+            return result;
+    }
+    std::sort(sortedSamples.begin(), sortedSamples.end());
+
+    const qsizetype medianIndex = sortedSamples.size() / 2;
+    result.filteredZMm = sortedSamples.at(medianIndex);
+    // 窗口固定为奇数且至少 3 帧：去掉排序后的一个最小值和一个最大值，
+    // 中间核心样本仍必须全部落入原有稳定极差，不能用平均值掩盖双峰跳变。
+    result.coreRangeMm =
+        sortedSamples.at(sortedSamples.size() - 2) - sortedSamples.at(1);
+    result.stable = result.coreRangeMm <= maxCoreRangeMm;
+    return result;
 }
 
 VisionAlignment::WindowDecision

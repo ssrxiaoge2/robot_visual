@@ -30,6 +30,34 @@ private slots:
         QCOMPARE(correction.rzDeg, -30.0);
     }
 
+    void stableDepthRejectsIncompleteWindow()
+    {
+        const auto result = VisionAlignment::evaluateStableDepth(
+            {943.1, 946.2, 947.9}, 5, 5.0);
+
+        QVERIFY(!result.stable);
+    }
+
+    void stableDepthIgnoresOneHighAndOneLowOutlier()
+    {
+        // 对应现场失败日志中的真实模式：核心三帧在 4.9mm 内，但两端各有一个异常值。
+        const auto result = VisionAlignment::evaluateStableDepth(
+            {947.0, 943.5, 942.1, 934.4, 948.7}, 5, 5.0);
+
+        QVERIFY(result.stable);
+        QCOMPARE(result.filteredZMm, 943.5);
+        QVERIFY(qAbs(result.coreRangeMm - 4.9) < 1e-9);
+    }
+
+    void stableDepthStillRejectsBroadCoreDistribution()
+    {
+        const auto result = VisionAlignment::evaluateStableDepth(
+            {933.5, 939.6, 940.9, 948.2, 948.7}, 5, 5.0);
+
+        QVERIFY(!result.stable);
+        QVERIFY(result.coreRangeMm > 5.0);
+    }
+
     void decisionWithinObservationWindow_data()
     {
         QTest::addColumn<qint64>("elapsedMs");

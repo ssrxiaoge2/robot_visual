@@ -131,7 +131,7 @@ int main()
         QStringLiteral("case VisionAlignment::WindowAction::Descend:"),
         unifiedDecisionIndex);
     const qsizetype updateDepthIndex = source.indexOf(
-        QStringLiteral("m_grabOffset.z = measuredSample.zMm;"),
+        QStringLiteral("m_grabOffset.z = stableDepth.filteredZMm;"),
         unifiedDescendIndex);
     const qsizetype enterDescendIndex = source.indexOf(
         QStringLiteral("m_stageStep = StageStep::DescendZ;"),
@@ -140,7 +140,7 @@ int main()
                     && unifiedDescendIndex > unifiedDecisionIndex
                     && updateDepthIndex > unifiedDescendIndex
                     && enterDescendIndex > updateDepthIndex,
-                "只有统一窗口返回Descend后才能用当前Z进入既有下探流程");
+                "只有统一窗口返回Descend后才能用稳健Z中值进入既有下探流程");
 
     const qsizetype start = requireIndex(source, QStringLiteral("void HuayanScheduler::startStageOne()"),
                                          "startStageOne must exist");

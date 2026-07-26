@@ -84,14 +84,14 @@ int main()
                     && header.contains(QStringLiteral("requestNextStableZFrame()")),
                 "HuayanScheduler 必须提供联合窗口清理和下一帧请求接口");
 
-    requireTrue(source.contains(QStringLiteral("kStableZWindowFrames = 3")),
-                "统一窗口必须保留最近三个真实新帧");
+    requireTrue(source.contains(QStringLiteral("kStableZWindowFrames = 5")),
+                "统一窗口必须保留最近五个真实新帧");
     requireTrue(source.contains(QStringLiteral("kStableZMinElapsedMs = 4000")),
                 "统一观察窗口最短时间必须保持4秒");
     requireTrue(source.contains(QStringLiteral("kStableZMaxElapsedMs = 8000")),
                 "统一观察窗口硬上限必须保持8秒");
     requireTrue(source.contains(QStringLiteral("kStableZMaxRangeMm = 5.0")),
-                "统一窗口的三帧 Z 极差必须不大于5mm");
+                "统一窗口去掉一高一低后的核心三帧 Z 极差必须不大于5mm");
     requireTrue(source.contains(QStringLiteral("kStableZPollIntervalMs = 100")),
                 "统一窗口必须保留100ms缓存轮询");
     requireTrue(source.contains(QStringLiteral(
@@ -118,10 +118,15 @@ int main()
                     && setGrabOffsetBody.contains(QStringLiteral("m_stableZSamples.append(z)"))
                     && setGrabOffsetBody.contains(QStringLiteral("++m_stableZUniqueFrames")),
                 "只有 frame_id 递增的真实新帧才能进入联合窗口");
-    requireTrue(setGrabOffsetBody.contains(QStringLiteral("windowMax - windowMin"))
-                    && setGrabOffsetBody.contains(QStringLiteral("<= kStableZMaxRangeMm"))
-                    && setGrabOffsetBody.contains(QStringLiteral("const bool zStable")),
-                "最近3帧必须通过不大于5mm的极差得到zStable");
+    requireTrue(setGrabOffsetBody.contains(QStringLiteral(
+                    "VisionAlignment::evaluateStableDepth"))
+                    && setGrabOffsetBody.contains(QStringLiteral(
+                        "kStableZWindowFrames"))
+                    && setGrabOffsetBody.contains(QStringLiteral(
+                        "kStableZMaxRangeMm"))
+                    && setGrabOffsetBody.contains(QStringLiteral(
+                        "const bool zStable = stableDepth.stable")),
+                "最近5帧必须通过稳健深度判定得到中值和不大于5mm的核心极差");
     requireTrue(setGrabOffsetBody.contains(QStringLiteral(
                     "timestampMs <= m_stableZLastTimestampMs")),
                 "联合窗口必须要求算法时间戳随真实帧递增");
@@ -163,10 +168,15 @@ int main()
             && setGrabOffsetBody.contains(QStringLiteral(
                 "XY/Rz=(X=%3mm,Y=%4mm,Rz=%5°)"))
             && setGrabOffsetBody.contains(
-                QStringLiteral("ZRange=%6mm"))
+                QStringLiteral("ZCoreRange=%6mm"))
             && setGrabOffsetBody.contains(
-                QStringLiteral("action=%7")),
-        "统一窗口必须结构化记录耗时、真实帧数、XY/Rz、Z极差与判定动作");
+                QStringLiteral("ZMedian=%7mm"))
+            && setGrabOffsetBody.contains(
+                QStringLiteral("action=%8")),
+        "统一窗口必须结构化记录耗时、真实帧数、XY/Rz、Z核心极差、中值与判定动作");
+    requireTrue(setGrabOffsetBody.contains(QStringLiteral(
+                    "m_grabOffset.z = stableDepth.filteredZMm")),
+                "Z下探必须使用稳健窗口中值，不能继续使用最新单帧深度");
 
     const qsizetype continueAction = setGrabOffsetBody.indexOf(
         QStringLiteral("case VisionAlignment::WindowAction::ContinueObserving:"));

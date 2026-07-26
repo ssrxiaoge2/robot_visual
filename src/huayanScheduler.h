@@ -641,7 +641,7 @@ private:
     int m_completedFineCorrectionCount = 0; ///< 已被控制器确认到位的联合 MoveL 次数，不统计排队或下发失败。
     VisionAlignment::ToolCorrection m_pendingAlignmentCorrection; ///< 当前联合运动待确认的工具 X/Y/Rz；到位前不得累计到锚点。
     bool m_pendingLargeRzExecution = false; ///< 当前联合命令是否含大角度Rz；仅在运动确认到位后消费并计数。
-    QList<double> m_stableZSamples; ///< 联合窗口最近三个真实新帧 Z 样本(mm)，只在 ValidateVisionAlignment 状态使用。
+    QList<double> m_stableZSamples; ///< 联合窗口最近五个真实新帧 Z 样本(mm)，去掉一高一低后用中间三帧判稳。
     qint64 m_stableZLastFrameId = -1; ///< 最近接收的算法真实 frame_id；相同值属于重复缓存，不能计入窗口。
     qint64 m_stableZLastTimestampMs = -1; ///< 最近真实帧的算法 timestamp(ms)，用于防止帧编号异常复用。
     QElapsedTimer m_stableZElapsedTimer; ///< 从每次联合运动确认到位开始计时，不受 HTTP 缓存响应次数影响。
