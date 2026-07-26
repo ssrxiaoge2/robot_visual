@@ -59,6 +59,10 @@ set(PROJECT_SOURCES
         src/autochargecoordinator.h
         src/chargebusinessrules.cpp
         src/chargebusinessrules.h
+        src/chargesettingstransaction.cpp
+        src/chargesettingstransaction.h
+        src/agvmonitorfreshnessguard.cpp
+        src/agvmonitorfreshnessguard.h
         src/settingsmanager.cpp
         src/settingsmanager.h
         src/settingsdialog.cpp

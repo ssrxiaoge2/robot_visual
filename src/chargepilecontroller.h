@@ -121,9 +121,23 @@ public:
      *
      * host、port 或 slaveId 变化时会取消旧查询、断开旧连接并使旧快照失效，
      * 防止后续帧落到错误设备；电压、电流和超时等非通信目标参数可热更新，
-     * 保留同一 TCP 连接。输入未通过 validateChargeSettings() 时保持旧配置。
+     * 保留同一 TCP 连接。输入未通过 validateChargeSettings()、存在活动查询/
+     * 充电会话或安全恢复上下文尚未最终确认安全时返回 false，并保持旧配置。
+     * @param error 拒绝时返回可直接用于现场日志的中文原因。
+     * @return 控制器是否已经接受并应用整份设置。
      */
-    void applySettings(const ChargeSettings &settings);
+    bool applySettings(const ChargeSettings &settings, QString *error = nullptr);
+
+    /**
+     * @brief 无副作用检查当前控制器能否接受整份候选设置。
+     *
+     * DeviceManager 在写配置文件前调用此入口，避免已知会被控制器拒绝的候选
+     * 先落盘。最终提交仍必须再次调用 applySettings()，不能把预检当成应用成功。
+     */
+    bool canApplySettings(const ChargeSettings &settings,
+                          QString *error = nullptr) const;
+    /// 返回控制器已经确认接受的整份设置副本，用于事务一致性检查和界面展示。
+    ChargeSettings appliedSettings() const { return m_settings; }
 
     /**
      * @brief 顺序读取输出量、输入位、输出位、事件和故障五组状态。

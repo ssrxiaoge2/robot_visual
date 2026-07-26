@@ -10,6 +10,7 @@
 
 #include <memory>
 
+#include "agvmonitorfreshnessguard.h"
 #include "chargepilecontroller.h"
 #include "chargesettings.h"
 #include "customSysScheduler.h"
@@ -25,6 +26,7 @@ class HuayanScheduler;
 class LineOrchestrator;
 class PalletScheduler;
 class QThread;
+class QTimer;
 class SettingsManager;
 
 Q_DECLARE_METATYPE(NScanScheduler::ScanResult)
@@ -71,7 +73,9 @@ public:
     /// 返回已通过校验并成功持久化的当前充电参数快照。
     const ChargeSettings &chargeSettings() const { return m_chargeSettings; }
     /// 是否已取得一轮字段一致的 AGV 监控快照。
-    bool hasAgvMonitor() const { return m_hasAgvMonitor; }
+    bool hasAgvMonitor() const {
+        return m_agvMonitorFreshness.hasFreshSnapshot();
+    }
     /// 最近一轮完整 AGV 快照；hasAgvMonitor()==false 时调用方不得据此做安全决策。
     AgvMonitorData lastAgvMonitor() const { return m_lastAgvMonitor; }
     bool              lightIsOn()        const { return m_lightOn;      }
@@ -189,7 +193,8 @@ private:
     SettingsManager  *m_settingsManager = nullptr;
     QString m_chargeSettingsPath; ///< AppConfigLocation 下的原子充电参数文件路径。
     ChargeSettings m_chargeSettings = ChargeSettings::defaults(); ///< 已持久化且已生效的快照。
-    bool m_hasAgvMonitor = false; ///< 业务层手动门禁不得使用未完整更新的 AGV 默认值。
+    AgvMonitorFreshnessGuard m_agvMonitorFreshness; ///< 统一去重断线和快照超时边沿。
+    QTimer *m_agvMonitorFreshnessTimer = nullptr; ///< 每轮完整快照重启的单次新鲜度定时器。
     AgvMonitorData m_lastAgvMonitor; ///< 最近完整 AGV 电量、位置和导航状态。
     ChargePileController::State m_chargePileState =
         ChargePileController::State::Idle; ///< 缓存同步 stateChanged，供事务门禁使用。

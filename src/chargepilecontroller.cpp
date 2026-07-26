@@ -86,24 +86,52 @@ ChargePileController::ChargePileController(QObject *parent)
             this, &ChargePileController::handlePhaseTimer);
 }
 
-void ChargePileController::applySettings(const ChargeSettings &settings)
+bool ChargePileController::canApplySettings(const ChargeSettings &settings,
+                                            QString *error) const
 {
+    if (error)
+        error->clear();
+
     const ChargeSettingsValidation validation = validateChargeSettings(settings);
     if (!validation.ok) {
-        emit logMessage(QStringLiteral("充电桩设置校验失败：%1")
-                        .arg(validation.errors.join(QStringLiteral("；"))));
-        return;
+        if (error) {
+            *error = QStringLiteral("充电桩设置校验失败：%1")
+                         .arg(validation.errors.join(QStringLiteral("；")));
+        }
+        return false;
     }
 
     // 从正常充电接受到最终完整快照明确安全之前，整份设置都属于同一个安全
     // 恢复上下文。即使上一轮已经以 Fault/Unknown 结束，也不能切换目标、放宽
     // safeCurrentA 或改变恢复时序，否则旧桩里程碑会被错误应用到新桩。
     if (m_safetyRecoveryContextValid) {
-        emit logMessage(
-            QStringLiteral("[充电会话%1][%2] 安全恢复上下文尚未最终确认安全，拒绝修改整份充电设置。")
-                .arg(m_sessionId).arg(originText(m_sessionOrigin)));
-        return;
+        if (error) {
+            *error =
+                QStringLiteral("[充电会话%1][%2] 安全恢复上下文尚未最终确认安全，拒绝修改整份充电设置。")
+                    .arg(m_sessionId).arg(originText(m_sessionOrigin));
+        }
+        return false;
     }
+    if (m_queryInProgress) {
+        if (error)
+            *error = QStringLiteral("控制器正在执行查询或充电会话，拒绝修改整份充电设置。");
+        return false;
+    }
+    return true;
+}
+
+bool ChargePileController::applySettings(const ChargeSettings &settings,
+                                         QString *error)
+{
+    QString rejection;
+    if (!canApplySettings(settings, &rejection)) {
+        if (error)
+            *error = rejection;
+        emit logMessage(rejection);
+        return false;
+    }
+    if (error)
+        error->clear();
 
     const bool targetChanged = communicationTargetChanged(m_settings, settings);
     const bool hasCommunicationContext =
@@ -117,6 +145,7 @@ void ChargePileController::applySettings(const ChargeSettings &settings)
         invalidateCommunicationContext(
             QStringLiteral("通信目标已变更，旧连接和状态快照已失效。"));
     }
+    return true;
 }
 
 void ChargePileController::queryStatus()

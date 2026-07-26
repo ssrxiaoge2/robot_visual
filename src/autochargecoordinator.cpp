@@ -54,6 +54,16 @@ AutoChargeDecision decideAutoCharge(const AutoChargeInputs &inputs,
 {
     AutoChargeDecision decision;
 
+    // Error 本身已经从调度层禁止派单，不能再用独立 hold 覆盖 LineManager
+    // 在 Stop/Error 时发布的实际清理电平。无论自动开关是否刚被关闭，遗留
+    // 自动会话都只请求安全收尾；Reset 回 Idle 后再重新建立 hold。
+    if (inputs.automaticSessionActive
+        && inputs.lineState == LineSystemState::Error) {
+        decision.requestSafeStop = true;
+        decision.statusText = QStringLiteral("主调度处于错误状态，正在安全收尾");
+        return decision;
+    }
+
     // 自动关闭且没有遗留自动会话时必须首先旁路，连“解除保持”动作也不产生；
     // 有活动会话时则维持已有保持并只请求安全收尾，避免收尾完成前启动队首任务。
     if (!inputs.enabled) {
@@ -65,8 +75,8 @@ AutoChargeDecision decideAutoCharge(const AutoChargeInputs &inputs,
         return decision;
     }
 
-    // 活动自动会话优先处理监控完整性、调度停止和双停止阈值。保持在整个
-    // 停止/缩回/复位流程结束前持续为真，不能因已发出停止请求提前释放队列。
+    // 活动自动会话优先处理监控完整性、调度停止和双停止阈值。除主调度本身
+    // 已处于 Error 外，保持在整个停止/缩回/复位流程结束前持续为真。
     if (inputs.automaticSessionActive) {
         decision.holdDispatch = true;
 
@@ -312,6 +322,16 @@ void AutoChargeCoordinator::onChargeControllerStateChanged(
     if (state == ChargePileController::State::SafeComplete)
         m_lineErrorIssued = false;
     Q_UNUSED(text);
+    evaluate();
+}
+
+void AutoChargeCoordinator::onDispatchHoldChanged(
+    const bool hold, const QString &reason)
+{
+    // 这是 LineManager 已实际采用的电平，而不是本协调器最后一次请求的推测值。
+    // 即使确认值与锁存相同也重评估，避免迟到排队事件压住后续必要边沿。
+    m_dispatchHoldAsserted = hold;
+    Q_UNUSED(reason);
     evaluate();
 }
 

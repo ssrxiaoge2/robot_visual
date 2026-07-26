@@ -4,6 +4,7 @@
 #include <QTimer>
 
 #include "agvcontroller.h"
+#include "autochargecoordinator.h"
 #include "chargebusinessrules.h"
 #include "huayanScheduler.h"
 #include "linemanager.h"
@@ -13,6 +14,7 @@ namespace {
 
 bool g_autoFinishTask = false;
 int g_agvCancelCount = 0;
+int g_executorStopCount = 0;
 
 QString readSource(const QString &relativePath)
 {
@@ -80,6 +82,7 @@ void TaskExecutor::stopForSystemError(const QString &reason)
 {
     if (m_state == ExecState::Idle)
         return;
+    ++g_executorStopCount;
     m_state = ExecState::Idle;
     Task stopped = m_task;
     stopped.state = TaskState::Canceled;
@@ -147,6 +150,7 @@ private slots:
     {
         g_autoFinishTask = false;
         g_agvCancelCount = 0;
+        g_executorStopCount = 0;
     }
 
     void automaticChargingDisabledKeepsOriginalDispatchPath()
@@ -258,6 +262,120 @@ private slots:
         manager.setChargeDispatchHold(true, QStringLiteral("测试外部故障"));
         manager.raiseExternalSystemError(QStringLiteral("充电故障"));
         QCOMPARE(manager.state(), LineSystemState::Error);
+        QVERIFY(!manager.chargeDispatchHeld());
+    }
+
+    void externalErrorStopsRunningExecutorAndResetCanAcceptNewTask()
+    {
+        LineManager manager(nullptr, nullptr, nullptr, nullptr);
+        manager.reportShortage(2);
+        manager.reportShortage(3);
+        manager.start();
+        QCOMPARE(manager.currentTask().stationId, 2);
+        QCOMPARE(manager.currentTask().state, TaskState::Running);
+
+        const QString reason = QStringLiteral("充电桩状态未知");
+        manager.raiseExternalSystemError(reason);
+
+        QCOMPARE(g_executorStopCount, 1);
+        QCOMPARE(manager.state(), LineSystemState::Error);
+        QCOMPARE(manager.currentTask().stationId, 2);
+        QCOMPARE(manager.currentTask().state, TaskState::Canceled);
+        QCOMPARE(manager.currentTask().step, TaskStep::Done);
+        QCOMPARE(manager.currentTask().lastError, reason);
+        QVERIFY(manager.queueSnapshot().isEmpty());
+
+        manager.resetError();
+        manager.reportShortage(4);
+        manager.start();
+
+        QCOMPARE(manager.state(), LineSystemState::Running);
+        QCOMPARE(manager.currentTask().stationId, 4);
+        QCOMPARE(manager.currentTask().state, TaskState::Running);
+    }
+
+    void activeAutomaticSessionReassertsHoldAfterStopResetBeforeDispatch()
+    {
+        AgvController agv;
+        LineManager manager(&agv, nullptr, nullptr, nullptr);
+        AutoChargeCoordinator coordinator;
+        coordinator.applySettings(ChargeSettings::defaults());
+
+        connect(&manager, &LineManager::systemStateChanged,
+                &coordinator, &AutoChargeCoordinator::onLineStateChanged);
+        connect(&manager, &LineManager::queueChanged,
+                &coordinator, &AutoChargeCoordinator::onQueueChanged);
+        connect(&coordinator, &AutoChargeCoordinator::dispatchHoldRequested,
+                &manager, &LineManager::setChargeDispatchHold);
+        // 反向确认必须排队，避免 Stop/enterError 尚未完成 setState() 时同步重评估。
+        connect(&manager, &LineManager::chargeDispatchHoldChanged,
+                &coordinator, &AutoChargeCoordinator::onDispatchHoldChanged,
+                Qt::QueuedConnection);
+
+        AgvMonitorData monitor;
+        monitor.battery = 14;
+        monitor.curStation = 1;
+        monitor.navStatus =
+            static_cast<quint16>(AgvController::NavStatus::None);
+        emit agv.monitorUpdated(monitor);
+        coordinator.onAgvMonitorUpdated(monitor);
+        coordinator.setEnabled(true);
+
+        QSignalSpy startSpy(
+            &coordinator,
+            &AutoChargeCoordinator::automaticChargeStartRequested);
+        manager.start();
+        QCOMPARE(startSpy.count(), 1);
+        QVERIFY(manager.chargeDispatchHeld());
+        coordinator.onAutomaticChargeStartResult(
+            true, QStringLiteral("测试自动会话已接受"));
+        QVERIFY(coordinator.automaticSessionActive());
+
+        manager.stop();
+        QCOMPARE(manager.state(), LineSystemState::Error);
+        QVERIFY(!manager.chargeDispatchHeld());
+
+        manager.resetError();
+        QCOMPARE(manager.state(), LineSystemState::Idle);
+        QTRY_VERIFY(manager.chargeDispatchHeld());
+
+        manager.reportShortage(10);
+        manager.start();
+        QCOMPARE(manager.state(), LineSystemState::Running);
+        QCOMPARE(manager.currentTask().taskId, quint64{0});
+        QCOMPARE(manager.queueSnapshot().size(), 1);
+        QCOMPARE(manager.queueSnapshot().first().state, TaskState::Pending);
+
+        // 有待执行任务时，控制器会在电量达到“允许接单电量”后安全完成；
+        // 若仍保留 14% 输入，协调器按设计会立即开始下一轮低电充电。
+        monitor.battery = 20;
+        emit agv.monitorUpdated(monitor);
+        coordinator.onAgvMonitorUpdated(monitor);
+        coordinator.onChargeSessionFinished(
+            true,
+            ChargePileController::SessionOrigin::Automatic,
+            QStringLiteral("测试安全完成"));
+        QTRY_VERIFY(!manager.chargeDispatchHeld());
+        QCOMPARE(manager.currentTask().stationId, 10);
+        QCOMPARE(manager.currentTask().state, TaskState::Running);
+    }
+
+    void stopClearingHoldNeverStartsAPendingTask()
+    {
+        LineManager manager(nullptr, nullptr, nullptr, nullptr);
+        manager.setChargeDispatchHold(
+            true, QStringLiteral("测试 Stop 前保持"));
+        manager.reportShortage(11);
+        manager.start();
+        QCOMPARE(manager.currentTask().taskId, quint64{0});
+        QCOMPARE(manager.queueSnapshot().size(), 1);
+
+        manager.stop();
+
+        QCOMPARE(manager.state(), LineSystemState::Error);
+        QCOMPARE(g_executorStopCount, 0);
+        QCOMPARE(manager.currentTask().taskId, quint64{0});
+        QVERIFY(manager.queueSnapshot().isEmpty());
         QVERIFY(!manager.chargeDispatchHeld());
     }
 

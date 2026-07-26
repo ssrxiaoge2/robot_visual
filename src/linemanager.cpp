@@ -126,10 +126,11 @@ void LineManager::start()
 void LineManager::stop()
 {
     if (m_chargeDispatchHold) {
-        emit logMessage(QStringLiteral("[LineManager] 人工 Stop 清除充电派单保持：%1")
-                            .arg(m_chargeDispatchHoldReason));
-        m_chargeDispatchHold = false;
-        m_chargeDispatchHoldReason.clear();
+        updateChargeDispatchHold(
+            false,
+            QStringLiteral("人工 Stop 清除充电派单保持：%1")
+                .arg(m_chargeDispatchHoldReason),
+            false);
     }
 
     if (m_state == LineSystemState::Error) {
@@ -182,8 +183,10 @@ void LineManager::resetError()
 
     stopReturnHomeTracking();
     if (m_chargeDispatchHold) {
-        m_chargeDispatchHold = false;
-        m_chargeDispatchHoldReason.clear();
+        updateChargeDispatchHold(
+            false,
+            QStringLiteral("Error 复位清除充电派单保持"),
+            false);
     }
     clearCurrentTask();
     setState(LineSystemState::Idle, QStringLiteral("未启动"));
@@ -191,6 +194,12 @@ void LineManager::resetError()
 }
 
 void LineManager::setChargeDispatchHold(const bool hold, const QString &reason)
+{
+    updateChargeDispatchHold(hold, reason, true);
+}
+
+void LineManager::updateChargeDispatchHold(
+    const bool hold, const QString &reason, const bool resumePending)
 {
     const bool wasHeld = m_chargeDispatchHold;
     if (wasHeld == hold) {
@@ -201,17 +210,23 @@ void LineManager::setChargeDispatchHold(const bool hold, const QString &reason)
 
     m_chargeDispatchHold = hold;
     m_chargeDispatchHoldReason = hold ? reason.trimmed() : QString();
+    const QString actualReason =
+        hold
+            ? (m_chargeDispatchHoldReason.isEmpty()
+                   ? QStringLiteral("自动充电请求")
+                   : m_chargeDispatchHoldReason)
+            : reason;
     emit logMessage(
         hold
             ? QStringLiteral("[LineManager] 已保持新任务派单：%1")
-                  .arg(m_chargeDispatchHoldReason.isEmpty()
-                           ? QStringLiteral("自动充电请求")
-                           : m_chargeDispatchHoldReason)
+                  .arg(actualReason)
             : QStringLiteral("[LineManager] 已解除充电派单保持：%1").arg(reason));
+    emit chargeDispatchHoldChanged(hold, actualReason);
 
     // 解除保持不负责启动主调度，也不能在返航或 Error 期间抢占状态；
     // 只有本来就在 Running 等待的队列才恢复既有 FIFO 入口。
-    if (wasHeld && !hold
+    if (resumePending
+        && wasHeld && !hold
         && m_state == LineSystemState::Running
         && !m_executor->isBusy()
         && m_queue.hasPending()) {
@@ -239,6 +254,30 @@ void LineManager::raiseExternalSystemError(const QString &reason)
     const QString detail = reason.trimmed().isEmpty()
                                ? QStringLiteral("外部子系统发生未知故障")
                                : reason.trimmed();
+
+    // 外部充电故障与人工 Stop 共享同一任务安全边界：先固定当前任务终态，
+    // 再让 TaskExecutor 停止实际状态机。stopForSystemError() 会同步发出
+    // taskUpdated/systemError，因此必须使用防重入标志，避免第二次 enterError()
+    // 清队列和重复发布报警。
+    if (m_currentTask.taskId != 0
+        && m_currentTask.state == TaskState::Running) {
+        Task canceled = m_currentTask;
+        canceled.state = TaskState::Canceled;
+        canceled.step = TaskStep::Done;
+        canceled.stepIndex = 15;
+        canceled.statusText = QStringLiteral("外部系统故障，当前任务已取消");
+        canceled.lastError = detail;
+        setCurrentTask(canceled);
+    } else {
+        clearCurrentTask();
+    }
+
+    if (m_executor->isBusy()) {
+        m_manualStopInProgress = true;
+        m_executor->stopForSystemError(detail);
+        m_manualStopInProgress = false;
+    }
+
     enterError(detail);
 }
 
@@ -535,10 +574,11 @@ void LineManager::enterError(const QString &reason)
 {
     // 整线 Error 是设备安全边界：先停止所有在途动作，再清 Pending，最后通知 UI。
     if (m_chargeDispatchHold) {
-        emit logMessage(QStringLiteral("[LineManager] 系统 Error 清除充电派单保持：%1")
-                            .arg(m_chargeDispatchHoldReason));
-        m_chargeDispatchHold = false;
-        m_chargeDispatchHoldReason.clear();
+        updateChargeDispatchHold(
+            false,
+            QStringLiteral("系统 Error 清除充电派单保持：%1")
+                .arg(m_chargeDispatchHoldReason),
+            false);
     }
     stopReturnHomeTracking();
 

@@ -75,6 +75,13 @@ signals:
     /// 当前 Running 任务加全部 Pending 任务的 UI 快照。
     void queueChanged(QList<Task> tasks);
     void currentTaskChanged(Task task);
+    /**
+     * @brief 通知派单保持的实际电平已经变化。
+     *
+     * Stop、Error、Reset 和协调器请求都必须发布同一确认，使自动协调器不会
+     * 只保存自己最后发出的边沿而忽略 LineManager 的本地安全清理。
+     */
+    void chargeDispatchHoldChanged(bool hold, const QString &reason);
     void alarmRaised(QString reason);
     void logMessage(QString message);
     void agvDispatchRequested(int lm);
@@ -97,6 +104,9 @@ private:
     void setCurrentTask(const Task &task);
     void clearCurrentTask();
     void emitQueueChanged();
+    /// 更新实际保持电平；Stop/Error 传 resumePending=false，禁止清理时瞬间取新单。
+    void updateChargeDispatchHold(bool hold, const QString &reason,
+                                  bool resumePending);
     /// 条件允许时从 FIFO 取队首并启动；忙碌/Idle/Error 时无动作。
     void tryStartNext();
     /// 队列耗尽后的统一出口：已在 LM1 则等待，否则进入 ReturningHome。

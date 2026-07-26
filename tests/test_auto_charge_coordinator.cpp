@@ -1,5 +1,6 @@
 #include <QtTest>
 
+#include "agvmonitorfreshnessguard.h"
 #include "autochargecoordinator.h"
 
 namespace {
@@ -32,6 +33,9 @@ private slots:
     void criticalBatteryHoldsDispatchWithoutAbortingCurrentTask();
     void missingMonitorHoldsBeforeChargeAndFailsSafeDuringCharge();
     void disablingActiveAutomaticSessionKeepsHoldUntilSafeCompletion();
+    void lineErrorMakesHoldRedundantEvenWhenAutomaticSessionIsActive();
+    void disconnectedMonitorStopsActiveSessionAndReportsErrorOnce();
+    void staleMonitorWithoutActiveSessionOnlyHoldsDispatchOnce();
     void coordinatorSuppressesRepeatedActionEdges();
     void manualControllerActivityNeverBecomesAnAutomaticSession();
     void unsafeAutomaticCompletionKeepsOwnershipAndReportsErrorOnce();
@@ -214,6 +218,94 @@ void AutoChargeCoordinatorTest::disablingActiveAutomaticSessionKeepsHoldUntilSaf
     QVERIFY(!decision.requestReturnHome);
     QVERIFY(!decision.requestStartCharge);
     QVERIFY(!decision.raiseLineError);
+}
+
+void AutoChargeCoordinatorTest::lineErrorMakesHoldRedundantEvenWhenAutomaticSessionIsActive()
+{
+    AutoChargeInputs inputs = runningInputs(30);
+    inputs.enabled = false;
+    inputs.automaticSessionActive = true;
+    inputs.chargeControllerBusy = true;
+    inputs.lineState = LineSystemState::Error;
+
+    const AutoChargeDecision decision =
+        decideAutoCharge(inputs, ChargeSettings::defaults());
+
+    QVERIFY(!decision.holdDispatch);
+    QVERIFY(decision.requestSafeStop);
+    QVERIFY(!decision.releaseDispatch);
+}
+
+void AutoChargeCoordinatorTest::disconnectedMonitorStopsActiveSessionAndReportsErrorOnce()
+{
+    AutoChargeCoordinator coordinator;
+    AgvMonitorFreshnessGuard freshness;
+    QSignalSpy startSpy(
+        &coordinator,
+        &AutoChargeCoordinator::automaticChargeStartRequested);
+    QSignalSpy stopSpy(
+        &coordinator,
+        &AutoChargeCoordinator::automaticChargeSafeStopRequested);
+    QSignalSpy errorSpy(
+        &coordinator,
+        &AutoChargeCoordinator::lineErrorRequested);
+
+    coordinator.setEnabled(true);
+    coordinator.onLineStateChanged(
+        LineSystemState::Running, QStringLiteral("主调度运行"));
+    AgvMonitorData monitor;
+    monitor.battery = 14;
+    monitor.curStation = 1;
+    monitor.navStatus =
+        static_cast<quint16>(AgvController::NavStatus::None);
+    freshness.markUpdated();
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(startSpy.count(), 1);
+    coordinator.onAutomaticChargeStartResult(
+        true, QStringLiteral("测试自动会话已接受"));
+
+    QVERIFY(notifyAgvMonitorLostIfFresh(
+        freshness, coordinator, QStringLiteral("AGV Modbus 已断开")));
+    QVERIFY(!notifyAgvMonitorLostIfFresh(
+        freshness, coordinator, QStringLiteral("重复断线通知")));
+    QCOMPARE(stopSpy.count(), 1);
+    QCOMPARE(errorSpy.count(), 1);
+}
+
+void AutoChargeCoordinatorTest::staleMonitorWithoutActiveSessionOnlyHoldsDispatchOnce()
+{
+    AutoChargeCoordinator coordinator;
+    AgvMonitorFreshnessGuard freshness;
+    QSignalSpy holdSpy(
+        &coordinator, &AutoChargeCoordinator::dispatchHoldRequested);
+    QSignalSpy stopSpy(
+        &coordinator,
+        &AutoChargeCoordinator::automaticChargeSafeStopRequested);
+    QSignalSpy errorSpy(
+        &coordinator,
+        &AutoChargeCoordinator::lineErrorRequested);
+
+    coordinator.setEnabled(true);
+    coordinator.onLineStateChanged(
+        LineSystemState::Running, QStringLiteral("主调度运行"));
+    AgvMonitorData monitor;
+    monitor.battery = 50;
+    monitor.curStation = 1;
+    monitor.navStatus =
+        static_cast<quint16>(AgvController::NavStatus::None);
+    freshness.markUpdated();
+    coordinator.onAgvMonitorUpdated(monitor);
+    holdSpy.clear();
+
+    QVERIFY(notifyAgvMonitorLostIfFresh(
+        freshness, coordinator,
+        QStringLiteral("AGV 完整监控快照超过 5000 ms 未更新")));
+    QVERIFY(!notifyAgvMonitorLostIfFresh(
+        freshness, coordinator, QStringLiteral("重复超时通知")));
+    QCOMPARE(holdSpy.count(), 1);
+    QCOMPARE(holdSpy.first().at(0).toBool(), true);
+    QCOMPARE(stopSpy.count(), 0);
+    QCOMPARE(errorSpy.count(), 0);
 }
 
 void AutoChargeCoordinatorTest::coordinatorSuppressesRepeatedActionEdges()

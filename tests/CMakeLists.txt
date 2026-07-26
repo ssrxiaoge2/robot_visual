@@ -8,6 +8,7 @@ add_executable(auto_charge_coordinator_tests
     # 仅用于提供其 QMetaObject，不在本测试中建立真实连接或发送任何写命令。
     ../src/chargepilecontroller.cpp
     ../src/chargepileprotocol.cpp
+    ../src/agvmonitorfreshnessguard.cpp
 )
 
 target_include_directories(auto_charge_coordinator_tests PRIVATE
@@ -77,6 +78,29 @@ target_link_libraries(charge_settings_tests PRIVATE
 
 add_test(NAME charge_settings_tests
          COMMAND charge_settings_tests)
+
+add_executable(charge_settings_transaction_tests
+    test_charge_settings_transaction.cpp
+    ../src/chargesettings.cpp
+    ../src/chargesettingstransaction.cpp
+    ../src/chargepilecontroller.cpp
+    ../src/chargepileprotocol.cpp
+    ../src/autochargecoordinator.cpp
+)
+
+target_include_directories(charge_settings_transaction_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(charge_settings_transaction_tests PRIVATE
+    Qt6::Core
+    Qt6::Network
+    Qt6::SerialBus
+    Qt6::Test
+)
+
+add_test(NAME charge_settings_transaction_tests
+         COMMAND charge_settings_transaction_tests)
 
 add_executable(vision_alignment_decision_tests
     test_vision_alignment_decision.cpp
@@ -460,6 +484,10 @@ add_executable(line_manager_charge_hold_contract_tests
     ../src/agvcontroller.h
     ../src/runtimesettings.cpp
     ../src/chargebusinessrules.cpp
+    ../src/chargesettings.cpp
+    ../src/autochargecoordinator.cpp
+    ../src/chargepilecontroller.cpp
+    ../src/chargepileprotocol.cpp
 )
 
 target_include_directories(line_manager_charge_hold_contract_tests PRIVATE

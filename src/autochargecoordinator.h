@@ -68,6 +68,8 @@ public:
     explicit AutoChargeCoordinator(QObject *parent = nullptr);
 
     bool isEnabled() const;
+    /// 返回协调器当前用于阈值决策的设置副本，不允许调用方直接修改内部状态。
+    ChargeSettings appliedSettings() const { return m_settings; }
 
     /**
      * @brief 返回是否存在尚未安全完成的自动充电会话。
@@ -93,6 +95,13 @@ public slots:
     /// 控制器状态只用于抑制重复开始和识别未知风险，不用于推断自动会话来源。
     void onChargeControllerStateChanged(ChargePileController::State state,
                                         const QString &text);
+    /**
+     * @brief 接收 LineManager 对派单保持实际电平的排队确认。
+     *
+     * DeviceManager 必须使用 QueuedConnection，避免 Stop/enterError 在主调度
+     * 状态尚未完成切换时同步触发策略重入。
+     */
+    void onDispatchHoldChanged(bool hold, const QString &reason);
 
     /**
      * @brief 业务层反馈自动启动意图是否被唯一控制器接受。

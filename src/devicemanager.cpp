@@ -4,6 +4,7 @@
 #include "chargebusinessrules.h"
 #include "chargepilecontroller.h"
 #include "chargesettings.h"
+#include "chargesettingstransaction.h"
 #include "customSysScheduler.h"
 #include "huayanScheduler.h"
 #include "linemanager.h"
@@ -19,6 +20,7 @@
 #include <QSettings>
 #include <QTcpSocket>
 #include <QThread>
+#include <QTimer>
 #include <QStandardPaths>
 
 #include <utility>
@@ -32,6 +34,10 @@ static const char *kSettingsApp  = "robot-visual";
 static const char *kStationMapKey = "agv/stationMap";
 
 namespace {
+// AGV 正常每 1 秒完成一轮监控读取；5 秒至少覆盖三个完整周期，既避免单轮
+// Modbus 抖动误停，也能在自动充电期间及时废止陈旧电量和 LM1 位置。
+constexpr int kAgvMonitorFreshnessTimeoutMs = 5000;
+
 /// 同步扫码 SDK 的 worker 包装；moveToThread 后 scan() 在工作线程执行。
 class NScanWorker : public QObject
 {
@@ -277,11 +283,34 @@ DeviceManager::DeviceManager(QObject *parent)
     m_autoChargeCoordinator = new AutoChargeCoordinator(this);
     m_autoChargeCoordinator->applySettings(m_chargeSettings);
 
+    m_agvMonitorFreshnessTimer = new QTimer(this);
+    m_agvMonitorFreshnessTimer->setSingleShot(true);
+    m_agvMonitorFreshnessTimer->setInterval(
+        kAgvMonitorFreshnessTimeoutMs);
+    connect(m_agvMonitorFreshnessTimer, &QTimer::timeout, this, [this] {
+        const QString reason =
+            QStringLiteral("AGV 完整监控快照超过 %1 ms 未更新")
+                .arg(kAgvMonitorFreshnessTimeoutMs);
+        if (notifyAgvMonitorLostIfFresh(
+                m_agvMonitorFreshness, *m_autoChargeCoordinator, reason)) {
+            emit logMessage(QStringLiteral("[自动充电] %1").arg(reason));
+        }
+    });
+    connect(m_agvCtrl, &AgvController::disconnected, this, [this] {
+        m_agvMonitorFreshnessTimer->stop();
+        const QString reason = QStringLiteral("AGV Modbus 已断开");
+        if (notifyAgvMonitorLostIfFresh(
+                m_agvMonitorFreshness, *m_autoChargeCoordinator, reason)) {
+            emit logMessage(QStringLiteral("[自动充电] %1").arg(reason));
+        }
+    });
+
     connect(m_agvCtrl, &AgvController::monitorUpdated, this,
             [this](const AgvMonitorData &data) {
         // monitorUpdated 保证六个字段属于同一轮读取；业务层只保存这种完整快照。
         m_lastAgvMonitor = data;
-        m_hasAgvMonitor = true;
+        m_agvMonitorFreshness.markUpdated();
+        m_agvMonitorFreshnessTimer->start();
         m_autoChargeCoordinator->onAgvMonitorUpdated(data);
     });
     connect(m_lineManager, &LineManager::systemStateChanged,
@@ -298,6 +327,10 @@ DeviceManager::DeviceManager(QObject *parent)
 
     connect(m_autoChargeCoordinator, &AutoChargeCoordinator::dispatchHoldRequested,
             m_lineManager, &LineManager::setChargeDispatchHold);
+    connect(m_lineManager, &LineManager::chargeDispatchHoldChanged,
+            m_autoChargeCoordinator,
+            &AutoChargeCoordinator::onDispatchHoldChanged,
+            Qt::QueuedConnection);
     connect(m_autoChargeCoordinator, &AutoChargeCoordinator::returnHomeRequested,
             m_lineManager, &LineManager::requestChargeReturnHome);
     connect(m_autoChargeCoordinator,
@@ -458,14 +491,16 @@ bool DeviceManager::applyChargeSettingsCandidate(
         return false;
     }
 
-    // saveChargeSettings 内部使用同目录临时文件和 QSaveFile 原子替换；
-    // 在它成功前不能调用 applySettings，确保写盘失败时运行快照完全不变。
-    if (!saveChargeSettings(m_chargeSettingsPath, candidate, error))
+    // 事务函数先让控制器无副作用确认可接受，再写盘和提交三份运行快照；
+    // 任一步失败都保持协调器和 DeviceManager 当前快照不变。
+    const ChargeSettingsTransactionTargets targets{
+        m_chargeSettingsPath,
+        m_chargePileController,
+        m_autoChargeCoordinator,
+        &m_chargeSettings};
+    if (!applyChargeSettingsTransaction(targets, candidate, error))
         return false;
 
-    m_chargePileController->applySettings(candidate);
-    m_autoChargeCoordinator->applySettings(candidate);
-    m_chargeSettings = candidate;
     emit logMessage(QStringLiteral("[充电参数] 已原子保存并应用"));
     return true;
 }
@@ -486,7 +521,7 @@ bool DeviceManager::startManualCharge(QString *error)
 
     ManualChargeStartContext context;
     context.lineState = m_lineManager->state();
-    context.hasAgvMonitor = m_hasAgvMonitor;
+    context.hasAgvMonitor = m_agvMonitorFreshness.hasFreshSnapshot();
     context.agv = m_lastAgvMonitor;
     context.controllerBusy = m_chargePileController->isBusy();
     context.controllerState = m_chargePileState;

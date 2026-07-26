@@ -2005,9 +2005,13 @@ private slots:
         candidate.currentA = 40.0;
         candidate.responseTimeoutMs = 1;
         candidate.pollIntervalMs = 1;
+        bool candidateAccepted = true;
+        QString candidateError;
         connect(&pile, &FakeChargePile::firstPrecheckStatusReadReceived,
-                &controller, [&controller, candidate] {
-                    controller.applySettings(candidate);
+                &controller, [&controller, candidate,
+                              &candidateAccepted, &candidateError] {
+                    candidateAccepted =
+                        controller.applySettings(candidate, &candidateError);
                 });
 
         QSignalSpy finishedSpy(
@@ -2018,6 +2022,8 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 15000);
         QVERIFY2(finishedSpy.first().at(0).toBool(),
                  qPrintable(finishedSpy.first().at(2).toString()));
+        QVERIFY(!candidateAccepted);
+        QVERIFY(candidateError.contains(QStringLiteral("安全恢复上下文")));
 
         QVERIFY(pile.receivedWriteValue(kRegSetVoltage, 584));
         QVERIFY(pile.receivedWriteValue(kRegSetCurrent, 500));
