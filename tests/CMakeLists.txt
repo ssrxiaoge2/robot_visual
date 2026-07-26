@@ -1,5 +1,22 @@
 find_package(Qt6 REQUIRED COMPONENTS Core Test Network Gui)
 
+add_executable(charge_settings_tests
+    test_charge_settings.cpp
+    ../src/chargesettings.cpp
+)
+
+target_include_directories(charge_settings_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(charge_settings_tests PRIVATE
+    Qt6::Core
+    Qt6::Test
+)
+
+add_test(NAME charge_settings_tests
+         COMMAND charge_settings_tests)
+
 add_executable(vision_alignment_decision_tests
     test_vision_alignment_decision.cpp
     ../src/visionalignmentdecision.cpp

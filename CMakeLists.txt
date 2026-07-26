@@ -49,6 +49,8 @@ set(PROJECT_SOURCES
         src/visionalignmentdecision.h
         src/runtimesettings.cpp
         src/runtimesettings.h
+        src/chargesettings.cpp
+        src/chargesettings.h
         src/settingsmanager.cpp
         src/settingsmanager.h
         src/settingsdialog.cpp
