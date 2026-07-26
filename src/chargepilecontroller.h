@@ -135,6 +135,9 @@ private:
     void setState(State state, const QString &text);
     void failQuery(const QString &reason);
     void finishQuery();
+    void invalidateCommunicationContext(const QString &reason);
+    static bool communicationTargetChanged(const ChargeSettings &previous,
+                                           const ChargeSettings &next);
     static quint16 responseWord(const QByteArray &frame, int offset);
 
     ChargeSettings m_settings = ChargeSettings::defaults();
@@ -149,7 +152,16 @@ private:
     QTimer m_actionPollTimer;
     QByteArray m_receiveBuffer;
     QQueue<Request> m_requestQueue;
-    std::optional<Request> m_currentRequest;
+    /**
+     * 已从队列取出但仍受 50ms 节流限制、尚未调用 QTcpSocket::write() 的请求。
+     * 此阶段任何收到字节都不是本请求的合法响应，必须保守地中断查询。
+     */
+    std::optional<Request> m_pendingRequest;
+    /**
+     * 仅在完整 RTU 帧成功交给 QTcpSocket 后设置的唯一在途请求。
+     * 接收路径只能使用该对象校验并解析响应，避免迟到旧帧推进下一读取。
+     */
+    std::optional<Request> m_inFlightRequest;
     QElapsedTimer m_lastSendTimer;
     bool m_queryInProgress = false;
 };

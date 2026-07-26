@@ -39,7 +39,46 @@ public:
     /** 关闭响应可让真实控制器走到响应超时和断开连接分支。 */
     void setRespondToRequests(const bool enabled) { m_respondToRequests = enabled; }
 
+    /**
+     * @brief 设置五组状态读回的原始寄存器值。
+     *
+     * 测试通过不同的缩回、伸出及输出组合覆盖控制器的安全判断，而不绕过
+     * 真实 TCP 与 RTU 拆包路径。
+     */
+    void setStatusWords(const quint16 voltageTenths, const quint16 currentTenths,
+                        const quint16 inputWord, const quint16 outputWord,
+                        const quint16 eventWord = 0x0020, const quint16 faultWord = 0x0080)
+    {
+        m_voltageTenths = voltageTenths;
+        m_currentTenths = currentTenths;
+        m_inputWord = inputWord;
+        m_outputWord = outputWord;
+        m_eventWord = eventWord;
+        m_faultWord = faultWord;
+    }
+
+    /**
+     * @brief 在指定请求的正常响应后追加同一帧，模拟网关延迟转发的重复旧帧。
+     *
+     * 重复帧在下一条请求的 70ms 节流等待窗口内送达，用于检验控制器不会
+     * 把尚未写出的下一条请求错误地标记为可接收响应。
+     */
+    void duplicateResponseAfterRequest(const int requestNumber)
+    {
+        m_duplicateResponseAfterRequest = requestNumber;
+    }
+
 private:
+    static QByteArray wordPayload(const quint16 first, const quint16 second)
+    {
+        QByteArray payload;
+        payload.append(char((first >> 8) & 0xFF));
+        payload.append(char(first & 0xFF));
+        payload.append(char((second >> 8) & 0xFF));
+        payload.append(char(second & 0xFF));
+        return payload;
+    }
+
     static QByteArray readResponse(const QByteArray &payload)
     {
         QByteArray response;
@@ -59,16 +98,15 @@ private:
                               | quint8(request.at(3));
         switch (address) {
         case kRegOutVoltage:
-            // 584 和 126 分别表示现场协议中按 0.1 缩放的 58.4V、12.6A。
-            return readResponse(QByteArray::fromHex("0248007e"));
+            return readResponse(wordPayload(m_voltageTenths, m_currentTenths));
         case kRegInputSignals:
-            return readResponse(QByteArray::fromHex("0004"));
+            return readResponse(wordPayload(0, m_inputWord).right(2));
         case kRegOutputSignals:
-            return readResponse(QByteArray::fromHex("0210"));
+            return readResponse(wordPayload(0, m_outputWord).right(2));
         case kRegEvent:
-            return readResponse(QByteArray::fromHex("0020"));
+            return readResponse(wordPayload(0, m_eventWord).right(2));
         case kRegError:
-            return readResponse(QByteArray::fromHex("0080"));
+            return readResponse(wordPayload(0, m_faultWord).right(2));
         default:
             return {};
         }
@@ -111,6 +149,13 @@ private:
             } else {
                 // 后续帧一次写入；TCP 可将这些连续写操作与通知合并为同一批数据。
                 m_client->write(response);
+                if (m_requests.size() == m_duplicateResponseAfterRequest) {
+                    const QPointer<QTcpSocket> client = m_client;
+                    QTimer::singleShot(3, this, [client, response] {
+                        if (client != nullptr)
+                            client->write(response);
+                    });
+                }
             }
         }
     }
@@ -122,6 +167,13 @@ private:
     QList<qint64> m_requestTimesMs;
     QElapsedTimer m_clock;
     bool m_respondToRequests = true;
+    quint16 m_voltageTenths = 584;
+    quint16 m_currentTenths = 126;
+    quint16 m_inputWord = 0x0004;
+    quint16 m_outputWord = 0x0210;
+    quint16 m_eventWord = 0x0020;
+    quint16 m_faultWord = 0x0080;
+    int m_duplicateResponseAfterRequest = -1;
 };
 
 class ChargePileControllerTest : public QObject
@@ -223,6 +275,96 @@ private slots:
         QVERIFY(finishedSpy.at(0).at(1).toString().contains(QStringLiteral("超时")));
         QCOMPARE(pile.requests().size(), 1);
         QVERIFY(!controller.isBusy());
+        QVERIFY(controller.shutdownRequired());
+    }
+
+    void changingCommunicationTargetReconnectsToNewService()
+    {
+        // 若 applySettings 复用旧 TCP 连接，第二次查询会继续落到 oldPile 而不是 newPile。
+        FakeChargePile oldPile;
+        FakeChargePile newPile;
+        QVERIFY(oldPile.listen());
+        QVERIFY(newPile.listen());
+
+        ChargePileController controller;
+        controller.applySettings(loopbackSettings(oldPile));
+        QSignalSpy firstFinishedSpy(&controller, &ChargePileController::queryFinished);
+        controller.queryStatus();
+        QTRY_COMPARE_WITH_TIMEOUT(firstFinishedSpy.count(), 1, 1500);
+        QCOMPARE(firstFinishedSpy.at(0).at(0).toBool(), true);
+        QCOMPARE(oldPile.requests().size(), 5);
+
+        controller.applySettings(loopbackSettings(newPile));
+        QSignalSpy secondFinishedSpy(&controller, &ChargePileController::queryFinished);
+        controller.queryStatus();
+
+        QTRY_COMPARE_WITH_TIMEOUT(secondFinishedSpy.count(), 1, 1500);
+        QCOMPARE(secondFinishedSpy.at(0).at(0).toBool(), true);
+        QCOMPARE(newPile.requests().size(), 5);
+        QCOMPARE(oldPile.requests().size(), 5);
+    }
+
+    void changingCommunicationTargetInvalidatesPreviousSafeSnapshot()
+    {
+        // 若目标切换后仍保留 SafeComplete 快照，调用方会把未知新设备误判为可安全结束。
+        FakeChargePile oldPile;
+        FakeChargePile newPile;
+        QVERIFY(oldPile.listen());
+        QVERIFY(newPile.listen());
+        oldPile.setStatusWords(0, 0, 0x0008, 0x0000, 0, 0x0080);
+
+        ChargePileController controller;
+        controller.applySettings(loopbackSettings(oldPile));
+        QSignalSpy finishedSpy(&controller, &ChargePileController::queryFinished);
+        controller.queryStatus();
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1500);
+        QVERIFY(!controller.shutdownRequired());
+        QVERIFY(controller.snapshot().sampledAt.isValid());
+
+        controller.applySettings(loopbackSettings(newPile));
+
+        QVERIFY(controller.shutdownRequired());
+        QVERIFY(!controller.snapshot().sampledAt.isValid());
+    }
+
+    void duplicateOldFrameDuringThrottleNeverBuildsWrongSnapshot()
+    {
+        // 若待发送请求提前占据在途槽位，第二个输入字响应会被误用于解析第三个输出字。
+        FakeChargePile pile;
+        QVERIFY(pile.listen());
+        pile.duplicateResponseAfterRequest(2);
+
+        ChargePileController controller;
+        controller.applySettings(loopbackSettings(pile));
+        QSignalSpy finishedSpy(&controller, &ChargePileController::queryFinished);
+        controller.queryStatus();
+
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1500);
+        if (finishedSpy.at(0).at(0).toBool()) {
+            QCOMPARE(controller.snapshot().outputWord, quint16(0x0210));
+            QCOMPARE(pile.requests().size(), 5);
+        } else {
+            QCOMPARE(pile.requests().size(), 2);
+            QVERIFY(controller.shutdownRequired());
+        }
+    }
+
+    void contradictoryExtendedAndRetractedBitsNeverConfirmSafe()
+    {
+        // 若安全判定只看缩到位，机构两端限位同时为真时会错误进入 SafeComplete。
+        FakeChargePile pile;
+        QVERIFY(pile.listen());
+        pile.setStatusWords(0, 0, 0x000C, 0x0000, 0, 0x0080);
+
+        ChargePileController controller;
+        controller.applySettings(loopbackSettings(pile));
+        QSignalSpy finishedSpy(&controller, &ChargePileController::queryFinished);
+        controller.queryStatus();
+
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 1500);
+        QCOMPARE(finishedSpy.at(0).at(0).toBool(), true);
+        QVERIFY(controller.snapshot().extended);
+        QVERIFY(controller.snapshot().retracted);
         QVERIFY(controller.shutdownRequired());
     }
 };

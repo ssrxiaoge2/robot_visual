@@ -7,14 +7,15 @@
 namespace {
 
 constexpr quint8 kReadInputRegisters = 0x04;
-// QTcpSocket::write() 返回时数据可能仍在 Qt 的发送缓冲；比现场规定多保留 5ms
+// QTcpSocket::write() 返回时数据可能仍在 Qt 的发送缓冲；比现场规定多保留 20ms
 // 余量，确保以对端实际接收时刻度量时，相邻 RTU 请求也不会短于 50ms。
-constexpr int kMinimumRequestIntervalMs = 55;
+constexpr int kMinimumRequestIntervalMs = 70;
 
 bool snapshotConfirmsSafe(const ChargePileSnapshot &snapshot, const ChargeSettings &settings)
 {
     // “无输出”同时要求工作位、继电器位关闭，且电流不超过当前设置的安全阈值。
     return snapshot.retracted
+           && !snapshot.extended
            && !snapshot.working
            && !snapshot.relayOn
            && snapshot.outputCurrentA <= settings.safeCurrentA;
@@ -44,11 +45,6 @@ ChargePileController::ChargePileController(QObject *parent)
 
 void ChargePileController::applySettings(const ChargeSettings &settings)
 {
-    if (m_queryInProgress) {
-        emit logMessage(QStringLiteral("充电桩查询进行中，拒绝替换通信设置。"));
-        return;
-    }
-
     const ChargeSettingsValidation validation = validateChargeSettings(settings);
     if (!validation.ok) {
         emit logMessage(QStringLiteral("充电桩设置校验失败：%1")
@@ -56,7 +52,18 @@ void ChargePileController::applySettings(const ChargeSettings &settings)
         return;
     }
 
+    const bool targetChanged = communicationTargetChanged(m_settings, settings);
+    const bool hasCommunicationContext = m_queryInProgress
+                                         || m_socket.state() != QAbstractSocket::UnconnectedState
+                                         || m_snapshot.sampledAt.isValid()
+                                         || m_pendingRequest.has_value()
+                                         || m_inFlightRequest.has_value();
     m_settings = settings;
+
+    // 电压、超时等同目标参数可直接热更新；仅 host/port/slave 变化才失效会话。
+    if (targetChanged && hasCommunicationContext) {
+        invalidateCommunicationContext(QStringLiteral("通信目标已变更，旧连接和状态快照已失效。"));
+    }
 }
 
 void ChargePileController::queryStatus()
@@ -80,7 +87,8 @@ void ChargePileController::queryStatus()
     m_queryInProgress = true;
     m_receiveBuffer.clear();
     m_requestQueue.clear();
-    m_currentRequest.reset();
+    m_pendingRequest.reset();
+    m_inFlightRequest.reset();
 
     // 五组状态严格按照现场 Python 脚本的读取顺序排队，且全部为 0x04。
     enqueueRead(ChargePileProtocol::kRegOutVoltage, 2, [this](const QByteArray &response) {
@@ -158,14 +166,14 @@ void ChargePileController::beginNextRequest()
         return;
     }
 
-    // 仅在前一帧已校验、回调执行并从 m_currentRequest 移除后才取下一帧。
-    m_currentRequest = m_requestQueue.dequeue();
+    // 取出的请求先处于待发送阶段；只有 write() 成功后才能变为可接收响应的在途请求。
+    m_pendingRequest = m_requestQueue.dequeue();
     scheduleCurrentRequest();
 }
 
 void ChargePileController::scheduleCurrentRequest()
 {
-    if (!m_currentRequest.has_value())
+    if (!m_pendingRequest.has_value())
         return;
 
     if (!m_lastSendTimer.isValid() || m_lastSendTimer.elapsed() >= kMinimumRequestIntervalMs) {
@@ -179,10 +187,11 @@ void ChargePileController::scheduleCurrentRequest()
 
 void ChargePileController::sendCurrentRequest()
 {
-    if (!m_queryInProgress || !m_currentRequest.has_value())
+    if (!m_queryInProgress || !m_pendingRequest.has_value())
         return;
 
-    Request &request = *m_currentRequest;
+    Request request = std::move(*m_pendingRequest);
+    m_pendingRequest.reset();
     // 任务三的硬性保险：即使未来误把写请求排入队列，本阶段也不允许送往网络。
     if (request.isWriteCommand || request.expectedFunction != kReadInputRegisters) {
         failQuery(QStringLiteral("只读查询控制器拒绝发送写命令。"));
@@ -193,12 +202,14 @@ void ChargePileController::sendCurrentRequest()
         return;
     }
 
-    request.startedAt = QDateTime::currentDateTime();
-    m_lastSendTimer.start();
     if (m_socket.write(request.frame) != request.frame.size()) {
         failQuery(QStringLiteral("充电桩只读查询写入套接字失败。"));
         return;
     }
+    // write() 成功后才允许接收路径将数据归属给该请求，消除节流窗口的旧帧歧义。
+    request.startedAt = QDateTime::currentDateTime();
+    m_lastSendTimer.start();
+    m_inFlightRequest = std::move(request);
     m_responseTimer.start(m_settings.responseTimeoutMs);
 }
 
@@ -215,12 +226,17 @@ void ChargePileController::handleConnected()
 void ChargePileController::handleReadyRead()
 {
     m_receiveBuffer.append(m_socket.readAll());
-    if (!m_queryInProgress || !m_currentRequest.has_value()) {
-        emit logMessage(QStringLiteral("收到未关联到在途请求的充电桩响应。"));
+    if (!m_queryInProgress) {
+        emit logMessage(QStringLiteral("收到已结束查询的充电桩响应。"));
+        return;
+    }
+    if (!m_inFlightRequest.has_value()) {
+        // 该分支包括节流等待期；延迟或重复旧帧绝不能被待发送请求错误接收。
+        failQuery(QStringLiteral("收到不属于已写入请求的充电桩响应，已保守中止查询。"));
         return;
     }
 
-    const Request request = *m_currentRequest;
+    const Request request = *m_inFlightRequest;
     const ChargePileProtocol::FrameExtractResult result =
         ChargePileProtocol::takeResponseFrame(
             &m_receiveBuffer, request.expectedSlaveId, request.expectedFunction);
@@ -241,8 +257,14 @@ void ChargePileController::handleReadyRead()
         return;
     }
 
-    m_currentRequest.reset();
+    m_inFlightRequest.reset();
     request.onSuccess(result.frame);
+    // 同一次 readyRead 可能已把重复帧一并追加到缓存。下一请求尚未 write()，
+    // 不能等待未来网络通知再处理该尾随数据，否则会在下一响应到达时错配。
+    if (!m_receiveBuffer.isEmpty()) {
+        failQuery(QStringLiteral("充电桩响应包含未关联的尾随数据，已保守中止查询。"));
+        return;
+    }
     beginNextRequest();
 }
 
@@ -259,7 +281,7 @@ void ChargePileController::handleResponseTimeout()
     if (!m_queryInProgress)
         return;
 
-    if (m_currentRequest.has_value()) {
+    if (m_inFlightRequest.has_value()) {
         failQuery(QStringLiteral("充电桩只读查询响应超时。"));
     } else {
         failQuery(QStringLiteral("连接充电桩超时。"));
@@ -290,7 +312,8 @@ void ChargePileController::failQuery(const QString &reason)
     m_responseTimer.stop();
     m_actionPollTimer.stop();
     m_requestQueue.clear();
-    m_currentRequest.reset();
+    m_pendingRequest.reset();
+    m_inFlightRequest.reset();
     // 失败后断开，由下一次人工 queryStatus() 显式建立新连接；不做自动重试。
     m_socket.abort();
     setState(State::Fault, reason);
@@ -308,6 +331,34 @@ void ChargePileController::finishQuery()
     }
     emit snapshotChanged(m_snapshot);
     emit queryFinished(true, QStringLiteral("充电桩只读状态查询完成。"));
+}
+
+void ChargePileController::invalidateCommunicationContext(const QString &reason)
+{
+    const bool wasQueryInProgress = m_queryInProgress;
+    m_queryInProgress = false;
+    m_responseTimer.stop();
+    m_actionPollTimer.stop();
+    m_requestQueue.clear();
+    m_pendingRequest.reset();
+    m_inFlightRequest.reset();
+    m_receiveBuffer.clear();
+    m_lastSendTimer.invalidate();
+    // abort() 立即丢弃旧目标尚未发送或尚未读取的 TCP 数据，下一次查询会重新连接。
+    m_socket.abort();
+    m_snapshot = ChargePileSnapshot{};
+    setState(State::Unknown, reason);
+    if (wasQueryInProgress)
+        emit queryFinished(false, reason);
+}
+
+bool ChargePileController::communicationTargetChanged(
+    const ChargeSettings &previous, const ChargeSettings &next)
+{
+    // slaveId 虽不改变 TCP 端点，却改变所有 RTU 帧归属，必须与 host/port 等同处理。
+    return previous.host.trimmed() != next.host.trimmed()
+           || previous.port != next.port
+           || previous.slaveId != next.slaveId;
 }
 
 quint16 ChargePileController::responseWord(const QByteArray &frame, const int offset)
