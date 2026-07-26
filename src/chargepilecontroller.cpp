@@ -35,6 +35,29 @@ bool snapshotConfirmsSafe(const ChargePileSnapshot &snapshot,
 
 } // namespace
 
+std::optional<ChargePileWriteIdentity>
+chargePileWriteIdentity(const QByteArrayView frame)
+{
+    if (frame.size() < 6)
+        return std::nullopt;
+
+    const quint8 function = quint8(frame.at(1));
+    if (function != kWriteSingleCoil
+        && function != kWriteSingleRegister) {
+        return std::nullopt;
+    }
+
+    const auto wordAt = [frame](const qsizetype offset) {
+        return quint16((quint16(quint8(frame.at(offset))) << 8)
+                       | quint8(frame.at(offset + 1)));
+    };
+    return ChargePileWriteIdentity{
+        function,
+        wordAt(2),
+        wordAt(4)
+    };
+}
+
 ChargePileController::ChargePileController(QObject *parent)
     : QObject(parent)
 {
@@ -170,17 +193,15 @@ bool ChargePileController::startCharge(const SessionOrigin origin, QString *erro
     m_safeStopRequested = false;
     m_safeShutdownStarted = false;
     m_applicationShutdownRequested = false;
+    m_applicationShutdownFinishedEmitted = false;
     m_sessionFinishedEmitted = false;
-    m_startCommandConfirmed = false;
-    m_stopCommandConfirmed = false;
-    m_retractOnConfirmed = false;
-    m_retractOffConfirmed = false;
-    m_resetCommandConfirmed = false;
+    clearSafetyRecoveryContext();
+    m_safetyRecoveryContextValid = true;
+    m_conservativeRecoveryActive = false;
     m_recoveryAction = RecoveryAction::None;
     m_recoveryAttempts = 0;
     m_recoveryReason.clear();
     m_terminalFailureAfterRetractOff.clear();
-    m_uncertainWrite.reset();
     m_queryInProgress = true;
     m_flowMode = FlowMode::Charge;
     clearTransportWork();
@@ -252,6 +273,13 @@ void ChargePileController::requestSafeStop(const StopReason reason)
 bool ChargePileController::requestConservativeRecovery(
     const SessionOrigin origin, const StopReason reason, QString *error)
 {
+    return beginConservativeRecovery(origin, reason, false, error);
+}
+
+bool ChargePileController::beginConservativeRecovery(
+    const SessionOrigin origin, const StopReason reason,
+    const bool notifyApplication, QString *error)
+{
     if (error)
         error->clear();
     if (m_queryInProgress) {
@@ -267,21 +295,24 @@ bool ChargePileController::requestConservativeRecovery(
         return false;
     }
 
-    ++m_sessionId;
+    // 不安全终态后的第二次、第三次恢复仍属于同一安全上下文。只有控制器此前
+    // 没有任何可延续的会话时才建立新编号并初始化里程碑。
+    if (!m_safetyRecoveryContextValid) {
+        ++m_sessionId;
+        clearSafetyRecoveryContext();
+        m_safetyRecoveryContextValid = true;
+    }
     m_sessionOrigin = origin;
     m_stopReason = reason;
-    m_seenChargingOutput = false;
     // 预检五组真实状态完成前保持为 false，避免 handleReadyRead() 在首帧后
     // 把保守恢复误导入普通停止入口并盲目重发结果不确定的 Stop。
     m_safeStopRequested = false;
     m_safeShutdownStarted = false;
-    m_applicationShutdownRequested = false;
+    m_applicationShutdownRequested = notifyApplication;
+    if (notifyApplication)
+        m_applicationShutdownFinishedEmitted = false;
     m_sessionFinishedEmitted = false;
-    m_startCommandConfirmed = false;
-    m_stopCommandConfirmed = false;
-    m_retractOnConfirmed = false;
-    m_retractOffConfirmed = false;
-    m_resetCommandConfirmed = false;
+    m_conservativeRecoveryActive = true;
     m_recoveryAction = RecoveryAction::None;
     m_recoveryAttempts = 0;
     m_recoveryReason.clear();
@@ -311,48 +342,54 @@ bool ChargePileController::requestConservativeRecovery(
 
 void ChargePileController::requestApplicationShutdown()
 {
-    m_applicationShutdownRequested = true;
+    // 同一个关闭请求只允许发布一个最终结果；重复调用只升级当前安全流程，
+    // 不能重新打开通知边沿或建立第二条停止链。
+    if (!m_applicationShutdownRequested) {
+        m_applicationShutdownRequested = true;
+        m_applicationShutdownFinishedEmitted = false;
+    }
 
     if (m_flowMode == FlowMode::Charge && m_queryInProgress) {
+        if (m_conservativeRecoveryActive) {
+            if (stopReasonPriority(StopReason::ApplicationShutdown)
+                > stopReasonPriority(m_stopReason)) {
+                m_stopReason = StopReason::ApplicationShutdown;
+            }
+            emit logMessage(
+                QStringLiteral("[充电会话%1] 程序关闭接管当前保守恢复，仅升级原因，不旁路未知写命令矩阵。")
+                    .arg(m_sessionId));
+            return;
+        }
         requestSafeStop(StopReason::ApplicationShutdown);
         return;
     }
 
     if (!shutdownRequired()) {
-        emit applicationShutdownFinished(true, QStringLiteral("充电桩已确认处于安全状态。"));
+        emitApplicationShutdownFinishedOnce(
+            true, QStringLiteral("充电桩已确认处于安全状态。"));
         return;
     }
 
-    // 关闭请求到来时即使没有充电会话，也要按“停止→无输出→缩回→复位→终检”
-    // 进行保守恢复；Unknown 绝不能被当作已经停止。
+    // 关闭请求到来时即使没有活动充电会话，也必须先完成五组真实只读快照，
+    // 然后复用与人工/自动恢复相同的未知写命令矩阵。禁止直接 beginSafeShutdown()
+    // 绕过 Unknown Stop、缩回 OFF 或 Reset 的“不重发”约束。
     if (m_flowMode == FlowMode::Query && m_queryInProgress) {
         emit queryFinished(false, QStringLiteral("状态查询被程序关闭安全收尾接管。"));
-        m_requestQueue.clear();
-        m_onQueueDrained = {};
-    } else {
-        ++m_sessionId;
-        m_queryInProgress = true;
+        clearTransportWork();
+        m_socket.abort();
+        m_queryInProgress = false;
+        m_flowMode = FlowMode::None;
     }
-    m_flowMode = FlowMode::Charge;
-    m_sessionOrigin = SessionOrigin::Manual;
-    m_stopReason = StopReason::ApplicationShutdown;
-    m_safeStopRequested = true;
-    m_safeShutdownStarted = false;
-    m_sessionFinishedEmitted = false;
-    m_phaseTimer.stop();
-    if (m_pendingRequest.has_value() && !m_inFlightRequest.has_value()) {
-        m_actionPollTimer.stop();
-        m_pendingRequest.reset();
-    }
-    if (!m_inFlightRequest.has_value()) {
-        if (m_socket.state() == QAbstractSocket::ConnectedState) {
-            beginSafeShutdown();
-        } else {
-            setState(State::Connecting,
-                     QStringLiteral("程序关闭前正在连接充电桩以执行安全收尾。"));
-            m_responseTimer.start(m_settings.connectTimeoutMs);
-            m_socket.connectToHost(m_settings.host.trimmed(), m_settings.port);
-        }
+
+    QString error;
+    const SessionOrigin origin = m_safetyRecoveryContextValid
+                                     ? m_sessionOrigin
+                                     : SessionOrigin::Manual;
+    if (!beginConservativeRecovery(origin, StopReason::ApplicationShutdown,
+                                   true, &error)) {
+        emitApplicationShutdownFinishedOnce(
+            false,
+            QStringLiteral("程序关闭安全收尾无法启动：%1").arg(error));
     }
 }
 
@@ -514,16 +551,20 @@ void ChargePileController::sendCurrentRequest()
 
     Request request = std::move(*m_pendingRequest);
     m_pendingRequest.reset();
-    const qint64 written = m_socket.write(request.frame);
-    if (written != request.frame.size()) {
+
+    // 必须在 write() 前进入可记录上下文。短写或 -1 无法证明设备端完全没有
+    // 收到任何字节，因此写命令一律按结果不确定处理，并由 failOperation()
+    // 从 m_inFlightRequest 精确保存功能码、地址和值。
+    request.startedAt = QDateTime::currentDateTime();
+    m_inFlightRequest = std::move(request);
+    const qint64 written = m_socket.write(m_inFlightRequest->frame);
+    if (written != m_inFlightRequest->frame.size()) {
         failOperation(QStringLiteral("充电桩请求写入套接字失败。"),
-                      request.isWriteCommand);
+                      m_inFlightRequest->isWriteCommand);
         return;
     }
 
-    request.startedAt = QDateTime::currentDateTime();
     m_lastSendTimer.start();
-    m_inFlightRequest = std::move(request);
     m_responseTimer.start(m_settings.responseTimeoutMs);
     emit logMessage(QStringLiteral("[充电会话%1][%2] TX %3")
                     .arg(m_sessionId)
@@ -725,17 +766,17 @@ void ChargePileController::failOperation(
                   .arg(reason)
             : reason;
     if (commandResultUnknown && m_inFlightRequest.has_value()) {
-        const Request &request = *m_inFlightRequest;
-        if (request.frame.size() >= 6) {
-            m_uncertainWrite = UncertainWrite{
-                quint8(request.frame.at(1)),
-                responseWord(request.frame, 2),
-                responseWord(request.frame, 4)};
-        }
+        // 只有确实是写请求时才更新不确定身份。安全收尾的读重连耗尽也会以
+        // Unknown 结束，但此时必须保留上一轮尚未解决的写身份，不能被读帧覆盖。
+        const auto identity =
+            chargePileWriteIdentity(QByteArrayView(m_inFlightRequest->frame));
+        if (identity.has_value())
+            m_uncertainWrite = identity;
     }
     clearTransportWork();
     m_socket.abort();
     m_queryInProgress = false;
+    m_conservativeRecoveryActive = false;
     if (commandResultUnknown)
         m_unknownGate = true;
     // 在清除flowMode前变更状态，使失败日志仍携带会话编号与手动/自动来源。
@@ -751,7 +792,7 @@ void ChargePileController::failOperation(
         emit chargeSessionFinished(false, failedOrigin, finalReason);
     }
     if (notifyApplication)
-        emit applicationShutdownFinished(false, finalReason);
+        emitApplicationShutdownFinishedOnce(false, finalReason);
 }
 
 void ChargePileController::finishQuery()
@@ -782,14 +823,38 @@ void ChargePileController::finishChargeSession(
     m_sessionFinishedEmitted = true;
     m_queryInProgress = false;
     m_flowMode = FlowMode::None;
+    m_conservativeRecoveryActive = false;
     m_responseTimer.stop();
     m_actionPollTimer.stop();
     m_phaseTimer.stop();
     if (safe)
-        m_uncertainWrite.reset();
+        clearSafetyRecoveryContext();
     emit chargeSessionFinished(safe, origin, message);
     if (notifyApplication)
-        emit applicationShutdownFinished(safe, message);
+        emitApplicationShutdownFinishedOnce(safe, message);
+}
+
+void ChargePileController::clearSafetyRecoveryContext()
+{
+    m_startCommandConfirmed = false;
+    m_stopCommandConfirmed = false;
+    m_retractOnConfirmed = false;
+    m_retractOffConfirmed = false;
+    m_resetCommandConfirmed = false;
+    m_uncertainWrite.reset();
+    m_safetyRecoveryContextValid = false;
+    m_conservativeRecoveryActive = false;
+}
+
+void ChargePileController::emitApplicationShutdownFinishedOnce(
+    const bool safe, const QString &message)
+{
+    if (!m_applicationShutdownRequested
+        || m_applicationShutdownFinishedEmitted) {
+        return;
+    }
+    m_applicationShutdownFinishedEmitted = true;
+    emit applicationShutdownFinished(safe, message);
 }
 
 void ChargePileController::beginParameterWrites()
@@ -989,6 +1054,13 @@ void ChargePileController::beginSafeShutdown()
              QStringLiteral("步骤5/5：发送停止命令，开始统一安全收尾。"));
     enqueueWriteCoil(ChargePileProtocol::kCoilStop, true, [this] {
         m_stopCommandConfirmed = true;
+        // 已确认的 Stop 是未知 Start 的安全反向命令；后续恢复应从“等待无输出”
+        // 继续，不能再保留旧 Start 身份而重复发送 Stop。
+        if (m_uncertainWrite.has_value()
+            && m_uncertainWrite->function == kWriteSingleCoil
+            && m_uncertainWrite->address == ChargePileProtocol::kCoilStart) {
+            m_uncertainWrite.reset();
+        }
     });
     m_onQueueDrained = [this] {
         setState(State::WaitingForNoOutput,
@@ -1058,6 +1130,15 @@ void ChargePileController::pollWaitingForRetracted()
             // 先写 OFF，再复位，避免把可能为电平保持的线圈长期置位。
             enqueueWriteCoil(ChargePileProtocol::kCoilRetract, false, [this] {
                 m_retractOffConfirmed = true;
+                // OFF 的正常回显同时解决此前“不确定的缩回 ON”；安全上下文
+                // 由此推进到“线圈已释放”，下一轮不得再次发送 ON/OFF。
+                if (m_uncertainWrite.has_value()
+                    && m_uncertainWrite->function == kWriteSingleCoil
+                    && m_uncertainWrite->address
+                           == ChargePileProtocol::kCoilRetract
+                    && m_uncertainWrite->value == 0xFF00) {
+                    m_uncertainWrite.reset();
+                }
             });
             m_onQueueDrained = [this] { sendResetAndFinalCheck(); };
             beginNextRequest();
@@ -1082,6 +1163,9 @@ void ChargePileController::sendResetAndFinalCheck()
     setState(State::Resetting, QStringLiteral("发送复位命令。"));
     enqueueWriteCoil(ChargePileProtocol::kCoilReset, true, [this] {
         m_resetCommandConfirmed = true;
+        // Reset 已确认代表此前停止、缩回和释放里程碑均已越过；旧的不确定
+        // 身份不再控制重发矩阵，后续仅允许最终完整只读确认。
+        m_uncertainWrite.reset();
     });
     m_onQueueDrained = [this] {
         beginFinalSafetyQuery();
@@ -1115,14 +1199,84 @@ void ChargePileController::beginFinalSafetyQuery()
 
 void ChargePileController::beginConservativeRecoveryAfterSnapshot()
 {
+    m_safeStopRequested = true;
+    // 保守矩阵已经接管安全推进。标记“收尾入口已建立”，防止最后一帧预检
+    // 的 handleReadyRead() 在本回调返回后再次调用普通 beginSafeShutdown()，
+    // 从而覆盖 Unknown Retract/Reset 分支并重复较晚阶段写命令。
+    m_safeShutdownStarted = true;
+
+    const auto uncertainCoilIs = [this](const quint16 address) {
+        return m_uncertainWrite.has_value()
+               && m_uncertainWrite->function == kWriteSingleCoil
+               && m_uncertainWrite->address == address;
+    };
+    const bool hasLaterMechanicalUncertainty =
+        uncertainCoilIs(ChargePileProtocol::kCoilRetract)
+        || uncertainCoilIs(ChargePileProtocol::kCoilReset);
+
+    // 每次新恢复先从持久化的最远安全里程碑继续。该顺序高于旧的不确定
+    // 写身份的前提是里程碑阶段不早于该身份。比如 Stop 已确认但缩回 ON
+    // 结果未知时，Unknown ON 属于更晚阶段，绝不能被较早的 Stop 覆盖。
+    if (m_resetCommandConfirmed) {
+        m_uncertainWrite.reset();
+        beginFinalSafetyQuery();
+        return;
+    }
+    if (m_retractOffConfirmed
+        && !uncertainCoilIs(ChargePileProtocol::kCoilReset)) {
+        m_uncertainWrite.reset();
+        sendResetAndFinalCheck();
+        return;
+    }
+    if (m_retractOnConfirmed
+        && !hasLaterMechanicalUncertainty) {
+        if (m_uncertainWrite.has_value()
+            && m_uncertainWrite->function == kWriteSingleCoil
+            && m_uncertainWrite->address == ChargePileProtocol::kCoilRetract
+            && m_uncertainWrite->value == 0x0000) {
+            finishConservativeRecoveryUnsafe(
+                QStringLiteral("缩回 OFF 结果不确定，位置到位不能证明线圈已经释放。"));
+            return;
+        }
+        if (m_uncertainWrite.has_value()
+            && m_uncertainWrite->function == kWriteSingleCoil
+            && (m_uncertainWrite->address == ChargePileProtocol::kCoilStart
+                || m_uncertainWrite->address == ChargePileProtocol::kCoilStop)) {
+            m_uncertainWrite.reset();
+        }
+        setState(State::WaitingForRetracted,
+                 QStringLiteral("缩回ON已确认，按最新快照继续等待到位，不重复发送。"));
+        m_phaseElapsedTimer.restart();
+        pollWaitingForRetracted();
+        return;
+    }
+    if (m_stopCommandConfirmed
+        && !hasLaterMechanicalUncertainty) {
+        if (m_uncertainWrite.has_value()
+            && m_uncertainWrite->function == kWriteSingleCoil
+            && m_uncertainWrite->address == ChargePileProtocol::kCoilStart) {
+            m_uncertainWrite.reset();
+        }
+        setState(State::WaitingForNoOutput,
+                 QStringLiteral("停止已确认，按最新快照继续无输出阶段，不重复发送。"));
+        m_phaseElapsedTimer.restart();
+        if (snapshotHasNoOutput())
+            sendRetractCommand();
+        else
+            pollWaitingForNoOutput();
+        return;
+    }
+
     if (!m_uncertainWrite.has_value()) {
+        m_safeShutdownStarted = false;
         beginSafeShutdown();
         return;
     }
 
-    const UncertainWrite uncertain = *m_uncertainWrite;
+    const ChargePileWriteIdentity uncertain = *m_uncertainWrite;
     if (uncertain.function == 0x06) {
         // 参数寄存器写结果不确定时，保守恢复不再写任何参数，只执行停止链。
+        m_safeShutdownStarted = false;
         beginSafeShutdown();
         return;
     }
@@ -1134,6 +1288,7 @@ void ChargePileController::beginConservativeRecoveryAfterSnapshot()
 
     if (uncertain.address == ChargePileProtocol::kCoilStart) {
         // Start 结果不确定时只能发送语义相反的 Stop，绝不能再次发送 Start。
+        m_safeShutdownStarted = false;
         beginSafeShutdown();
         return;
     }
@@ -1144,6 +1299,7 @@ void ChargePileController::beginConservativeRecoveryAfterSnapshot()
             return;
         }
         m_stopCommandConfirmed = true;
+        m_uncertainWrite.reset();
         setState(State::WaitingForNoOutput,
                  QStringLiteral("停止结果不确定，但完整查询已确认无输出，继续缩回。"));
         sendRetractCommand();
@@ -1156,6 +1312,13 @@ void ChargePileController::beginConservativeRecoveryAfterSnapshot()
             m_retractOnConfirmed = true;
             enqueueWriteCoil(ChargePileProtocol::kCoilRetract, false, [this] {
                 m_retractOffConfirmed = true;
+                if (m_uncertainWrite.has_value()
+                    && m_uncertainWrite->function == kWriteSingleCoil
+                    && m_uncertainWrite->address
+                           == ChargePileProtocol::kCoilRetract
+                    && m_uncertainWrite->value == 0xFF00) {
+                    m_uncertainWrite.reset();
+                }
             });
             m_onQueueDrained = [this] { sendResetAndFinalCheck(); };
             beginNextRequest();
@@ -1298,6 +1461,12 @@ void ChargePileController::releaseRetractAfterFailure(const QString &reason)
              QStringLiteral("缩回阶段异常，先释放缩回线圈OFF，禁止复位。"));
     enqueueWriteCoil(ChargePileProtocol::kCoilRetract, false, [this] {
         m_retractOffConfirmed = true;
+        if (m_uncertainWrite.has_value()
+            && m_uncertainWrite->function == kWriteSingleCoil
+            && m_uncertainWrite->address == ChargePileProtocol::kCoilRetract
+            && m_uncertainWrite->value == 0xFF00) {
+            m_uncertainWrite.reset();
+        }
     });
     m_onQueueDrained = [this] {
         const QString terminalReason = m_terminalFailureAfterRetractOff;
@@ -1433,6 +1602,7 @@ void ChargePileController::invalidateCommunicationContext(const QString &reason)
     m_lastSendTimer.invalidate();
     m_snapshot = ChargePileSnapshot{};
     m_queryInProgress = false;
+    m_conservativeRecoveryActive = false;
     m_unknownGate = true;
     setState(State::Unknown, reason);
     m_flowMode = FlowMode::None;
@@ -1443,7 +1613,7 @@ void ChargePileController::invalidateCommunicationContext(const QString &reason)
     else if (oldFlow == FlowMode::Charge)
         emit chargeSessionFinished(false, oldOrigin, reason);
     if (notifyApplication)
-        emit applicationShutdownFinished(false, reason);
+        emitApplicationShutdownFinishedOnce(false, reason);
 }
 
 bool ChargePileController::communicationTargetChanged(

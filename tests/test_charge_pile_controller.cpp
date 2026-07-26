@@ -77,6 +77,14 @@ public:
     {
         m_suppressAllStatusResponsesAfterStart = true;
     }
+    void suppressAllStatusResponsesAfterStop(const bool enabled)
+    {
+        m_suppressAllStatusResponsesAfterStop = enabled;
+    }
+    void suppressAllStatusResponsesAfterReset(const bool enabled)
+    {
+        m_suppressAllStatusResponsesAfterReset = enabled;
+    }
     void disconnectNextStatusAfterStop() { m_disconnectAfterStop = true; }
     void disconnectNextStatusAfterRetractOn() { m_disconnectAfterRetractOn = true; }
     void disconnectNextStatusAfterReset() { m_disconnectAfterReset = true; }
@@ -415,6 +423,12 @@ private:
             const bool isFirstStatusFrameAfterStart =
                 quint8(request.at(1)) == quint8(0x04)
                 && requestAddress(request) == kRegOutVoltage && m_started;
+            if (isFirstStatusFrameAfterStart
+                && ((m_suppressAllStatusResponsesAfterStop && m_stopped)
+                    || (m_suppressAllStatusResponsesAfterReset
+                        && m_resetConfirmed))) {
+                continue;
+            }
             if (isFirstStatusFrameAfterStart && m_suppressAllStatusResponsesAfterStart) {
                 // 所有恢复连接仍保持TCP可达，但首组完整状态永远不回应，用于证明
                 // 控制器按有限预算退出，且不会重发已唯一确认的启动或停止命令。
@@ -490,6 +504,8 @@ private:
     bool m_exceptionStatusAfterStart = false;
     bool m_timeoutStatusAfterStart = false;
     bool m_suppressAllStatusResponsesAfterStart = false;
+    bool m_suppressAllStatusResponsesAfterStop = false;
+    bool m_suppressAllStatusResponsesAfterReset = false;
     bool m_disconnectAfterStop = false;
     bool m_disconnectAfterRetractOn = false;
     bool m_disconnectAfterReset = false;
@@ -1125,6 +1141,195 @@ private slots:
             if (uncertainCoil == kCoilRetract)
                 QCOMPARE(pile.coilOffCount(kCoilRetract), 1);
         }
+    }
+
+    void recoveryMilestonesSurviveAcrossMultipleRecoveryAttempts()
+    {
+        {
+            FakeChargePile pile;
+            QVERIFY(pile.listen());
+            pile.enableChargeScenario();
+            pile.dropFirstEchoForCoil(kCoilStart);
+            ChargePileController controller;
+            ChargeSettings settings = loopbackSettings(pile);
+            controller.applySettings(settings);
+            QSignalSpy finished(&controller,
+                                &ChargePileController::chargeSessionFinished);
+            QString error;
+            QVERIFY(controller.startCharge(
+                ChargePileController::SessionOrigin::Automatic, &error));
+            QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 6000);
+
+            pile.suppressAllStatusResponsesAfterStop(true);
+            QVERIFY(controller.requestConservativeRecovery(
+                ChargePileController::SessionOrigin::Automatic,
+                ChargePileController::StopReason::Fault, &error));
+            QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 2, 8000);
+            QVERIFY(!finished.last().at(0).toBool());
+            QCOMPARE(pile.coilCount(kCoilStop), 1);
+
+            pile.suppressAllStatusResponsesAfterStop(false);
+            QVERIFY(controller.requestConservativeRecovery(
+                ChargePileController::SessionOrigin::Automatic,
+                ChargePileController::StopReason::Fault, &error));
+            QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 3, 10000);
+            QVERIFY(finished.last().at(0).toBool());
+            QCOMPARE(pile.coilCount(kCoilStart), 1);
+            QCOMPARE(pile.coilCount(kCoilStop), 1);
+        }
+
+        {
+            FakeChargePile pile;
+            QVERIFY(pile.listen());
+            pile.enableChargeScenario();
+            pile.dropFirstEchoForCoil(kCoilRetract);
+            ChargePileController controller;
+            ChargeSettings settings = loopbackSettings(pile);
+            controller.applySettings(settings);
+            QSignalSpy finished(&controller,
+                                &ChargePileController::chargeSessionFinished);
+            QString error;
+            QVERIFY(controller.startCharge(
+                ChargePileController::SessionOrigin::Automatic, &error));
+            QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 1, 10000);
+
+            pile.suppressAllStatusResponsesAfterReset(true);
+            QVERIFY(controller.requestConservativeRecovery(
+                ChargePileController::SessionOrigin::Automatic,
+                ChargePileController::StopReason::Fault, &error));
+            QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 2, 10000);
+            QVERIFY(!finished.last().at(0).toBool());
+            const int retractOnCount = pile.coilCount(kCoilRetract);
+            const int retractOffCount = pile.coilOffCount(kCoilRetract);
+            const int resetCount = pile.coilCount(kCoilReset);
+
+            pile.suppressAllStatusResponsesAfterReset(false);
+            QVERIFY(controller.requestConservativeRecovery(
+                ChargePileController::SessionOrigin::Automatic,
+                ChargePileController::StopReason::Fault, &error));
+            QTRY_COMPARE_WITH_TIMEOUT(finished.count(), 3, 10000);
+            QVERIFY(finished.last().at(0).toBool());
+            QCOMPARE(pile.coilCount(kCoilRetract), retractOnCount);
+            QCOMPARE(pile.coilOffCount(kCoilRetract), retractOffCount);
+            QCOMPARE(pile.coilCount(kCoilReset), resetCount);
+        }
+    }
+
+    void applicationShutdownUsesPersistentRecoveryContextWithoutRepeatingUnknownWrite()
+    {
+        const auto runUnknownCoil = [](const quint16 uncertainCoil) {
+            FakeChargePile pile;
+            QVERIFY(pile.listen());
+            pile.enableChargeScenario();
+            pile.dropFirstEchoForCoil(uncertainCoil);
+            ChargePileController controller;
+            controller.applySettings(loopbackSettings(pile));
+            QSignalSpy chargeFinished(
+                &controller, &ChargePileController::chargeSessionFinished);
+            QSignalSpy shutdownFinished(
+                &controller, &ChargePileController::applicationShutdownFinished);
+            QString error;
+            QVERIFY(controller.startCharge(
+                ChargePileController::SessionOrigin::Automatic, &error));
+            if (uncertainCoil == kCoilStop) {
+                connect(&controller, &ChargePileController::stateChanged,
+                        &controller,
+                        [&controller](ChargePileController::State state,
+                                      const QString &) {
+                    if (state == ChargePileController::State::Monitoring)
+                        controller.requestSafeStop(
+                            ChargePileController::StopReason::Fault);
+                });
+            }
+            QTRY_COMPARE_WITH_TIMEOUT(chargeFinished.count(), 1, 12000);
+            const int before = uncertainCoil == kCoilRetract
+                                   ? pile.coilOffCount(uncertainCoil)
+                                   : pile.coilCount(uncertainCoil);
+            controller.requestApplicationShutdown();
+            QTRY_COMPARE_WITH_TIMEOUT(shutdownFinished.count(), 1, 12000);
+            const int after = uncertainCoil == kCoilRetract
+                                  ? pile.coilOffCount(uncertainCoil)
+                                  : pile.coilCount(uncertainCoil);
+            QCOMPARE(after, before);
+            QCOMPARE(shutdownFinished.count(), 1);
+        };
+
+        runUnknownCoil(kCoilStop);
+
+        // OFF 不确定使用已有 E12 路径产生；位置到位不能证明线圈已释放，关闭也不得重发。
+        {
+            FakeChargePile pile;
+            QVERIFY(pile.listen());
+            pile.enableChargeScenario();
+            pile.setFaultAfterRetract(0x0800);
+            pile.dropFirstOffEchoForCoil(kCoilRetract);
+            ChargePileController controller;
+            controller.applySettings(loopbackSettings(pile));
+            QSignalSpy chargeFinished(
+                &controller, &ChargePileController::chargeSessionFinished);
+            QSignalSpy shutdownFinished(
+                &controller, &ChargePileController::applicationShutdownFinished);
+            QString error;
+            QVERIFY(controller.startCharge(
+                ChargePileController::SessionOrigin::Automatic, &error));
+            QTRY_COMPARE_WITH_TIMEOUT(chargeFinished.count(), 1, 12000);
+            const int offCount = pile.coilOffCount(kCoilRetract);
+            controller.requestApplicationShutdown();
+            QTRY_COMPARE_WITH_TIMEOUT(shutdownFinished.count(), 1, 12000);
+            QCOMPARE(pile.coilOffCount(kCoilRetract), offCount);
+            QCOMPARE(shutdownFinished.count(), 1);
+        }
+
+        runUnknownCoil(kCoilReset);
+
+        // 保守恢复的五组预检已经在途时，程序关闭只能升级原因和完成通知。
+        // 若旁路到普通 requestSafeStop()，结果未知的 Stop 会被立即重复发送。
+        {
+            FakeChargePile pile;
+            QVERIFY(pile.listen());
+            pile.enableChargeScenario();
+            pile.dropFirstEchoForCoil(kCoilStop);
+            ChargePileController controller;
+            controller.applySettings(loopbackSettings(pile));
+            connect(&controller, &ChargePileController::stateChanged,
+                    &controller,
+                    [&controller](ChargePileController::State state,
+                                  const QString &) {
+                if (state == ChargePileController::State::Monitoring) {
+                    controller.requestSafeStop(
+                        ChargePileController::StopReason::Fault);
+                }
+            });
+            QSignalSpy chargeFinished(
+                &controller, &ChargePileController::chargeSessionFinished);
+            QSignalSpy shutdownFinished(
+                &controller, &ChargePileController::applicationShutdownFinished);
+            QString error;
+            QVERIFY(controller.startCharge(
+                ChargePileController::SessionOrigin::Automatic, &error));
+            QTRY_COMPARE_WITH_TIMEOUT(chargeFinished.count(), 1, 12000);
+            QCOMPARE(pile.coilCount(kCoilStop), 1);
+
+            QVERIFY(controller.requestConservativeRecovery(
+                ChargePileController::SessionOrigin::Automatic,
+                ChargePileController::StopReason::Fault, &error));
+            controller.requestApplicationShutdown();
+            QTRY_COMPARE_WITH_TIMEOUT(shutdownFinished.count(), 1, 12000);
+            QCOMPARE(pile.coilCount(kCoilStop), 1);
+            QCOMPARE(shutdownFinished.count(), 1);
+        }
+    }
+
+    void writeIdentityIsAvailableBeforeSocketWriteResult()
+    {
+        const QByteArray frame =
+            ChargePileProtocol::buildWriteCoilRequest(1, kCoilStop, true);
+        const std::optional<ChargePileWriteIdentity> identity =
+            chargePileWriteIdentity(QByteArrayView(frame));
+        QVERIFY(identity.has_value());
+        QCOMPARE(identity->function, quint8(0x05));
+        QCOMPARE(identity->address, kCoilStop);
+        QCOMPARE(identity->value, quint16(0xFF00));
     }
 
     void mismatchedStartEchoAlsoEntersUnknownGate()

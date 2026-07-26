@@ -3,6 +3,7 @@
 #include "chargesettings.h"
 
 #include <QDateTime>
+#include <QByteArrayView>
 #include <QElapsedTimer>
 #include <QMetaType>
 #include <QObject>
@@ -35,6 +36,27 @@ struct ChargePileSnapshot
 };
 
 Q_DECLARE_METATYPE(ChargePileSnapshot)
+
+/**
+ * @brief 单条 Modbus 写请求中与安全恢复有关的稳定身份。
+ *
+ * 控制器在调用 QTcpSocket::write() 前就解析并保存该身份。这样即使套接字返回
+ * 短写或 -1，也能明确记录“哪一条写命令的执行结果无法证明”，而不会因请求仍
+ * 停留在 pending 阶段而丢失地址和值。
+ */
+struct ChargePileWriteIdentity
+{
+    quint8 function = 0;
+    quint16 address = 0;
+    quint16 value = 0;
+};
+
+/**
+ * @brief 从 0x05/0x06 RTU 写请求中解析功能码、地址和值。
+ * @return 非写请求或帧长度不足时返回 std::nullopt。
+ */
+std::optional<ChargePileWriteIdentity>
+chargePileWriteIdentity(QByteArrayView frame);
 
 /**
  * @brief 充电桩通信与后续充电流程共用的唯一控制器。
@@ -204,13 +226,6 @@ private:
         RetryFinalSafetyQuery
     };
 
-    /** 最近一条结果不确定的写命令；保守恢复据此禁止盲目重发相同地址和值。 */
-    struct UncertainWrite {
-        quint8 function = 0;
-        quint16 address = 0;
-        quint16 value = 0;
-    };
-
     void enqueueRead(quint8 function, quint16 address, quint16 count,
                      std::function<void(const QByteArray &response)> onSuccess);
     void enqueueInputRead(quint16 address, quint16 count,
@@ -246,8 +261,13 @@ private:
     void pollWaitingForRetracted();
     void sendResetAndFinalCheck();
     void beginFinalSafetyQuery();
+    bool beginConservativeRecovery(SessionOrigin origin, StopReason reason,
+                                   bool notifyApplication, QString *error);
     void beginConservativeRecoveryAfterSnapshot();
     void finishConservativeRecoveryUnsafe(const QString &reason);
+    void clearSafetyRecoveryContext();
+    void emitApplicationShutdownFinishedOnce(bool safe,
+                                             const QString &message);
     void handleReadFailure(const QString &reason);
     void beginCommunicationRecovery(RecoveryAction action, const QString &reason);
     void startRecoveryConnection();
@@ -287,8 +307,9 @@ private:
      */
     std::optional<Request> m_pendingRequest;
     /**
-     * 仅在完整 RTU 帧成功交给 QTcpSocket 后设置的唯一在途请求。
+     * 在调用 QTcpSocket::write() 前即设置的唯一在途请求。
      * 接收路径只能使用该对象校验并解析响应，避免迟到旧帧推进下一读取。
+     * 若 write() 短写或失败，该对象还负责向故障路径提供准确的写命令身份。
      */
     std::optional<Request> m_inFlightRequest;
     QElapsedTimer m_lastSendTimer;
@@ -306,18 +327,26 @@ private:
     bool m_safeStopRequested = false;
     bool m_safeShutdownStarted = false;
     bool m_applicationShutdownRequested = false;
+    bool m_applicationShutdownFinishedEmitted = false;
     bool m_sessionFinishedEmitted = false;
     bool m_startCommandConfirmed = false;
     bool m_stopCommandConfirmed = false;
     bool m_retractOnConfirmed = false;
     bool m_retractOffConfirmed = false;
     bool m_resetCommandConfirmed = false;
+    /**
+     * 安全恢复上下文从正常充电会话开始持续到最终完整快照确认安全。
+     * 一次恢复通信失败不会清空它，下一次恢复必须从已确认的最远里程碑继续。
+     */
+    bool m_safetyRecoveryContextValid = false;
+    /** 当前活动 Charge 流是否为“先完整只读、再按上下文恢复”的保守恢复。 */
+    bool m_conservativeRecoveryActive = false;
     bool m_unknownGate = false;
     RecoveryAction m_recoveryAction = RecoveryAction::None;
     int m_recoveryAttempts = 0;
     QString m_recoveryReason;
     QString m_terminalFailureAfterRetractOff;
-    std::optional<UncertainWrite> m_uncertainWrite;
+    std::optional<ChargePileWriteIdentity> m_uncertainWrite;
     quint16 m_expectedVoltageRaw = 0;
     quint16 m_expectedCurrentRaw = 0;
     std::optional<quint16> m_expectedCutoffRaw;

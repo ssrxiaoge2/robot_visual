@@ -39,6 +39,8 @@ private slots:
     void identicalInputsDoNotRetryRejectedStartUntilRelevantChange();
     void errorEdgeStaysLatchedThroughoutOneRecoveryCycle();
     void runningTaskLowBatteryRequirementSurvivesMeasurementRecovery();
+    void idleLowBatteryReturnRequirementSurvivesMeasurementRecovery();
+    void disablingWithoutOwnedSessionStartsANewErrorCycle();
 };
 
 void AutoChargeCoordinatorTest::disabledModeIsExactPassThrough()
@@ -498,6 +500,63 @@ void AutoChargeCoordinatorTest::runningTaskLowBatteryRequirementSurvivesMeasurem
     monitor.navStatus = static_cast<quint16>(AgvController::NavStatus::Arrived);
     coordinator.onAgvMonitorUpdated(monitor);
     QCOMPARE(startSpy.count(), 1);
+}
+
+void AutoChargeCoordinatorTest::idleLowBatteryReturnRequirementSurvivesMeasurementRecovery()
+{
+    AutoChargeCoordinator coordinator;
+    QSignalSpy holdSpy(&coordinator,
+                       &AutoChargeCoordinator::dispatchHoldRequested);
+    QSignalSpy returnSpy(&coordinator,
+                         &AutoChargeCoordinator::returnHomeRequested);
+    QSignalSpy startSpy(&coordinator,
+                        &AutoChargeCoordinator::automaticChargeStartRequested);
+    coordinator.setEnabled(true);
+    coordinator.onLineStateChanged(LineSystemState::Running,
+                                   QStringLiteral("主调度空闲运行"));
+
+    AgvMonitorData monitor;
+    monitor.battery = 14;
+    monitor.curStation = 9;
+    monitor.navStatus = static_cast<quint16>(AgvController::NavStatus::None);
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(holdSpy.last().at(0).toBool(), true);
+    QCOMPARE(returnSpy.count(), 1);
+
+    monitor.battery = 16;
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(holdSpy.last().at(0).toBool(), true);
+    QCOMPARE(returnSpy.count(), 1);
+
+    monitor.curStation = 1;
+    monitor.navStatus = static_cast<quint16>(AgvController::NavStatus::Arrived);
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(startSpy.count(), 1);
+}
+
+void AutoChargeCoordinatorTest::disablingWithoutOwnedSessionStartsANewErrorCycle()
+{
+    AutoChargeCoordinator coordinator;
+    QSignalSpy errorSpy(&coordinator,
+                        &AutoChargeCoordinator::lineErrorRequested);
+    QSignalSpy holdSpy(&coordinator,
+                       &AutoChargeCoordinator::dispatchHoldRequested);
+    coordinator.setEnabled(true);
+    coordinator.onLineStateChanged(LineSystemState::Running,
+                                   QStringLiteral("主调度运行"));
+    AgvMonitorData monitor;
+    monitor.battery = 50;
+    monitor.curStation = 1;
+    coordinator.onAgvMonitorUpdated(monitor);
+    coordinator.onChargeControllerStateChanged(
+        ChargePileController::State::Unknown, QStringLiteral("第一轮未知"));
+    QCOMPARE(errorSpy.count(), 1);
+
+    coordinator.setEnabled(false);
+    QCOMPARE(errorSpy.count(), 1);
+    QCOMPARE(holdSpy.last().at(0).toBool(), false);
+    coordinator.setEnabled(true);
+    QCOMPARE(errorSpy.count(), 2);
 }
 
 QTEST_MAIN(AutoChargeCoordinatorTest)

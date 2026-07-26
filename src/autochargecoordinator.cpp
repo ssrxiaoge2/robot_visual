@@ -215,8 +215,18 @@ void AutoChargeCoordinator::setEnabled(const bool enabled)
     if (m_inputs.enabled != enabled) {
         m_inputs.enabled = enabled;
         m_startRejectedUntilInputChanges = false;
-        if (!enabled && !m_inputs.automaticSessionActive)
+        if (!enabled && !m_inputs.automaticSessionActive) {
             m_lowBatteryChargeRequired = false;
+            // 关闭且没有本协调器拥有的会话时，当前故障周期随功能开关结束。
+            // 重新开启后若控制器仍为 Unknown，必须允许新周期重新上报一次 Error；
+            // 同时清除不会触发设备写入的本地边沿锁存。活动会话不走此分支，
+            // 仍须由唯一控制器完成安全收尾。
+            m_lineErrorIssued = false;
+            m_criticalAlarmIssued = false;
+            m_stopIntentIssued = false;
+            m_conservativeRecoveryIntentIssued = false;
+            m_returnIntentIssued = false;
+        }
         emit logMessage(enabled ? QStringLiteral("自动充电模式已开启")
                                 : QStringLiteral("自动充电模式已关闭"));
     }
@@ -385,8 +395,11 @@ void AutoChargeCoordinator::evaluate()
 {
     if (m_inputs.enabled && !m_inputs.automaticSessionActive
         && lineAllowsAutomaticPolicy(m_inputs.lineState)
-        && m_inputs.hasAgvMonitor && m_inputs.currentTaskRunning
+        && m_inputs.hasAgvMonitor
         && m_inputs.agv.battery < m_settings.startChargePercent) {
+        // 低电需求属于“本轮必须回 LM1 并启动充电”的业务事实，不只来自任务
+        // 执行中。空闲时首次检测到 14% 后，即使返航期间测量回升到 15/16%，
+        // 也必须保持派单和返航意图，直到真正启动并安全结束或功能被关闭。
         m_lowBatteryChargeRequired = true;
     }
     if (!m_inputs.enabled && !m_inputs.automaticSessionActive)
