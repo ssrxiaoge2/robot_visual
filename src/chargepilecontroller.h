@@ -72,8 +72,9 @@ public:
     /**
      * @brief 应用已经校验过的通信与安全阈值设置。
      *
-     * 查询在途时拒绝替换设置，避免同一 RTU 会话把后续帧发往不同设备。
-     * 输入未通过 validateChargeSettings() 时保持旧配置，并通过日志信号说明原因。
+     * host、port 或 slaveId 变化时会取消旧查询、断开旧连接并使旧快照失效，
+     * 防止后续帧落到错误设备；电压、电流和超时等非通信目标参数可热更新，
+     * 保留同一 TCP 连接。输入未通过 validateChargeSettings() 时保持旧配置。
      */
     void applySettings(const ChargeSettings &settings);
 

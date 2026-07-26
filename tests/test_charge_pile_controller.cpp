@@ -35,9 +35,13 @@ public:
     quint16 port() const { return m_server.serverPort(); }
     QList<QByteArray> requests() const { return m_requests; }
     QList<qint64> requestTimesMs() const { return m_requestTimesMs; }
+    int connectionCount() const { return m_connectionCount; }
 
     /** 关闭响应可让真实控制器走到响应超时和断开连接分支。 */
     void setRespondToRequests(const bool enabled) { m_respondToRequests = enabled; }
+
+    /** 设置返回帧站号，用于验证控制器切换 Modbus 从站后会按新站号重新查询。 */
+    void setResponseSlaveId(const quint8 slaveId) { m_responseSlaveId = slaveId; }
 
     /**
      * @brief 设置五组状态读回的原始寄存器值。
@@ -79,10 +83,10 @@ private:
         return payload;
     }
 
-    static QByteArray readResponse(const QByteArray &payload)
+    static QByteArray readResponse(const quint8 slaveId, const QByteArray &payload)
     {
         QByteArray response;
-        response.append(char(1));
+        response.append(char(slaveId));
         response.append(char(0x04));
         response.append(char(payload.size()));
         response.append(payload);
@@ -98,15 +102,15 @@ private:
                               | quint8(request.at(3));
         switch (address) {
         case kRegOutVoltage:
-            return readResponse(wordPayload(m_voltageTenths, m_currentTenths));
+            return readResponse(m_responseSlaveId, wordPayload(m_voltageTenths, m_currentTenths));
         case kRegInputSignals:
-            return readResponse(wordPayload(0, m_inputWord).right(2));
+            return readResponse(m_responseSlaveId, wordPayload(0, m_inputWord).right(2));
         case kRegOutputSignals:
-            return readResponse(wordPayload(0, m_outputWord).right(2));
+            return readResponse(m_responseSlaveId, wordPayload(0, m_outputWord).right(2));
         case kRegEvent:
-            return readResponse(wordPayload(0, m_eventWord).right(2));
+            return readResponse(m_responseSlaveId, wordPayload(0, m_eventWord).right(2));
         case kRegError:
-            return readResponse(wordPayload(0, m_faultWord).right(2));
+            return readResponse(m_responseSlaveId, wordPayload(0, m_faultWord).right(2));
         default:
             return {};
         }
@@ -116,6 +120,7 @@ private:
     {
         m_client = m_server.nextPendingConnection();
         QVERIFY(m_client != nullptr);
+        ++m_connectionCount;
         m_client->setParent(this);
         connect(m_client, &QTcpSocket::readyRead, this, &FakeChargePile::consumeRequests);
         connect(m_client, &QTcpSocket::disconnected, this, [this] { m_client = nullptr; });
@@ -174,6 +179,8 @@ private:
     quint16 m_eventWord = 0x0020;
     quint16 m_faultWord = 0x0080;
     int m_duplicateResponseAfterRequest = -1;
+    int m_connectionCount = 0;
+    quint8 m_responseSlaveId = 1;
 };
 
 class ChargePileControllerTest : public QObject
@@ -366,6 +373,89 @@ private slots:
         QVERIFY(controller.snapshot().extended);
         QVERIFY(controller.snapshot().retracted);
         QVERIFY(controller.shutdownRequired());
+    }
+
+    void changingHostInvalidatesSnapshotAndNeverQueriesOldService()
+    {
+        // 若 host 变化未被当作通信目标变化，第二轮查询会复用旧连接并继续到达 oldPile。
+        FakeChargePile oldPile;
+        QVERIFY(oldPile.listen());
+        oldPile.setStatusWords(0, 0, 0x0008, 0x0000, 0, 0x0080);
+
+        ChargePileController controller;
+        controller.applySettings(loopbackSettings(oldPile));
+        QSignalSpy firstFinishedSpy(&controller, &ChargePileController::queryFinished);
+        controller.queryStatus();
+        QTRY_COMPARE_WITH_TIMEOUT(firstFinishedSpy.count(), 1, 1500);
+        QVERIFY(!controller.shutdownRequired());
+
+        ChargeSettings changedHost = loopbackSettings(oldPile);
+        changedHost.host = QStringLiteral("127.0.0.2");
+        controller.applySettings(changedHost);
+        QVERIFY(controller.shutdownRequired());
+        QVERIFY(!controller.snapshot().sampledAt.isValid());
+
+        QSignalSpy secondFinishedSpy(&controller, &ChargePileController::queryFinished);
+        controller.queryStatus();
+        QTRY_COMPARE_WITH_TIMEOUT(secondFinishedSpy.count(), 1, 1500);
+        QVERIFY(!secondFinishedSpy.at(0).at(0).toBool());
+        QCOMPARE(oldPile.requests().size(), 5);
+    }
+
+    void changingSlaveIdInvalidatesSnapshotAndUsesNewStationId()
+    {
+        // 若 slaveId 变化未使连接上下文失效，第二轮 RTU 请求首字节仍会错误保留为 1。
+        FakeChargePile pile;
+        QVERIFY(pile.listen());
+        pile.setStatusWords(0, 0, 0x0008, 0x0000, 0, 0x0080);
+
+        ChargePileController controller;
+        controller.applySettings(loopbackSettings(pile));
+        QSignalSpy firstFinishedSpy(&controller, &ChargePileController::queryFinished);
+        controller.queryStatus();
+        QTRY_COMPARE_WITH_TIMEOUT(firstFinishedSpy.count(), 1, 1500);
+        QVERIFY(!controller.shutdownRequired());
+
+        ChargeSettings changedSlave = loopbackSettings(pile);
+        changedSlave.slaveId = 2;
+        pile.setResponseSlaveId(2);
+        controller.applySettings(changedSlave);
+        QVERIFY(controller.shutdownRequired());
+        QVERIFY(!controller.snapshot().sampledAt.isValid());
+
+        QSignalSpy secondFinishedSpy(&controller, &ChargePileController::queryFinished);
+        controller.queryStatus();
+        QTRY_COMPARE_WITH_TIMEOUT(secondFinishedSpy.count(), 1, 1500);
+        QCOMPARE(secondFinishedSpy.at(0).at(0).toBool(), true);
+        QTRY_COMPARE_WITH_TIMEOUT(pile.requests().size(), 10, 1500);
+        QCOMPARE(quint8(pile.requests().at(5).at(0)), quint8(2));
+    }
+
+    void nonTargetSettingsUpdateKeepsExistingTcpConnection()
+    {
+        // 若仅更新电参或超时也断开连接，第二轮查询会让回环桩接受额外 TCP 连接。
+        FakeChargePile pile;
+        QVERIFY(pile.listen());
+
+        ChargePileController controller;
+        controller.applySettings(loopbackSettings(pile));
+        QSignalSpy firstFinishedSpy(&controller, &ChargePileController::queryFinished);
+        controller.queryStatus();
+        QTRY_COMPARE_WITH_TIMEOUT(firstFinishedSpy.count(), 1, 1500);
+        QCOMPARE(pile.connectionCount(), 1);
+
+        ChargeSettings hotUpdated = loopbackSettings(pile);
+        hotUpdated.voltageV = 60.0;
+        hotUpdated.currentA = 45.0;
+        hotUpdated.responseTimeoutMs = 200;
+        controller.applySettings(hotUpdated);
+
+        QSignalSpy secondFinishedSpy(&controller, &ChargePileController::queryFinished);
+        controller.queryStatus();
+        QTRY_COMPARE_WITH_TIMEOUT(secondFinishedSpy.count(), 1, 1500);
+        QCOMPARE(secondFinishedSpy.at(0).at(0).toBool(), true);
+        QCOMPARE(pile.connectionCount(), 1);
+        QCOMPARE(pile.requests().size(), 10);
     }
 };
 

@@ -7,8 +7,8 @@
 namespace {
 
 constexpr quint8 kReadInputRegisters = 0x04;
-// QTcpSocket::write() 返回时数据可能仍在 Qt 的发送缓冲；比现场规定多保留 20ms
-// 余量，确保以对端实际接收时刻度量时，相邻 RTU 请求也不会短于 50ms。
+// 在上一帧响应完整解析后再等待 70ms；这比现场规定的 50ms 更保守，且避免
+// QTcpSocket::write() 返回与 TCP 对端事件分发之间的调度差缩短观测到的间隔。
 constexpr int kMinimumRequestIntervalMs = 70;
 
 bool snapshotConfirmsSafe(const ChargePileSnapshot &snapshot, const ChargeSettings &settings)
@@ -265,6 +265,8 @@ void ChargePileController::handleReadyRead()
         failQuery(QStringLiteral("充电桩响应包含未关联的尾随数据，已保守中止查询。"));
         return;
     }
+    // 下一请求从完整响应处理结束起节流，确保 TCP 对端观测到的帧间隔同样不小于 50ms。
+    m_lastSendTimer.start();
     beginNextRequest();
 }
 
