@@ -3,6 +3,10 @@
 #include <QTemporaryDir>
 #include "chargesettings.h"
 
+#ifdef Q_OS_WIN
+#include <windows.h>
+#endif
+
 class ChargeSettingsTest : public QObject
 {
     Q_OBJECT
@@ -88,6 +92,59 @@ private slots:
         QCOMPARE(loaded.settings.cutoffCurrentA, std::optional<double>{2.5});
         QCOMPARE(loaded.settings.maxChargeSeconds, std::optional<int>{600});
         QVERIFY(!loaded.warnings.isEmpty());
+    }
+
+    void restoresOnlyInvalidThresholdGroupWithoutDiscardingOtherFields()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("charge.ini"));
+        QSettings ini(path, QSettings::IniFormat);
+        ini.setValue(QStringLiteral("connection/host"), QStringLiteral("10.10.10.10"));
+        ini.setValue(QStringLiteral("connection/port"), 7788);
+        ini.setValue(QStringLiteral("charge/voltageV"), 55.5);
+        ini.setValue(QStringLiteral("charge/currentA"), 42.0);
+        ini.setValue(QStringLiteral("timeout/responseTimeoutMs"), 1234);
+        ini.setValue(QStringLiteral("threshold/startChargePercent"), 40);
+        ini.setValue(QStringLiteral("threshold/dispatchReadyPercent"), 30);
+        ini.setValue(QStringLiteral("threshold/stopChargePercent"), 80);
+        ini.sync();
+
+        const ChargeSettingsLoadResult loaded = loadChargeSettings(path);
+        QCOMPARE(loaded.settings.host, QStringLiteral("10.10.10.10"));
+        QCOMPARE(loaded.settings.port, quint16{7788});
+        QCOMPARE(loaded.settings.voltageV, 55.5);
+        QCOMPARE(loaded.settings.currentA, 42.0);
+        QCOMPARE(loaded.settings.responseTimeoutMs, 1234);
+        QCOMPARE(loaded.settings.startChargePercent, 15);
+        QCOMPARE(loaded.settings.dispatchReadyPercent, 20);
+        QCOMPARE(loaded.settings.stopChargePercent, 80);
+        QVERIFY(!loaded.warnings.isEmpty());
+    }
+
+    void failedAtomicCommitPreservesExistingConfiguration()
+    {
+#ifndef Q_OS_WIN
+        QSKIP("该测试使用 Windows 独占文件锁验证原子替换失败路径。");
+#else
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("charge.ini"));
+        ChargeSettings original = ChargeSettings::defaults();
+        original.host = QStringLiteral("10.0.0.1");
+        QString error;
+        QVERIFY2(saveChargeSettings(path, original, &error), qPrintable(error));
+
+        const HANDLE lock = CreateFileW(reinterpret_cast<LPCWSTR>(path.utf16()), GENERIC_READ,
+                                        0, nullptr, OPEN_EXISTING, FILE_ATTRIBUTE_NORMAL, nullptr);
+        QVERIFY(lock != INVALID_HANDLE_VALUE);
+        ChargeSettings replacement = original;
+        replacement.host = QStringLiteral("10.0.0.2");
+        QVERIFY(!saveChargeSettings(path, replacement, &error));
+        CloseHandle(lock);
+
+        QCOMPARE(loadChargeSettings(path).settings.host, original.host);
+#endif
     }
 
     void neverPersistsAutomaticEnableState()

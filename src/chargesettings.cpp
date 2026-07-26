@@ -3,8 +3,9 @@
 #include <QDir>
 #include <QFile>
 #include <QFileInfo>
+#include <QSaveFile>
 #include <QSettings>
-#include <QStandardPaths>
+#include <QUuid>
 
 #include <cmath>
 
@@ -69,13 +70,6 @@ void appendWarning(QStringList &warnings, const char *key)
 {
     warnings.append(QStringLiteral("配置项“%1”非法，已恢复为默认值。")
                         .arg(QLatin1String(key)));
-}
-
-// 该函数保留 AppConfigLocation 的目录约定，后续 DeviceManager 可据此生成
-// 固定的 charge-settings.ini 路径；当前公共保存接口仍以调用方传入的路径为准。
-QString applicationConfigDirectory()
-{
-    return QStandardPaths::writableLocation(QStandardPaths::AppConfigLocation);
 }
 
 } // namespace
@@ -206,8 +200,12 @@ ChargeSettingsLoadResult loadChargeSettings(const QString &iniPath)
     }
 
     if (!validateChargeSettings(result.settings).ok) {
-        result.settings = defaults;
-        result.warnings.append(QStringLiteral("充电阈值组合不合法，已恢复为默认值。"));
+        // 所有独立字段已在上方逐项验证；剩余的失败只能是三个阈值的相互关系。
+        // 仅恢复这个约束组，不能因为电量阈值录入错误而丢失有效的网络、电气和超时配置。
+        result.settings.startChargePercent = defaults.startChargePercent;
+        result.settings.dispatchReadyPercent = defaults.dispatchReadyPercent;
+        result.settings.stopChargePercent = defaults.stopChargePercent;
+        result.warnings.append(QStringLiteral("充电阈值组合不合法，已恢复该阈值组的默认值。"));
     }
     return result;
 }
@@ -232,8 +230,14 @@ bool saveChargeSettings(const QString &iniPath, const ChargeSettings &settings, 
         if (error) *error = QStringLiteral("无法创建充电参数目录：%1").arg(directory);
         return false;
     }
-    const QString temporaryPath = iniPath + QStringLiteral(".tmp");
-    QFile::remove(temporaryPath);
+    // QSettings 不能直接写入 QSaveFile，因此先将其序列化到同目录的临时文件，
+    // 再把已验证的字节内容交给 QSaveFile 原子提交。临时文件与正式文件同目录，
+    // 可确保 commit 使用同一文件系统上的原子替换，而不会先删除旧配置。
+    // 使用 UUID 构成尚不存在的同目录文件名，避免 QTemporaryFile 在 Windows 上
+    // 保留的文件句柄干扰 QSettings 创建 INI 文件。
+    const QString temporaryPath = iniPath + QStringLiteral(".tmp.")
+                                  + QUuid::createUuid().toString(QUuid::WithoutBraces);
+    const auto removeTemporaryFile = [&temporaryPath]() { QFile::remove(temporaryPath); };
     {
         QSettings ini(temporaryPath, QSettings::IniFormat);
         ini.setValue(QLatin1String(kHost), settings.host.trimmed());
@@ -257,23 +261,34 @@ bool saveChargeSettings(const QString &iniPath, const ChargeSettings &settings, 
         ini.setValue(QLatin1String(kStopChargePercent), settings.stopChargePercent);
         ini.sync();
         if (ini.status() != QSettings::NoError) {
-            QFile::remove(temporaryPath);
+            removeTemporaryFile();
             if (error) *error = QStringLiteral("写入临时充电参数文件失败。");
             return false;
         }
     }
 
-    // Windows 下 QFile::rename 不会覆盖已有文件，因此先删除旧文件；临时文件仅在
-    // QSettings 已确认同步成功后才替换正式文件，避免把未写完的内容暴露给读取方。
-    if (QFile::exists(iniPath) && !QFile::remove(iniPath)) {
-        QFile::remove(temporaryPath);
-        if (error) *error = QStringLiteral("无法替换原有充电参数文件。");
+    QFile serializedFile(temporaryPath);
+    if (!serializedFile.open(QIODevice::ReadOnly)) {
+        removeTemporaryFile();
+        if (error) *error = QStringLiteral("无法读取临时充电参数文件。");
         return false;
     }
-    if (!QFile::rename(temporaryPath, iniPath)) {
-        if (error) *error = QStringLiteral("无法完成充电参数文件替换。");
+    const QByteArray serializedContent = serializedFile.readAll();
+    if (serializedFile.error() != QFile::NoError) {
+        serializedFile.close();
+        removeTemporaryFile();
+        if (error) *error = QStringLiteral("读取临时充电参数文件失败。");
         return false;
     }
-    Q_UNUSED(applicationConfigDirectory())
+    serializedFile.close();
+    removeTemporaryFile();
+
+    QSaveFile atomicFile(iniPath);
+    if (!atomicFile.open(QIODevice::WriteOnly)
+        || atomicFile.write(serializedContent) != serializedContent.size()
+        || !atomicFile.commit()) {
+        if (error) *error = QStringLiteral("原子提交充电参数文件失败，原有配置保持不变。");
+        return false;
+    }
     return true;
 }
