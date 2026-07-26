@@ -24,6 +24,8 @@ class HandEyeDialog;
 class HuayanScheduler;
 class PalletParamDialog;
 class PalletScheduler;
+class QCheckBox;
+class QSpinBox;
 
 QT_BEGIN_NAMESPACE
 namespace Ui { class MainWindow; }
@@ -99,6 +101,16 @@ private:
     void initPalletPanel(QVBoxLayout *leftPanel);
     void initHuayanPanel(QVBoxLayout *leftPanel);
     void initAgvPanel(QVBoxLayout *leftPanel);
+    /// 在 AGV 与华沿面板之间创建紧凑充电调试区，高级参数保持在独立对话框。
+    void initChargePanel(QVBoxLayout *leftPanel);
+    /// 用 DeviceManager 的已生效快照刷新全部充电文案，不从控件反推业务状态。
+    void updateChargePanel();
+    /// 统一根据调度、AGV、控制器和自动授权状态计算按钮及阈值可用性。
+    void updateChargeControls();
+    /// 将主面板三阈值与其余已生效参数组成完整候选，经事务入口保存并应用。
+    void applyChargeThresholdCandidate();
+    /// 打开独立通信/电气/超时设置窗口，保存失败时保留窗口和已生效参数。
+    void showChargeSettingsDialog();
     void loadStationMapToTable();
     void rebuildStationMapFromTable();
     void refreshResolvedLabel();
@@ -235,6 +247,26 @@ private:
     QLabel       *m_lblAgvBattery   = nullptr;
     QLabel       *m_lblAgvCtrl      = nullptr;
     bool          m_darkTheme       = true;
+
+    // ── 紧凑充电调试面板：只显示高频状态/阈值，通信等高级参数放独立窗口 ──
+    QCheckBox *m_autoChargeSwitch = nullptr; ///< 每次进程启动默认关闭，不参与参数持久化。
+    QLabel *m_chargeModeNotice = nullptr;    ///< 醒目显示自动授权及安全收尾状态。
+    QLabel *m_chargeDecisionLabel = nullptr; ///< 协调器最近一次自动决策说明。
+    QLabel *m_chargeBatteryLabel = nullptr;  ///< DeviceManager 完整 AGV 快照中的电量。
+    QLabel *m_chargeStationLabel = nullptr;  ///< 严格使用 AGV 当前站点，不使用导航目标。
+    QSpinBox *m_chargeStartPercentSpin = nullptr;
+    QSpinBox *m_chargeDispatchPercentSpin = nullptr;
+    QSpinBox *m_chargeStopPercentSpin = nullptr;
+    QLabel *m_chargeControllerStateLabel = nullptr;
+    QLabel *m_chargeElectricalLabel = nullptr;
+    QLabel *m_chargeActuatorLabel = nullptr;
+    QLabel *m_chargeFaultLabel = nullptr;
+    QPushButton *m_chargeSettingsButton = nullptr;
+    QPushButton *m_chargeQueryButton = nullptr;
+    QPushButton *m_chargeStartButton = nullptr;
+    QPushButton *m_chargeStopButton = nullptr;
+    QString m_chargeDecisionText =
+        QStringLiteral("自动充电未授权，主调度逻辑保持原样");
 
     // ── 主题开关 ─────────────────────────────────────────────
     ThemeSwitch    *m_themeSwitch = nullptr;

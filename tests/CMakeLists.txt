@@ -102,6 +102,26 @@ target_link_libraries(charge_settings_transaction_tests PRIVATE
 add_test(NAME charge_settings_transaction_tests
          COMMAND charge_settings_transaction_tests)
 
+add_executable(charge_pile_settings_dialog_tests
+    test_charge_pile_settings_dialog.cpp
+    ../src/chargepilesettingsdialog.cpp
+    ../src/chargesettings.cpp
+)
+
+target_include_directories(charge_pile_settings_dialog_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(charge_pile_settings_dialog_tests PRIVATE
+    Qt6::Core
+    Qt6::Gui
+    Qt6::Widgets
+    Qt6::Test
+)
+
+add_test(NAME charge_pile_settings_dialog_tests
+         COMMAND charge_pile_settings_dialog_tests)
+
 add_executable(vision_alignment_decision_tests
     test_vision_alignment_decision.cpp
     ../src/visionalignmentdecision.cpp

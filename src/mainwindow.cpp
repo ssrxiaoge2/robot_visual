@@ -24,10 +24,13 @@
 #include "mainwindow.h"
 #include "./ui_mainwindow.h"
 #include "camerawindow.h"
+#include "autochargecoordinator.h"
+#include "chargepilesettingsdialog.h"
 #include "customSysScheduler.h"
 #include "settingsdialog.h"
 
 #include <QAbstractItemView>
+#include <QCheckBox>
 #include <QDate>
 #include <QDir>
 #include <QFile>
@@ -42,7 +45,9 @@
 #include <QIntValidator>
 #include <QMessageBox>
 #include <QScrollArea>
+#include <QSignalBlocker>
 #include <QSizePolicy>
+#include <QSpinBox>
 #include <QTextStream>
 
 #include <algorithm>
@@ -71,6 +76,52 @@ QString fallbackLineStateText(LineSystemState state)
         return QStringLiteral("系统报警");
     }
     return QStringLiteral("未知状态");
+}
+
+QString chargeControllerStateText(ChargePileController::State state)
+{
+    switch (state) {
+    case ChargePileController::State::Idle: return QStringLiteral("空闲");
+    case ChargePileController::State::Connecting: return QStringLiteral("正在连接");
+    case ChargePileController::State::Prechecking: return QStringLiteral("安全预检");
+    case ChargePileController::State::WritingParameters: return QStringLiteral("写入参数");
+    case ChargePileController::State::ReadingBackParameters: return QStringLiteral("参数回读");
+    case ChargePileController::State::SendingStart: return QStringLiteral("发送启动");
+    case ChargePileController::State::WaitingForStart: return QStringLiteral("等待启动确认");
+    case ChargePileController::State::Monitoring: return QStringLiteral("充电监控");
+    case ChargePileController::State::SendingStop: return QStringLiteral("发送停止");
+    case ChargePileController::State::WaitingForNoOutput: return QStringLiteral("确认无输出");
+    case ChargePileController::State::Retracting: return QStringLiteral("推杆缩回");
+    case ChargePileController::State::WaitingForRetracted: return QStringLiteral("确认缩到位");
+    case ChargePileController::State::Resetting: return QStringLiteral("复位终检");
+    case ChargePileController::State::SafeComplete: return QStringLiteral("安全完成");
+    case ChargePileController::State::Fault: return QStringLiteral("故障");
+    case ChargePileController::State::Unknown: return QStringLiteral("状态未知");
+    }
+    return QStringLiteral("未知");
+}
+
+QString chargeActuatorText(const ChargePileSnapshot &snapshot)
+{
+    if (snapshot.extended && snapshot.retracted)
+        return QStringLiteral("信号矛盾（伸到位且缩到位）");
+    if (snapshot.extended)
+        return QStringLiteral("伸到位");
+    if (snapshot.retracted)
+        return QStringLiteral("缩到位");
+    return QStringLiteral("运动中或位置未知");
+}
+
+QString chargeFaultSummary(const ChargePileSnapshot &snapshot)
+{
+    if (!snapshot.sampledAt.isValid())
+        return QStringLiteral("尚无完整只读快照");
+    if (snapshot.eventWord == 0 && snapshot.faultWord == 0)
+        return QStringLiteral("无（事件 0x0000 / 故障 0x0000）");
+    return QStringLiteral("事件 0x%1 / 故障 0x%2")
+        .arg(snapshot.eventWord, 4, 16, QLatin1Char('0'))
+        .arg(snapshot.faultWord, 4, 16, QLatin1Char('0'))
+        .toUpper();
 }
 
 QString lineTaskPhaseText(const Task &task)
@@ -348,9 +399,13 @@ MainWindow::MainWindow(QWidget *parent)
     connect(m_devMgr, &DeviceManager::agvModbusConnected, this, [this]() {
         m_indAGV->setStatus(true, QStringLiteral("已连接"));
         log(QStringLiteral("[AGV] Modbus 连接成功 ✓"));
+        updateChargePanel();
+        updateChargeControls();
     });
     connect(m_devMgr, &DeviceManager::agvModbusDisconnected, this, [this]() {
         m_indAGV->setStatus(false, QStringLiteral("离线"));
+        updateChargePanel();
+        updateChargeControls();
     });
     connect(m_devMgr, &DeviceManager::agvModbusError,
             this, [this](const QString &msg) {
@@ -544,6 +599,7 @@ void MainWindow::initUI()
     initCustomSystemPanel(leftPanel); // 客户系统 REST API 通信测试
     initPalletPanel(leftPanel);   // 空箱码垛配置
     initAgvPanel(leftPanel);      // AGV 调试
+    initChargePanel(leftPanel);   // 充电调试（固定在 AGV 下、华沿上）
     initHuayanPanel(leftPanel);   // 华沿 SDK 调试
 
     leftPanel->addStretch(); // 底部弹性填充
@@ -1053,6 +1109,7 @@ void MainWindow::initPalletPanel(QVBoxLayout *leftPanel)
 void MainWindow::initAgvPanel(QVBoxLayout *leftPanel)
 {
     auto *gb   = new QGroupBox(QStringLiteral("AGV 调试"));
+    gb->setObjectName(QStringLiteral("agvDebugPanel"));
     auto *vbox = new QVBoxLayout(gb);
 
     // ── 派单行 ───────────────────────────────────────────────
@@ -1231,11 +1288,431 @@ void MainWindow::updateAgvMonitor(const AgvMonitorData &d)
         m_indAGV->setStatus(false, QStringLiteral("导航异常"));
     else
         m_indAGV->setStatus(true, QStringLiteral("已连接"));
+
+    updateChargePanel();
+    updateChargeControls();
+}
+
+/**
+ * @brief 创建紧凑“充电调试”面板。
+ *
+ * 主面板只保留现场高频观察项和四个动作按钮。IP、站号、电气细项、可选寄存器
+ * 与各阶段超时都进入独立 ChargePileSettingsDialog，避免扩大既有左栏宽度。
+ */
+void MainWindow::initChargePanel(QVBoxLayout *leftPanel)
+{
+    auto *group = new QGroupBox(QStringLiteral("充电调试"));
+    group->setObjectName(QStringLiteral("chargeDebugPanel"));
+    auto *layout = new QVBoxLayout(group);
+    layout->setSpacing(5);
+
+    auto *modeRow = new QHBoxLayout();
+    m_autoChargeSwitch = new QCheckBox(QStringLiteral("自动充电"), group);
+    m_autoChargeSwitch->setObjectName(QStringLiteral("autoChargeSwitch"));
+    // 自动授权刻意不读取配置文件；每次创建窗口都从关闭开始。
+    m_autoChargeSwitch->setChecked(false);
+    modeRow->addWidget(m_autoChargeSwitch);
+    modeRow->addStretch();
+    layout->addLayout(modeRow);
+
+    m_chargeModeNotice = new QLabel(group);
+    m_chargeModeNotice->setObjectName(QStringLiteral("chargeModeNotice"));
+    m_chargeModeNotice->setWordWrap(true);
+    layout->addWidget(m_chargeModeNotice);
+
+    m_chargeDecisionLabel = new QLabel(group);
+    m_chargeDecisionLabel->setObjectName(QStringLiteral("chargeDecisionLabel"));
+    m_chargeDecisionLabel->setWordWrap(true);
+    m_chargeDecisionLabel->setToolTip(QStringLiteral(
+        "自动模式只在主调度运行且低于阈值时参与决策；关闭时完全旁路原调度。"));
+    layout->addWidget(m_chargeDecisionLabel);
+
+    auto *agvGrid = new QGridLayout();
+    agvGrid->addWidget(new QLabel(QStringLiteral("AGV 电量："), group), 0, 0);
+    m_chargeBatteryLabel = new QLabel(QStringLiteral("--"), group);
+    m_chargeBatteryLabel->setObjectName(QStringLiteral("chargeBatteryLabel"));
+    agvGrid->addWidget(m_chargeBatteryLabel, 0, 1);
+    agvGrid->addWidget(new QLabel(QStringLiteral("当前位置："), group), 0, 2);
+    m_chargeStationLabel = new QLabel(QStringLiteral("--"), group);
+    m_chargeStationLabel->setObjectName(QStringLiteral("chargeStationLabel"));
+    agvGrid->addWidget(m_chargeStationLabel, 0, 3);
+    layout->addLayout(agvGrid);
+
+    auto *thresholdGrid = new QGridLayout();
+    m_chargeStartPercentSpin =
+        new QSpinBox(group);
+    m_chargeStartPercentSpin->setObjectName(
+        QStringLiteral("panelStartChargePercentSpin"));
+    m_chargeStartPercentSpin->setRange(11, 99);
+    m_chargeStartPercentSpin->setSuffix(QStringLiteral("%"));
+    m_chargeDispatchPercentSpin = new QSpinBox(group);
+    m_chargeDispatchPercentSpin->setObjectName(
+        QStringLiteral("panelDispatchReadyPercentSpin"));
+    m_chargeDispatchPercentSpin->setRange(11, 99);
+    m_chargeDispatchPercentSpin->setSuffix(QStringLiteral("%"));
+    m_chargeStopPercentSpin = new QSpinBox(group);
+    m_chargeStopPercentSpin->setObjectName(
+        QStringLiteral("panelStopChargePercentSpin"));
+    m_chargeStopPercentSpin->setRange(11, 100);
+    m_chargeStopPercentSpin->setSuffix(QStringLiteral("%"));
+
+    thresholdGrid->addWidget(new QLabel(QStringLiteral("启动："), group), 0, 0);
+    thresholdGrid->addWidget(m_chargeStartPercentSpin, 0, 1);
+    thresholdGrid->addWidget(new QLabel(QStringLiteral("接单："), group), 0, 2);
+    thresholdGrid->addWidget(m_chargeDispatchPercentSpin, 0, 3);
+    thresholdGrid->addWidget(new QLabel(QStringLiteral("正常停："), group), 1, 0);
+    thresholdGrid->addWidget(m_chargeStopPercentSpin, 1, 1);
+    auto *alarmHint = new QLabel(
+        QStringLiteral("固定安全边界：≤10% 为 Roboshop 充电报警值"), group);
+    alarmHint->setObjectName(QStringLiteral("chargeTenPercentSafetyHint"));
+    alarmHint->setWordWrap(true);
+    thresholdGrid->addWidget(alarmHint, 1, 2, 1, 2);
+    layout->addLayout(thresholdGrid);
+
+    auto *statusForm = new QFormLayout();
+    m_chargeControllerStateLabel = new QLabel(QStringLiteral("空闲"), group);
+    m_chargeControllerStateLabel->setObjectName(
+        QStringLiteral("chargeControllerStateLabel"));
+    m_chargeElectricalLabel = new QLabel(QStringLiteral("-- V / -- A"), group);
+    m_chargeElectricalLabel->setObjectName(
+        QStringLiteral("chargeElectricalLabel"));
+    m_chargeActuatorLabel = new QLabel(QStringLiteral("位置未知"), group);
+    m_chargeActuatorLabel->setObjectName(
+        QStringLiteral("chargeActuatorLabel"));
+    m_chargeFaultLabel = new QLabel(QStringLiteral("尚无完整只读快照"), group);
+    m_chargeFaultLabel->setObjectName(QStringLiteral("chargeFaultLabel"));
+    m_chargeFaultLabel->setWordWrap(true);
+    statusForm->addRow(QStringLiteral("充电阶段："), m_chargeControllerStateLabel);
+    statusForm->addRow(QStringLiteral("实际电压/电流："), m_chargeElectricalLabel);
+    statusForm->addRow(QStringLiteral("推杆："), m_chargeActuatorLabel);
+    statusForm->addRow(QStringLiteral("故障摘要："), m_chargeFaultLabel);
+    layout->addLayout(statusForm);
+
+    auto *buttonGrid = new QGridLayout();
+    m_chargeSettingsButton = new QPushButton(QStringLiteral("参数设置"), group);
+    m_chargeSettingsButton->setObjectName(
+        QStringLiteral("chargeSettingsButton"));
+    m_chargeQueryButton =
+        new QPushButton(QStringLiteral("查询状态（只读）"), group);
+    m_chargeQueryButton->setObjectName(QStringLiteral("chargeQueryButton"));
+    m_chargeStartButton = new QPushButton(QStringLiteral("开始充电"), group);
+    m_chargeStartButton->setObjectName(QStringLiteral("chargeStartButton"));
+    m_chargeStopButton = new QPushButton(QStringLiteral("停止充电"), group);
+    m_chargeStopButton->setObjectName(QStringLiteral("chargeStopButton"));
+    buttonGrid->addWidget(m_chargeSettingsButton, 0, 0);
+    buttonGrid->addWidget(m_chargeQueryButton, 0, 1);
+    buttonGrid->addWidget(m_chargeStartButton, 1, 0);
+    buttonGrid->addWidget(m_chargeStopButton, 1, 1);
+    layout->addLayout(buttonGrid);
+    leftPanel->addWidget(group);
+
+    connect(m_chargeSettingsButton, &QPushButton::clicked,
+            this, &MainWindow::showChargeSettingsDialog);
+    connect(m_chargeQueryButton, &QPushButton::clicked, this, [this] {
+        QString error;
+        if (!m_devMgr->queryChargePileStatus(&error)) {
+            QMessageBox::warning(this, QStringLiteral("只读查询未执行"), error);
+        }
+        updateChargeControls();
+    });
+    connect(m_chargeStartButton, &QPushButton::clicked, this, [this] {
+        const QMessageBox::StandardButton choice = QMessageBox::question(
+            this,
+            QStringLiteral("现场安全确认"),
+            QStringLiteral(
+                "请确认以下条件全部成立：\n"
+                "1. 主调度未启动；\n"
+                "2. AGV 已位于 LM1 且未在导航；\n"
+                "3. 充电桩周边和推杆运动区域无人、无障碍物。\n\n"
+                "确认现场区域安全并开始充电吗？"),
+            QMessageBox::Yes | QMessageBox::No,
+            QMessageBox::No);
+        if (choice != QMessageBox::Yes)
+            return;
+
+        QString error;
+        if (!m_devMgr->startManualCharge(&error)) {
+            QMessageBox::warning(this, QStringLiteral("手动充电被拒绝"), error);
+        }
+        updateChargePanel();
+        updateChargeControls();
+    });
+    // 停止不再弹确认，任何活动会话都直接汇入唯一安全收尾状态机。
+    connect(m_chargeStopButton, &QPushButton::clicked, this, [this] {
+        m_devMgr->stopChargePile();
+        updateChargePanel();
+        updateChargeControls();
+    });
+
+    for (QSpinBox *threshold : {
+             m_chargeStartPercentSpin,
+             m_chargeDispatchPercentSpin,
+             m_chargeStopPercentSpin}) {
+        connect(threshold, &QSpinBox::editingFinished,
+                this, &MainWindow::applyChargeThresholdCandidate);
+    }
+
+    connect(m_autoChargeSwitch, &QCheckBox::toggled,
+            this, [this](const bool enabled) {
+        if (enabled) {
+            const QMessageBox::StandardButton choice = QMessageBox::question(
+                this,
+                QStringLiteral("自动充电授权确认"),
+                QStringLiteral(
+                    "开启后，主调度运行期间系统会在低电量时暂缓派单、返回 LM1，"
+                    "并自动控制充电桩。\n\n"
+                    "请确认 LM1 充电区域已完成现场安全检查，是否授权本次运行启用？"),
+                QMessageBox::Yes | QMessageBox::No,
+                QMessageBox::No);
+            if (choice != QMessageBox::Yes) {
+                const QSignalBlocker blocker(m_autoChargeSwitch);
+                m_autoChargeSwitch->setChecked(false);
+                updateChargePanel();
+                updateChargeControls();
+                return;
+            }
+        }
+
+        QString error;
+        if (!m_devMgr->setAutoChargeEnabled(enabled, &error)) {
+            const QSignalBlocker blocker(m_autoChargeSwitch);
+            m_autoChargeSwitch->setChecked(
+                m_devMgr->autoChargeCoordinator()->isEnabled());
+            QMessageBox::warning(
+                this, QStringLiteral("自动充电授权未生效"), error);
+        }
+        updateChargePanel();
+        updateChargeControls();
+    });
+
+    ChargePileController *controller = m_devMgr->chargePileController();
+    AutoChargeCoordinator *coordinator = m_devMgr->autoChargeCoordinator();
+    Q_ASSERT(controller != nullptr);
+    Q_ASSERT(coordinator != nullptr);
+    connect(controller, &ChargePileController::stateChanged,
+            this, [this](ChargePileController::State, const QString &) {
+        updateChargePanel();
+        updateChargeControls();
+    });
+    connect(controller, &ChargePileController::snapshotChanged,
+            this, [this](const ChargePileSnapshot &) {
+        updateChargePanel();
+        updateChargeControls();
+    });
+    connect(controller, &ChargePileController::queryFinished,
+            this, [this](bool ok, const QString &message) {
+        log(ok ? QStringLiteral("[充电查询] %1").arg(message)
+               : QStringLiteral("[充电查询失败] %1").arg(message));
+        updateChargePanel();
+        updateChargeControls();
+    });
+    connect(controller, &ChargePileController::chargeSessionFinished,
+            this,
+            [this](bool safe, ChargePileController::SessionOrigin,
+                   const QString &message) {
+        log(safe ? QStringLiteral("[充电会话] %1").arg(message)
+                 : QStringLiteral("[充电会话不安全终态] %1").arg(message));
+        updateChargePanel();
+        updateChargeControls();
+    });
+    connect(coordinator, &AutoChargeCoordinator::decisionTextChanged,
+            this, [this](const QString &text) {
+        m_chargeDecisionText = text;
+        updateChargePanel();
+        updateChargeControls();
+    });
+
+    updateChargePanel();
+    updateChargeControls();
+}
+
+void MainWindow::showChargeSettingsDialog()
+{
+    ChargePileController *controller = m_devMgr->chargePileController();
+    AutoChargeCoordinator *coordinator = m_devMgr->autoChargeCoordinator();
+    const ChargePileController::State state =
+        controller ? controller->state() : ChargePileController::State::Unknown;
+    const bool locked = !controller || !coordinator || controller->isBusy()
+        || coordinator->automaticSessionActive()
+        || state == ChargePileController::State::Fault
+        || state == ChargePileController::State::Unknown;
+
+    ChargePileSettingsDialog dialog(
+        m_devMgr->chargeSettings(), locked, this);
+    connect(&dialog, &ChargePileSettingsDialog::saveRequested,
+            this, [this, &dialog](const ChargeSettings &candidate) {
+        QString error;
+        if (!m_devMgr->applyChargeSettingsCandidate(candidate, &error)) {
+            // 业务事务失败时立刻恢复主面板的已生效值；对话框保持打开，让用户
+            // 能看到中文原因并决定重试或取消。
+            updateChargePanel();
+            updateChargeControls();
+            QMessageBox::warning(
+                &dialog, QStringLiteral("充电参数保存失败"), error);
+            return;
+        }
+        updateChargePanel();
+        updateChargeControls();
+        dialog.accept();
+    });
+    dialog.exec();
+}
+
+void MainWindow::applyChargeThresholdCandidate()
+{
+    ChargeSettings candidate = m_devMgr->chargeSettings();
+    candidate.startChargePercent = m_chargeStartPercentSpin->value();
+    candidate.dispatchReadyPercent = m_chargeDispatchPercentSpin->value();
+    candidate.stopChargePercent = m_chargeStopPercentSpin->value();
+
+    QString error;
+    if (!m_devMgr->applyChargeSettingsCandidate(candidate, &error)) {
+        // 不允许仅在界面保留未持久化值：任何失败都从 DeviceManager 已生效快照
+        // 恢复三个控件，防止操作员误以为新阈值已经参与自动决策。
+        updateChargePanel();
+        updateChargeControls();
+        QMessageBox::warning(
+            this, QStringLiteral("充电阈值未生效"), error);
+        return;
+    }
+    updateChargePanel();
+    updateChargeControls();
+}
+
+void MainWindow::updateChargePanel()
+{
+    if (!m_autoChargeSwitch)
+        return;
+
+    AutoChargeCoordinator *coordinator = m_devMgr->autoChargeCoordinator();
+    ChargePileController *controller = m_devMgr->chargePileController();
+    const bool enabled = coordinator && coordinator->isEnabled();
+    const bool automaticSessionActive =
+        coordinator && coordinator->automaticSessionActive();
+
+    {
+        const QSignalBlocker blocker(m_autoChargeSwitch);
+        m_autoChargeSwitch->setChecked(enabled);
+    }
+
+    if (!enabled && automaticSessionActive) {
+        m_chargeModeNotice->setText(
+            QStringLiteral("自动授权已关闭，正在执行充电安全收尾"));
+        m_chargeModeNotice->setStyleSheet(
+            QStringLiteral("color:#b36b00; font-weight:700;"));
+    } else if (enabled) {
+        m_chargeModeNotice->setText(
+            QStringLiteral("充电桩已经开启自动充电模式"));
+        m_chargeModeNotice->setStyleSheet(
+            QStringLiteral("color:#1f9d55; font-weight:700;"));
+    } else {
+        m_chargeModeNotice->setText(
+            QStringLiteral("自动充电已关闭，不影响已有主调度逻辑"));
+        m_chargeModeNotice->setStyleSheet(
+            QStringLiteral("color:#777; font-weight:600;"));
+    }
+    m_chargeDecisionLabel->setText(
+        QStringLiteral("自动决策：%1").arg(m_chargeDecisionText));
+
+    if (m_devMgr->hasAgvMonitor()) {
+        const AgvMonitorData agv = m_devMgr->lastAgvMonitor();
+        m_chargeBatteryLabel->setText(
+            QStringLiteral("%1%").arg(agv.battery));
+        m_chargeStationLabel->setText(
+            agv.curStation == 1
+                ? QStringLiteral("LM1（充电站）")
+                : QStringLiteral("LM%1").arg(agv.curStation));
+    } else {
+        m_chargeBatteryLabel->setText(QStringLiteral("--（快照无效）"));
+        m_chargeStationLabel->setText(QStringLiteral("--"));
+    }
+
+    const ChargeSettings &settings = m_devMgr->chargeSettings();
+    const QSignalBlocker startBlocker(m_chargeStartPercentSpin);
+    const QSignalBlocker dispatchBlocker(m_chargeDispatchPercentSpin);
+    const QSignalBlocker stopBlocker(m_chargeStopPercentSpin);
+    m_chargeStartPercentSpin->setValue(settings.startChargePercent);
+    m_chargeDispatchPercentSpin->setValue(settings.dispatchReadyPercent);
+    m_chargeStopPercentSpin->setValue(settings.stopChargePercent);
+
+    if (!controller) {
+        m_chargeControllerStateLabel->setText(QStringLiteral("控制器未初始化"));
+        m_chargeElectricalLabel->setText(QStringLiteral("-- V / -- A"));
+        m_chargeActuatorLabel->setText(QStringLiteral("位置未知"));
+        m_chargeFaultLabel->setText(QStringLiteral("控制器未初始化"));
+        return;
+    }
+
+    m_chargeControllerStateLabel->setText(
+        chargeControllerStateText(controller->state()));
+    const ChargePileSnapshot snapshot = controller->snapshot();
+    if (snapshot.sampledAt.isValid()) {
+        m_chargeElectricalLabel->setText(
+            QStringLiteral("%1 V / %2 A")
+                .arg(snapshot.outputVoltageV, 0, 'f', 1)
+                .arg(snapshot.outputCurrentA, 0, 'f', 1));
+        m_chargeActuatorLabel->setText(chargeActuatorText(snapshot));
+    } else {
+        m_chargeElectricalLabel->setText(QStringLiteral("-- V / -- A"));
+        m_chargeActuatorLabel->setText(QStringLiteral("位置未知"));
+    }
+    m_chargeFaultLabel->setText(chargeFaultSummary(snapshot));
+}
+
+void MainWindow::updateChargeControls()
+{
+    if (!m_autoChargeSwitch)
+        return;
+
+    ChargePileController *controller = m_devMgr->chargePileController();
+    AutoChargeCoordinator *coordinator = m_devMgr->autoChargeCoordinator();
+    LineManager *lineManager = m_devMgr->lineManager();
+    const ChargePileController::State state =
+        controller ? controller->state() : ChargePileController::State::Unknown;
+    const bool busy = !controller || controller->isBusy();
+    const bool unsafeState = state == ChargePileController::State::Unknown
+        || state == ChargePileController::State::Fault;
+    const bool autoEnabled = coordinator && coordinator->isEnabled();
+    const bool automaticSessionActive =
+        coordinator && coordinator->automaticSessionActive();
+    const bool lineIdle =
+        lineManager && lineManager->state() == LineSystemState::Idle;
+
+    bool agvAtLm1AndIdle = false;
+    if (m_devMgr->hasAgvMonitor()) {
+        const AgvMonitorData agv = m_devMgr->lastAgvMonitor();
+        agvAtLm1AndIdle =
+            agv.curStation == 1
+            && (agv.navStatus
+                    == static_cast<quint16>(AgvController::NavStatus::None)
+                || agv.navStatus
+                    == static_cast<quint16>(AgvController::NavStatus::Arrived));
+    }
+
+    const bool parametersLocked =
+        busy || automaticSessionActive || unsafeState;
+    m_chargeStartPercentSpin->setEnabled(!parametersLocked);
+    m_chargeDispatchPercentSpin->setEnabled(!parametersLocked);
+    m_chargeStopPercentSpin->setEnabled(!parametersLocked);
+    m_chargeSettingsButton->setEnabled(!parametersLocked);
+    m_chargeQueryButton->setEnabled(!busy);
+    m_chargeStartButton->setEnabled(
+        lineIdle && agvAtLm1AndIdle && !busy && !unsafeState
+        && !autoEnabled && !automaticSessionActive);
+    // 活动状态下停止始终可用；它不会再弹确认，也不另建第二套报文发送器。
+    m_chargeStopButton->setEnabled(
+        (controller && controller->hasActiveChargeSession())
+        || automaticSessionActive);
+
+    // 已开启时必须允许随时关闭；未开启时仅在控制器可安全接受授权时允许打开。
+    m_autoChargeSwitch->setEnabled(
+        autoEnabled || (!busy && !unsafeState && !automaticSessionActive));
 }
 
 void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
 {
     auto *gb   = new QGroupBox(QStringLiteral("华沿 SDK 调试"));
+    gb->setObjectName(QStringLiteral("huayanDebugPanel"));
     auto *vbox = new QVBoxLayout(gb);
 
     auto *row1 = new QHBoxLayout();
@@ -1945,6 +2422,8 @@ void MainWindow::updateLineSystemState(LineSystemState state, const QString &tex
     }
 
     updateStandalonePickupControls();
+    updateChargePanel();
+    updateChargeControls();
 }
 
 void MainWindow::updateLineQueue(const QList<Task> &tasks)

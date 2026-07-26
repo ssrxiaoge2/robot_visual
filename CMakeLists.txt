@@ -61,6 +61,8 @@ set(PROJECT_SOURCES
         src/chargebusinessrules.h
         src/chargesettingstransaction.cpp
         src/chargesettingstransaction.h
+        src/chargepilesettingsdialog.cpp
+        src/chargepilesettingsdialog.h
         src/agvmonitorfreshnessguard.cpp
         src/agvmonitorfreshnessguard.h
         src/settingsmanager.cpp

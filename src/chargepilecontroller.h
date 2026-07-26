@@ -178,6 +178,12 @@ public:
 
     /** @brief 返回连接、等待响应或排队发送状态读取请求时的忙碌状态。 */
     bool isBusy() const;
+    /// 返回当前安全状态机阶段，供只读界面显示和集中可用性判断。
+    State state() const { return m_state; }
+    /// 只在充电或保守恢复流程持有控制器时返回真；单独只读查询不算充电会话。
+    bool hasActiveChargeSession() const {
+        return m_queryInProgress && m_flowMode == FlowMode::Charge;
+    }
 
     /**
      * @brief 判断是否仍需要执行安全收尾。
