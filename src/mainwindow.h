@@ -26,6 +26,7 @@ class PalletParamDialog;
 class PalletScheduler;
 class ChargePileSettingsDialog;
 class QCheckBox;
+class QCloseEvent;
 class QSpinBox;
 
 QT_BEGIN_NAMESPACE
@@ -39,6 +40,15 @@ class MainWindow : public QMainWindow
 public:
     explicit MainWindow(QWidget *parent = nullptr);
     ~MainWindow() override;
+
+protected:
+    /**
+     * @brief 拦截程序关闭，直到唯一充电控制器明确完成安全停止、缩回和复位。
+     *
+     * 首次关闭只发起异步收尾并忽略事件；只有 safe=true 的一次性结果才排队
+     * 触发第二次 close。收尾失败后必须由操作员再次关闭并连续完成两次强制确认。
+     */
+    void closeEvent(QCloseEvent *event) override;
 
 private slots:
     // ── 转发用户操作到业务层 ──────────────────────────────────
@@ -114,6 +124,10 @@ private:
     void showChargeSettingsDialog();
     /// 计算当前控制器/自动会话是否要求参数只读，供主面板和已打开对话框共用。
     bool chargeSettingsLocked() const;
+    /// 写出强制退出确认前的结构化充电快照，字段缺失时也明确记录未知。
+    void logChargeForceExitSnapshot();
+    /// 安全收尾失败后执行连续两次明确确认；任何一次取消都不允许退出。
+    bool confirmForceChargeExit();
     void loadStationMapToTable();
     void rebuildStationMapFromTable();
     void refreshResolvedLabel();
@@ -271,6 +285,12 @@ private:
     QPointer<ChargePileSettingsDialog> m_chargeSettingsDialog; ///< 模态窗口仍接收异步锁定更新。
     QString m_chargeDecisionText =
         QStringLiteral("自动充电未授权，主调度逻辑保持原样");
+    bool m_chargeClosePending = false; ///< 首次 close 已忽略，唯一关闭收尾正在异步执行。
+    bool m_chargeShutdownResultConsumed = false; ///< 防止迟到/重复完成信号二次触发 close。
+    bool m_chargeShutdownFailed = false; ///< 最近一次关闭收尾失败，允许进入双确认强退路径。
+    bool m_chargeCloseSafeConfirmed = false; ///< 仅 safe=true 且控制器确认为安全时置位。
+    bool m_forceChargeExitFirstConfirmed = false; ///< 操作员已确认“停止结果未知”。
+    bool m_forceChargeExitConfirmed = false; ///< 操作员已再次确认退出不代表停止或缩回。
 
     // ── 主题开关 ─────────────────────────────────────────────
     ThemeSwitch    *m_themeSwitch = nullptr;

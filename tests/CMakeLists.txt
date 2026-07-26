@@ -122,6 +122,21 @@ target_link_libraries(charge_pile_settings_dialog_tests PRIVATE
 add_test(NAME charge_pile_settings_dialog_tests
          COMMAND charge_pile_settings_dialog_tests)
 
+add_executable(charge_ui_and_shutdown_contract_tests
+    test_charge_ui_and_shutdown_contract.cpp
+)
+
+target_compile_definitions(charge_ui_and_shutdown_contract_tests PRIVATE
+    PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
+)
+
+target_link_libraries(charge_ui_and_shutdown_contract_tests PRIVATE
+    Qt6::Core
+)
+
+add_test(NAME charge_ui_and_shutdown_contract_tests
+         COMMAND charge_ui_and_shutdown_contract_tests)
+
 add_executable(vision_alignment_decision_tests
     test_vision_alignment_decision.cpp
     ../src/visionalignmentdecision.cpp

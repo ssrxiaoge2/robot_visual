@@ -324,6 +324,12 @@ DeviceManager::DeviceManager(QObject *parent)
     });
     connect(m_chargePileController, &ChargePileController::chargeSessionFinished,
             m_autoChargeCoordinator, &AutoChargeCoordinator::onChargeSessionFinished);
+    // MainWindow 只订阅 DeviceManager 的业务边界信号；控制器仍由本对象唯一
+    // 拥有，关闭流程不会因此出现第二个套接字或第二套安全状态机。
+    connect(m_chargePileController,
+            &ChargePileController::applicationShutdownFinished,
+            this,
+            &DeviceManager::applicationShutdownFinished);
 
     connect(m_autoChargeCoordinator, &AutoChargeCoordinator::dispatchHoldRequested,
             m_lineManager, &LineManager::setChargeDispatchHold);
@@ -561,11 +567,56 @@ bool DeviceManager::queryChargePileStatus(QString *error)
     return true;
 }
 
-void DeviceManager::stopChargePile()
+bool DeviceManager::stopChargePile(QString *error)
 {
-    if (m_chargePileController)
+    if (error)
+        error->clear();
+    if (!m_chargePileController) {
+        if (error)
+            *error = QStringLiteral("充电控制器尚未初始化");
+        return false;
+    }
+
+    if (m_chargePileController->hasActiveChargeSession()) {
         m_chargePileController->requestSafeStop(
             ChargePileController::StopReason::Manual);
+        return true;
+    }
+
+    if (m_chargePileController->shutdownRequired()) {
+        const bool accepted =
+            m_chargePileController->requestConservativeRecovery(
+                ChargePileController::SessionOrigin::Manual,
+                ChargePileController::StopReason::Manual,
+                error);
+        emit logMessage(
+            accepted
+                ? QStringLiteral("[手动充电] 已接受不安全终态后的保守恢复")
+                : QStringLiteral("[手动充电] 保守恢复未启动：%1")
+                      .arg(error ? *error : QStringLiteral("未知原因")));
+        return accepted;
+    }
+
+    emit logMessage(QStringLiteral("[手动充电] 充电桩已经确认安全，无需重复停止"));
+    return true;
+}
+
+bool DeviceManager::chargePileShutdownRequired() const
+{
+    // 控制器缺失也不能被解释为“安全”；MainWindow 会保持打开并向操作员
+    // 报告无法启动安全收尾，而不会在对象状态未知时静默退出。
+    return !m_chargePileController
+           || m_chargePileController->shutdownRequired();
+}
+
+void DeviceManager::requestApplicationShutdown()
+{
+    if (!m_chargePileController) {
+        emit applicationShutdownFinished(
+            false, QStringLiteral("充电控制器尚未初始化，无法确认充电桩安全状态。"));
+        return;
+    }
+    m_chargePileController->requestApplicationShutdown();
 }
 
 bool DeviceManager::setAutoChargeEnabled(const bool enabled, QString *error)

@@ -102,8 +102,22 @@ public:
     bool startManualCharge(QString *error);
     /// 提交只读五组状态查询；不会发送任何写寄存器或写线圈命令。
     bool queryChargePileStatus(QString *error);
-    /// 将当前活动充电会话汇入控制器唯一的安全停止状态机。
-    void stopChargePile();
+    /**
+     * @brief 将人工停止或不安全终态后的重试汇入控制器唯一的安全状态机。
+     *
+     * 活动充电会话使用 requestSafeStop()；若先前会话已经以 Unknown/Fault
+     * 结束、当前没有活动 flow 但 shutdownRequired() 仍为真，则显式启动
+     * Manual 保守恢复。这样面板“停止充电”不会在最需要人工补救时退化为 no-op。
+     */
+    bool stopChargePile(QString *error = nullptr);
+    /// 返回唯一控制器是否仍有输出、机构或未知写命令等关闭风险。
+    bool chargePileShutdownRequired() const;
+    /**
+     * @brief 请求程序关闭前安全收尾，只转发给唯一 ChargePileController。
+     *
+     * MainWindow 不持有套接字，也不能通过析构或断开 TCP 代替停止、缩回和复位。
+     */
+    void requestApplicationShutdown();
     /// 设置本次进程的自动授权；该值默认关闭且绝不写入 charge-settings.ini。
     bool setAutoChargeEnabled(bool enabled, QString *error);
 
@@ -163,6 +177,8 @@ signals:
     void agvModbusError(const QString &msg);
     void handEyeMatrixApplied();
     void logMessage(const QString &msg);
+    /// 唯一控制器对一次应用关闭请求发布的最终安全结果。
+    void applicationShutdownFinished(bool safe, const QString &message);
 
 private:
     bool tcpPing(const QString &ip, int port, int timeoutMs = 2000);

@@ -1170,6 +1170,83 @@ private slots:
         QVERIFY(!controller.shutdownRequired());
     }
 
+    void manualUnknownSessionCanRetryRecoveryAfterActiveFlowFinished()
+    {
+        FakeChargePile pile;
+        QVERIFY(pile.listen());
+        pile.enableChargeScenario();
+        pile.dropFirstEchoForCoil(kCoilStart);
+
+        ChargePileController controller;
+        controller.applySettings(loopbackSettings(pile));
+        QSignalSpy finishedSpy(
+            &controller, &ChargePileController::chargeSessionFinished);
+        QString error;
+        QVERIFY(controller.startCharge(
+            ChargePileController::SessionOrigin::Manual, &error));
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 8000);
+
+        // 写回显未知的人工会话已经结束，不再有 active flow，但安全上下文
+        // 必须保留。DeviceManager::stopChargePile() 正是依据这两个条件把面板
+        // “停止充电”转入下面同一个 Manual 保守恢复入口。
+        QVERIFY(!finishedSpy.first().at(0).toBool());
+        QVERIFY(!controller.hasActiveChargeSession());
+        QVERIFY(controller.shutdownRequired());
+        QCOMPARE(pile.coilCount(kCoilStart), 1);
+
+        QString recoveryError;
+        QVERIFY2(controller.requestConservativeRecovery(
+                     ChargePileController::SessionOrigin::Manual,
+                     ChargePileController::StopReason::Manual,
+                     &recoveryError),
+                 qPrintable(recoveryError));
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 2, 12000);
+
+        QVERIFY2(finishedSpy.last().at(0).toBool(),
+                 qPrintable(finishedSpy.last().at(2).toString()));
+        QCOMPARE(finishedSpy.last().at(1)
+                     .value<ChargePileController::SessionOrigin>(),
+                 ChargePileController::SessionOrigin::Manual);
+        QCOMPARE(pile.coilCount(kCoilStart), 1);
+        QCOMPARE(pile.coilCount(kCoilStop), 1);
+        QVERIFY(!controller.shutdownRequired());
+    }
+
+    void applicationShutdownConnectionFailureIsUnsafeRequiredAndOneShot()
+    {
+        // 先向系统申请一个空闲回环端口再释放，确保控制器连接失败来自真实
+        // QTcpSocket 路径，而不是测试直接调用私有失败处理函数。
+        QTcpServer portReservation;
+        QVERIFY(portReservation.listen(QHostAddress::LocalHost, 0));
+        const quint16 unusedPort = portReservation.serverPort();
+        portReservation.close();
+
+        ChargeSettings settings = ChargeSettings::defaults();
+        settings.host = QStringLiteral("127.0.0.1");
+        settings.port = unusedPort;
+        settings.connectTimeoutMs = 100;
+        settings.responseTimeoutMs = 100;
+
+        ChargePileController controller;
+        controller.applySettings(settings);
+        QSignalSpy shutdownSpy(
+            &controller, &ChargePileController::applicationShutdownFinished);
+
+        controller.requestApplicationShutdown();
+        // 关闭事件重入发生在第一轮结果尚未到达时，只能升级/等待同一流程。
+        controller.requestApplicationShutdown();
+        QTRY_COMPARE_WITH_TIMEOUT(shutdownSpy.count(), 1, 3000);
+        QVERIFY(!shutdownSpy.first().at(0).toBool());
+        QVERIFY(controller.state() != ChargePileController::State::SafeComplete);
+        QVERIFY(controller.shutdownRequired());
+
+        // 同一在途请求只发布一次最终结果；MainWindow 在收到失败结果后会进入
+        // 双确认路径，不会再次调用 requestApplicationShutdown()。
+        QTest::qWait(300);
+        QCOMPARE(shutdownSpy.count(), 1);
+        QVERIFY(controller.shutdownRequired());
+    }
+
     void conservativeRecoveryNeverRepeatsUncertainSafetyWrites()
     {
         const auto runUnknownStop = [](const quint16 residualCurrent,
