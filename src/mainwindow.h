@@ -24,6 +24,7 @@ class HandEyeDialog;
 class HuayanScheduler;
 class PalletParamDialog;
 class PalletScheduler;
+class ChargePileSettingsDialog;
 class QCheckBox;
 class QSpinBox;
 
@@ -111,6 +112,8 @@ private:
     void applyChargeThresholdCandidate();
     /// 打开独立通信/电气/超时设置窗口，保存失败时保留窗口和已生效参数。
     void showChargeSettingsDialog();
+    /// 计算当前控制器/自动会话是否要求参数只读，供主面板和已打开对话框共用。
+    bool chargeSettingsLocked() const;
     void loadStationMapToTable();
     void rebuildStationMapFromTable();
     void refreshResolvedLabel();
@@ -265,6 +268,7 @@ private:
     QPushButton *m_chargeQueryButton = nullptr;
     QPushButton *m_chargeStartButton = nullptr;
     QPushButton *m_chargeStopButton = nullptr;
+    QPointer<ChargePileSettingsDialog> m_chargeSettingsDialog; ///< 模态窗口仍接收异步锁定更新。
     QString m_chargeDecisionText =
         QStringLiteral("自动充电未授权，主调度逻辑保持原样");
 

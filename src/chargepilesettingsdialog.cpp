@@ -46,7 +46,6 @@ ChargePileSettingsDialog::ChargePileSettingsDialog(const ChargeSettings &setting
                                                    const bool locked,
                                                    QWidget *parent)
     : QDialog(parent)
-    , m_locked(locked)
 {
     qRegisterMetaType<ChargeSettings>("ChargeSettings");
     setWindowTitle(QStringLiteral("充电桩参数设置"));
@@ -55,16 +54,16 @@ ChargePileSettingsDialog::ChargePileSettingsDialog(const ChargeSettings &setting
     auto *root = new QVBoxLayout(this);
     root->setSpacing(8);
 
-    auto *lockedBanner = new QLabel(
+    m_lockedBanner = new QLabel(
         QStringLiteral("充电查询、会话或安全收尾正在执行：当前参数仅供查看。"),
         this);
-    lockedBanner->setObjectName(QStringLiteral("chargeSettingsLockedBanner"));
-    lockedBanner->setWordWrap(true);
-    lockedBanner->setVisible(locked);
-    lockedBanner->setStyleSheet(QStringLiteral(
+    m_lockedBanner->setObjectName(QStringLiteral("chargeSettingsLockedBanner"));
+    m_lockedBanner->setWordWrap(true);
+    m_lockedBanner->setVisible(false);
+    m_lockedBanner->setStyleSheet(QStringLiteral(
         "QLabel { color:#8a5200; background:#fff3cd; border:1px solid #e4b85a;"
         " padding:6px; }"));
-    root->addWidget(lockedBanner);
+    root->addWidget(m_lockedBanner);
 
     root->addWidget(createCommunicationGroup());
     root->addWidget(createChargeGroup());
@@ -119,8 +118,16 @@ ChargePileSettingsDialog::ChargePileSettingsDialog(const ChargeSettings &setting
     });
 
     writeSettings(settings);
+    setLocked(locked);
+}
 
-    // 锁定时将三个分组整体设为只读，仍保留取消按钮供用户关闭窗口。
+void ChargePileSettingsDialog::setLocked(const bool locked)
+{
+    m_locked = locked;
+    m_lockedBanner->setVisible(locked);
+
+    // 三个分组作为完整编辑边界统一启停，避免新增字段时遗漏单个控件。恢复默认
+    // 和保存位于分组之外，必须在同一个方法中显式同步；取消始终保持可用。
     for (QWidget *group : {
              findChild<QWidget *>(QStringLiteral("chargeCommunicationGroup")),
              findChild<QWidget *>(QStringLiteral("chargeElectricalGroup")),
@@ -128,6 +135,15 @@ ChargePileSettingsDialog::ChargePileSettingsDialog(const ChargeSettings &setting
         if (group)
             group->setEnabled(!locked);
     }
+    m_restoreDefaultsButton->setEnabled(!locked);
+    if (QPushButton *saveButton =
+            m_buttonBox->button(QDialogButtonBox::Save)) {
+        saveButton->setEnabled(!locked);
+    }
+
+    // 解锁时父分组会重新启用所有子项；可选寄存器的数值框仍必须服从复选框，
+    // 因此最后再集中修正这两个字段。
+    updateOptionalControls();
 }
 
 QWidget *ChargePileSettingsDialog::createCommunicationGroup()

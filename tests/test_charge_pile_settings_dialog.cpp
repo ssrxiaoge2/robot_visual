@@ -2,9 +2,11 @@
 
 #include "chargepilesettingsdialog.h"
 
+#include <QAbstractSpinBox>
 #include <QCheckBox>
 #include <QDialogButtonBox>
 #include <QDoubleSpinBox>
+#include <QLabel>
 #include <QLineEdit>
 #include <QMessageBox>
 #include <QPushButton>
@@ -42,6 +44,7 @@ private slots:
     void optionalRegistersOnlyEnableAfterExplicitOptIn();
     void invalidThresholdCombinationDoesNotRequestSave();
     void lockedDialogCannotRequestSave();
+    void dialogCanBeLockedAfterOpening();
     void restoreDefaultsOnlyChangesChargeSettings();
 };
 
@@ -104,6 +107,75 @@ void ChargePileSettingsDialogTest::lockedDialogCannotRequestSave()
     QVERIFY(!saveButton->isEnabled());
     saveButton->click();
     QCOMPARE(saveSpy.count(), 0);
+}
+
+void ChargePileSettingsDialogTest::dialogCanBeLockedAfterOpening()
+{
+    ChargePileSettingsDialog dialog(ChargeSettings::defaults(), false);
+    QSignalSpy saveSpy(&dialog, &ChargePileSettingsDialog::saveRequested);
+    auto *hostEdit = requiredChild<QLineEdit>(dialog, "chargeHostEdit");
+    auto *voltageSpin =
+        requiredChild<QDoubleSpinBox>(dialog, "chargeVoltageSpin");
+    auto *responseTimeoutSpin =
+        requiredChild<QSpinBox>(dialog, "responseTimeoutSpin");
+    auto *restoreButton =
+        requiredChild<QPushButton>(dialog, "restoreChargeDefaultsButton");
+    auto *lockedBanner =
+        requiredChild<QLabel>(dialog, "chargeSettingsLockedBanner");
+    auto *buttonBox =
+        requiredChild<QDialogButtonBox>(dialog, "chargeSettingsButtonBox");
+    auto *saveButton = buttonBox->button(QDialogButtonBox::Save);
+    QVERIFY(saveButton);
+
+    dialog.show();
+    QVERIFY(QTest::qWaitForWindowExposed(&dialog));
+    QVERIFY(hostEdit->isEnabled());
+    QVERIFY(voltageSpin->isEnabled());
+    QVERIFY(responseTimeoutSpin->isEnabled());
+    QVERIFY(restoreButton->isEnabled());
+    QVERIFY(saveButton->isEnabled());
+    QVERIFY(!lockedBanner->isVisible());
+
+    // 模拟模态窗口打开期间自动会话异步取得控制器所有权。
+    dialog.setLocked(true);
+    dialog.setLocked(true); // 重复状态刷新必须保持幂等。
+
+    QVERIFY(!hostEdit->isEnabled());
+    QVERIFY(!voltageSpin->isEnabled());
+    QVERIFY(!responseTimeoutSpin->isEnabled());
+    QVERIFY(!restoreButton->isEnabled());
+    QVERIFY(!saveButton->isEnabled());
+    QVERIFY(lockedBanner->isVisible());
+    for (const char *groupName : {
+             "chargeCommunicationGroup",
+             "chargeElectricalGroup",
+             "chargeTimeoutGroup"}) {
+        QWidget *group = requiredChild<QWidget>(dialog, groupName);
+        QVERIFY2(!group->isEnabled(), groupName);
+        for (QWidget *input : group->findChildren<QWidget *>()) {
+            if (qobject_cast<QLineEdit *>(input)
+                || qobject_cast<QAbstractSpinBox *>(input)
+                || qobject_cast<QCheckBox *>(input)) {
+                const QByteArray inputName = input->objectName().toUtf8();
+                QVERIFY2(!input->isEnabled(), inputName.constData());
+            }
+        }
+    }
+    saveButton->click();
+    QCOMPARE(saveSpy.count(), 0);
+
+    dialog.setLocked(false);
+    QVERIFY(hostEdit->isEnabled());
+    QVERIFY(voltageSpin->isEnabled());
+    QVERIFY(responseTimeoutSpin->isEnabled());
+    QVERIFY(restoreButton->isEnabled());
+    QVERIFY(saveButton->isEnabled());
+    QVERIFY(!lockedBanner->isVisible());
+    // 解锁后未勾选的可选寄存器数值仍保持禁用。
+    QVERIFY(!requiredChild<QDoubleSpinBox>(
+        dialog, "cutoffCurrentSpin")->isEnabled());
+    QVERIFY(!requiredChild<QSpinBox>(
+        dialog, "maxChargeSecondsSpin")->isEnabled());
 }
 
 void ChargePileSettingsDialogTest::restoreDefaultsOnlyChangesChargeSettings()

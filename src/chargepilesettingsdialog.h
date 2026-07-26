@@ -7,6 +7,7 @@
 class QCheckBox;
 class QDialogButtonBox;
 class QDoubleSpinBox;
+class QLabel;
 class QLineEdit;
 class QPushButton;
 class QSpinBox;
@@ -28,6 +29,15 @@ public:
                                       bool locked,
                                       QWidget *parent = nullptr);
 
+    /**
+     * @brief 动态切换整个参数窗口的只读锁定状态。
+     *
+     * 对话框 exec() 期间仍会处理控制器和协调器信号，因此锁定不能只依赖构造时
+     * 快照。重复传入相同值是安全的；通信、充电、超时分组、恢复默认和保存按钮
+     * 会在一次调用中同步刷新，取消按钮始终可用。
+     */
+    void setLocked(bool locked);
+
     /// 从当前控件一次性组装完整候选快照；可选项未勾选时保持 std::nullopt。
     ChargeSettings candidate() const;
 
@@ -43,6 +53,7 @@ private:
     QWidget *createTimeoutGroup();
 
     bool m_locked = false; ///< 锁定态只读，禁止恢复默认和保存。
+    QLabel *m_lockedBanner = nullptr; ///< 动态提示活动会话期间参数仅供查看。
 
     QLineEdit *m_hostEdit = nullptr;
     QSpinBox *m_portSpin = nullptr;

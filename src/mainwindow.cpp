@@ -1528,17 +1528,17 @@ void MainWindow::initChargePanel(QVBoxLayout *leftPanel)
 
 void MainWindow::showChargeSettingsDialog()
 {
-    ChargePileController *controller = m_devMgr->chargePileController();
-    AutoChargeCoordinator *coordinator = m_devMgr->autoChargeCoordinator();
-    const ChargePileController::State state =
-        controller ? controller->state() : ChargePileController::State::Unknown;
-    const bool locked = !controller || !coordinator || controller->isBusy()
-        || coordinator->automaticSessionActive()
-        || state == ChargePileController::State::Fault
-        || state == ChargePileController::State::Unknown;
+    if (m_chargeSettingsDialog) {
+        m_chargeSettingsDialog->raise();
+        m_chargeSettingsDialog->activateWindow();
+        return;
+    }
 
     ChargePileSettingsDialog dialog(
-        m_devMgr->chargeSettings(), locked, this);
+        m_devMgr->chargeSettings(), chargeSettingsLocked(), this);
+    // QPointer 指向栈上 QObject 是安全的：对象析构时会自动清空。保存显式指针
+    // 使控制器或自动会话在 exec() 嵌套事件循环中变化时，可以立即锁定现有窗口。
+    m_chargeSettingsDialog = &dialog;
     connect(&dialog, &ChargePileSettingsDialog::saveRequested,
             this, [this, &dialog](const ChargeSettings &candidate) {
         QString error;
@@ -1556,6 +1556,7 @@ void MainWindow::showChargeSettingsDialog()
         dialog.accept();
     });
     dialog.exec();
+    m_chargeSettingsDialog = nullptr;
 }
 
 void MainWindow::applyChargeThresholdCandidate()
@@ -1689,8 +1690,7 @@ void MainWindow::updateChargeControls()
                     == static_cast<quint16>(AgvController::NavStatus::Arrived));
     }
 
-    const bool parametersLocked =
-        busy || automaticSessionActive || unsafeState;
+    const bool parametersLocked = chargeSettingsLocked();
     m_chargeStartPercentSpin->setEnabled(!parametersLocked);
     m_chargeDispatchPercentSpin->setEnabled(!parametersLocked);
     m_chargeStopPercentSpin->setEnabled(!parametersLocked);
@@ -1707,6 +1707,24 @@ void MainWindow::updateChargeControls()
     // 已开启时必须允许随时关闭；未开启时仅在控制器可安全接受授权时允许打开。
     m_autoChargeSwitch->setEnabled(
         autoEnabled || (!busy && !unsafeState && !automaticSessionActive));
+
+    // 模态对话框拥有自己的事件循环，主窗口禁用并不能阻止其保存。因此每次
+    // 相关状态刷新都必须把同一锁定结果推送给当前窗口。
+    if (m_chargeSettingsDialog)
+        m_chargeSettingsDialog->setLocked(parametersLocked);
+}
+
+bool MainWindow::chargeSettingsLocked() const
+{
+    ChargePileController *controller = m_devMgr->chargePileController();
+    AutoChargeCoordinator *coordinator = m_devMgr->autoChargeCoordinator();
+    if (!controller || !coordinator)
+        return true;
+    const ChargePileController::State state = controller->state();
+    return controller->isBusy()
+        || coordinator->automaticSessionActive()
+        || state == ChargePileController::State::Unknown
+        || state == ChargePileController::State::Fault;
 }
 
 void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
