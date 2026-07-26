@@ -95,11 +95,13 @@ void ChargePileController::applySettings(const ChargeSettings &settings)
         return;
     }
 
-    // 活动充电或安全收尾期间冻结整份会话设置。特别是目标地址变化绝不能让
-    // Stop/Retract OFF 等后续安全命令改投另一台设备；时序阈值也不得会话中突变。
-    if (m_queryInProgress && m_flowMode == FlowMode::Charge) {
-        emit logMessage(QStringLiteral("[充电会话%1][%2] 活动会话期间拒绝修改充电设置。")
-                        .arg(m_sessionId).arg(originText(m_sessionOrigin)));
+    // 从正常充电接受到最终完整快照明确安全之前，整份设置都属于同一个安全
+    // 恢复上下文。即使上一轮已经以 Fault/Unknown 结束，也不能切换目标、放宽
+    // safeCurrentA 或改变恢复时序，否则旧桩里程碑会被错误应用到新桩。
+    if (m_safetyRecoveryContextValid) {
+        emit logMessage(
+            QStringLiteral("[充电会话%1][%2] 安全恢复上下文尚未最终确认安全，拒绝修改整份充电设置。")
+                .arg(m_sessionId).arg(originText(m_sessionOrigin)));
         return;
     }
 
@@ -163,6 +165,13 @@ bool ChargePileController::startCharge(const SessionOrigin origin, QString *erro
     if (m_unknownGate) {
         if (error)
             *error = QStringLiteral("充电桩状态未知，只允许完整只读查询或保守安全关闭。");
+        return false;
+    }
+    if (m_safetyRecoveryContextValid) {
+        if (error) {
+            *error =
+                QStringLiteral("上一充电安全恢复上下文尚未由最终完整快照确认安全，禁止开始新充电。");
+        }
         return false;
     }
 
@@ -308,9 +317,21 @@ bool ChargePileController::beginConservativeRecovery(
     // 把保守恢复误导入普通停止入口并盲目重发结果不确定的 Stop。
     m_safeStopRequested = false;
     m_safeShutdownStarted = false;
-    m_applicationShutdownRequested = notifyApplication;
-    if (notifyApplication)
-        m_applicationShutdownFinishedEmitted = false;
+    // chargeSessionFinished 是同步信号：自动协调器可能在旧的关闭收尾以
+    // unsafe 结束的同一调用栈中立即建立下一轮保守恢复。普通恢复不能把
+    // 尚未发布完成结果的应用关闭所有权降级；只有全新的关闭入口才初始化
+    // one-shot，继承流程沿用原标志直到最终 safe/unsafe。
+    const bool inheritsPendingApplicationShutdown =
+        m_applicationShutdownRequested
+        && !m_applicationShutdownFinishedEmitted;
+    if (notifyApplication) {
+        if (!inheritsPendingApplicationShutdown)
+            m_applicationShutdownFinishedEmitted = false;
+        m_applicationShutdownRequested = true;
+    } else {
+        m_applicationShutdownRequested =
+            inheritsPendingApplicationShutdown;
+    }
     m_sessionFinishedEmitted = false;
     m_conservativeRecoveryActive = true;
     m_recoveryAction = RecoveryAction::None;
@@ -400,13 +421,20 @@ bool ChargePileController::isBusy() const
 
 bool ChargePileController::shutdownRequired() const
 {
-    return m_state != State::SafeComplete
+    return m_safetyRecoveryContextValid
+           || m_state != State::SafeComplete
            || !snapshotConfirmsSafe(m_snapshot, m_settings);
 }
 
 ChargePileSnapshot ChargePileController::snapshot() const
 {
     return m_snapshot;
+}
+
+std::optional<ChargePileWriteIdentity>
+ChargePileController::uncertainWriteIdentity() const
+{
+    return m_uncertainWrite;
 }
 
 void ChargePileController::enqueueRead(
@@ -557,7 +585,7 @@ void ChargePileController::sendCurrentRequest()
     // 从 m_inFlightRequest 精确保存功能码、地址和值。
     request.startedAt = QDateTime::currentDateTime();
     m_inFlightRequest = std::move(request);
-    const qint64 written = m_socket.write(m_inFlightRequest->frame);
+    const qint64 written = writeFrame(m_inFlightRequest->frame);
     if (written != m_inFlightRequest->frame.size()) {
         failOperation(QStringLiteral("充电桩请求写入套接字失败。"),
                       m_inFlightRequest->isWriteCommand);
@@ -573,6 +601,11 @@ void ChargePileController::sendCurrentRequest()
                              : QStringLiteral("只读"))
                     .arg(QString::fromLatin1(
                         m_inFlightRequest->frame.toHex(' ').toUpper())));
+}
+
+qint64 ChargePileController::writeFrame(const QByteArray &frame)
+{
+    return m_socket.write(frame);
 }
 
 void ChargePileController::handleConnected()
@@ -791,8 +824,16 @@ void ChargePileController::failOperation(
         m_sessionFinishedEmitted = true;
         emit chargeSessionFinished(false, failedOrigin, finalReason);
     }
-    if (notifyApplication)
+    const bool applicationShutdownInheritedByReentrantRecovery =
+        m_queryInProgress
+        && m_flowMode == FlowMode::Charge
+        && m_conservativeRecoveryActive
+        && m_applicationShutdownRequested
+        && !m_applicationShutdownFinishedEmitted;
+    if (notifyApplication
+        && !applicationShutdownInheritedByReentrantRecovery) {
         emitApplicationShutdownFinishedOnce(false, finalReason);
+    }
 }
 
 void ChargePileController::finishQuery()
@@ -802,6 +843,12 @@ void ChargePileController::finishQuery()
     m_queryInProgress = false;
     if (snapshotConfirmsSafe(m_snapshot, m_settings)) {
         m_unknownGate = false;
+        if (safeSnapshotResolvesRecoveryContext()) {
+            // Start/Stop/Reset/参数写的效果都能由“明确缩到位且无输出”的完整
+            // 快照充分覆盖；此时只读权威查询可以结束旧上下文。缩回线圈
+            // ON/OFF 则不能仅凭位置证明电平已释放，助手会保留上下文。
+            clearSafetyRecoveryContext();
+        }
         setState(State::SafeComplete, QStringLiteral("充电桩状态确认安全。"));
     } else if (m_unknownGate) {
         setState(State::Unknown,
@@ -830,8 +877,18 @@ void ChargePileController::finishChargeSession(
     if (safe)
         clearSafetyRecoveryContext();
     emit chargeSessionFinished(safe, origin, message);
-    if (notifyApplication)
+    // unsafe Automatic 终态可能同步触发继承关闭所有权的新恢复。此时旧阶段
+    // 不能抢先发布 application=false；应由新恢复的最终权威结果发布一次。
+    const bool applicationShutdownInheritedByReentrantRecovery =
+        m_queryInProgress
+        && m_flowMode == FlowMode::Charge
+        && m_conservativeRecoveryActive
+        && m_applicationShutdownRequested
+        && !m_applicationShutdownFinishedEmitted;
+    if (notifyApplication
+        && !applicationShutdownInheritedByReentrantRecovery) {
         emitApplicationShutdownFinishedOnce(safe, message);
+    }
 }
 
 void ChargePileController::clearSafetyRecoveryContext()
@@ -844,6 +901,30 @@ void ChargePileController::clearSafetyRecoveryContext()
     m_uncertainWrite.reset();
     m_safetyRecoveryContextValid = false;
     m_conservativeRecoveryActive = false;
+}
+
+bool ChargePileController::safeSnapshotResolvesRecoveryContext() const
+{
+    if (!m_safetyRecoveryContextValid)
+        return true;
+
+    // 已确认缩回 ON 但没有 OFF 正常回显时，位置到位不能证明手动线圈已释放。
+    if (m_retractOnConfirmed && !m_retractOffConfirmed)
+        return false;
+    if (!m_uncertainWrite.has_value())
+        return true;
+
+    const ChargePileWriteIdentity &uncertain = *m_uncertainWrite;
+    if (uncertain.function == kWriteSingleRegister)
+        return true;
+    if (uncertain.function != kWriteSingleCoil)
+        return false;
+    if (uncertain.address == ChargePileProtocol::kCoilRetract)
+        return false;
+
+    return uncertain.address == ChargePileProtocol::kCoilStart
+           || uncertain.address == ChargePileProtocol::kCoilStop
+           || uncertain.address == ChargePileProtocol::kCoilReset;
 }
 
 void ChargePileController::emitApplicationShutdownFinishedOnce(

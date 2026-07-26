@@ -176,6 +176,14 @@ public:
     /** @brief 返回最后一次完整或部分采样的副本，调用者不得修改控制器内部状态。 */
     ChargePileSnapshot snapshot() const;
 
+    /**
+     * @brief 返回尚未由相反命令或权威安全快照解决的写命令身份。
+     *
+     * 该只读诊断值可用于故障日志和测试确认；调用方不能据此自行发报文，
+     * 所有恢复动作仍必须进入 requestConservativeRecovery()。
+     */
+    std::optional<ChargePileWriteIdentity> uncertainWriteIdentity() const;
+
 signals:
     void stateChanged(ChargePileController::State state, const QString &text);
     void snapshotChanged(const ChargePileSnapshot &snapshot);
@@ -184,6 +192,15 @@ signals:
                                const QString &message);
     void applicationShutdownFinished(bool safe, const QString &message);
     void logMessage(const QString &message);
+
+protected:
+    /**
+     * @brief 唯一套接字写出口，默认完整委托给当前 QTcpSocket。
+     *
+     * 设为虚函数仅用于测试稳定注入 QTcpSocket 难以制造的短写/-1 返回值；
+     * 生产子系统不得另建发送器，队列、节流和在途身份仍由本类统一管理。
+     */
+    virtual qint64 writeFrame(const QByteArray &frame);
 
 private:
     /**
@@ -266,6 +283,7 @@ private:
     void beginConservativeRecoveryAfterSnapshot();
     void finishConservativeRecoveryUnsafe(const QString &reason);
     void clearSafetyRecoveryContext();
+    bool safeSnapshotResolvesRecoveryContext() const;
     void emitApplicationShutdownFinishedOnce(bool safe,
                                              const QString &message);
     void handleReadFailure(const QString &reason);
