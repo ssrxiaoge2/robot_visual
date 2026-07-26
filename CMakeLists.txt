@@ -51,6 +51,8 @@ set(PROJECT_SOURCES
         src/runtimesettings.h
         src/chargesettings.cpp
         src/chargesettings.h
+        src/chargepileprotocol.cpp
+        src/chargepileprotocol.h
         src/settingsmanager.cpp
         src/settingsmanager.h
         src/settingsdialog.cpp
