@@ -329,20 +329,8 @@ int main()
     requireContainsInOrder(
         rejectedSlotBody,
         {QStringLiteral("stopVisionWaitTimeout();"),
-         QStringLiteral("reason == Reason::LockTargetMissing"),
-         QStringLiteral("m_runtimeSettings.vision.lockMaxMissingFrames"),
-         QStringLiteral("requestNextStableZFrame();"),
-         QStringLiteral("if (validatingVisionAlignment)"),
          QStringLiteral("emitOperationError")},
-        "临时丢失必须在可配置上限内继续当前验证窗口，达到上限或其他可信拒绝才停止");
-    requireTrue(
-        rejectedSlotBody.contains(QStringLiteral(
-            "本帧不下发运动并继续当前%6"))
-            && rejectedSlotBody.contains(QStringLiteral(
-                "4～8秒验证窗口"))
-            && rejectedSlotBody.contains(QStringLiteral(
-                "reason == Reason::LockTargetLost")),
-        "验证窗口暂时丢失不得下发旧运动或切换目标，连续丢失达到上限仍必须失败关闭");
+        "HuayanScheduler 收到锚点可信拒绝后必须停止视觉等待并直接阶段失败");
 
     const QString emitOperationErrorBody = requireBracedScopeAfter(
         source,

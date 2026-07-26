@@ -2254,75 +2254,6 @@ void HuayanScheduler::onVisionTargetRejectedForPickup(VisionHttpClient::TargetSe
     const bool validatingVisionAlignment =
         m_stageStep == StageStep::ValidateVisionAlignment;
     stopVisionWaitTimeout();
-
-    using Reason = VisionHttpClient::TargetSelectionReason;
-    if (reason == Reason::LockTargetMissing
-        || reason == Reason::LockTargetLost) {
-        const int configuredMissingLimit =
-            m_runtimeSettings.vision.lockMaxMissingFrames;
-        const int nextMissingFrames = m_anchorMissingFrames + 1;
-        m_anchorMissingFrames = nextMissingFrames;
-        const bool missingLimitReached =
-            reason == Reason::LockTargetLost
-            || configuredMissingLimit <= 0
-            || nextMissingFrames >= configuredMissingLimit;
-
-        if (missingLimitReached) {
-            const QString failureReason =
-                QStringLiteral("锁定目标连续丢失 %1/%2 帧：%3，"
-                               "锁定=(%4,%5)，拒绝切换旁边工位目标")
-                    .arg(nextMissingFrames)
-                    .arg(configuredMissingLimit)
-                    .arg(msg)
-                    .arg(m_anchorPreviousTargetX, 0, 'f', 1)
-                    .arg(m_anchorPreviousTargetY, 0, 'f', 1);
-            if (validatingVisionAlignment) {
-                const VisionAlignment::Sample invalidSample{
-                    m_grabOffset.x,
-                    m_grabOffset.y,
-                    m_grabOffset.z,
-                    m_grabOffset.rz,
-                    false};
-                emitOperationError(formatVisionAlignmentFailure(
-                    invalidSample, failureReason));
-            } else {
-                emitOperationError(QStringLiteral("[阶段一] %1")
-                                       .arg(failureReason));
-            }
-            return;
-        }
-
-        emit logMessage(
-            QStringLiteral("[阶段一] 锁定目标暂时丢失 %1/%2 帧：%3，"
-                           "锁定=(%4,%5)，拒绝切换旁边工位目标，"
-                           "本帧不下发运动并继续当前%6")
-                .arg(nextMissingFrames)
-                .arg(configuredMissingLimit)
-                .arg(msg)
-                .arg(m_anchorPreviousTargetX, 0, 'f', 1)
-                .arg(m_anchorPreviousTargetY, 0, 'f', 1)
-                .arg(validatingVisionAlignment
-                         ? QStringLiteral("4～8秒验证窗口")
-                         : QStringLiteral("目标等待流程")));
-
-        if (validatingVisionAlignment) {
-            // 暂时丢失的帧既不能复用旧目标下发运动，也不能清空已积累的真实 Z 样本；
-            // 保持当前 8 秒硬窗口继续取下一帧，恢复锁定后六参数回调会自动清零丢失计数。
-            requestNextStableZFrame();
-        } else {
-            const quint64 seq = nextCallbackSeq();
-            QTimer::singleShot(
-                m_runtimeSettings.vision.settleMs, this, [this, seq] {
-                    if (seq == m_commandSeq
-                        && m_stage == Stage::StageOne
-                        && m_stageStep == StageStep::WaitForVision) {
-                        proceedStage();
-                    }
-                });
-        }
-        return;
-    }
-
     if (validatingVisionAlignment) {
         const VisionAlignment::Sample invalidSample{
             m_grabOffset.x,
@@ -2338,6 +2269,7 @@ void HuayanScheduler::onVisionTargetRejectedForPickup(VisionHttpClient::TargetSe
     }
 
     QString reasonText;
+    using Reason = VisionHttpClient::TargetSelectionReason;
     switch (reason) {
     case Reason::AnchorDistanceTooFar:
         reasonText = QStringLiteral("最高目标超出拍照锚点矩形可信范围");
@@ -2345,6 +2277,36 @@ void HuayanScheduler::onVisionTargetRejectedForPickup(VisionHttpClient::TargetSe
     case Reason::AnchorTargetJumpTooFar:
         reasonText = QStringLiteral("闭环目标相对上一帧跳变过大");
         break;
+    case Reason::LockTargetMissing:
+    case Reason::LockTargetLost: {
+        const int nextMissingFrames = m_anchorMissingFrames + 1;
+        m_anchorMissingFrames = nextMissingFrames;
+        if (reason == Reason::LockTargetLost
+            || nextMissingFrames >= VISION_LOCK_MAX_MISSING_FRAMES) {
+            emitOperationError(QStringLiteral("[阶段一] 锁定目标连续丢失 %1/%2 帧：%3，锁定=(%4,%5)，拒绝切换旁边工位目标")
+                                   .arg(nextMissingFrames)
+                                   .arg(VISION_LOCK_MAX_MISSING_FRAMES)
+                                   .arg(msg)
+                                   .arg(m_anchorPreviousTargetX, 0, 'f', 1)
+                                   .arg(m_anchorPreviousTargetY, 0, 'f', 1));
+            return;
+        }
+
+        emit logMessage(QStringLiteral("[阶段一] 锁定目标暂时丢失 %1/%2 帧：%3，锁定=(%4,%5)，拒绝切换旁边工位目标，本帧不下发 MoveRelL")
+                            .arg(nextMissingFrames)
+                            .arg(VISION_LOCK_MAX_MISSING_FRAMES)
+                            .arg(msg)
+                            .arg(m_anchorPreviousTargetX, 0, 'f', 1)
+                            .arg(m_anchorPreviousTargetY, 0, 'f', 1));
+        const quint64 seq = nextCallbackSeq();
+        QTimer::singleShot(m_runtimeSettings.vision.settleMs, this, [this, seq] {
+            if (seq == m_commandSeq
+                && m_stage == Stage::StageOne
+                && m_stageStep == StageStep::WaitForVision)
+                proceedStage();
+        });
+        return;
+    }
     default:
         reasonText = QStringLiteral("锚点可信规则拒绝");
         break;
