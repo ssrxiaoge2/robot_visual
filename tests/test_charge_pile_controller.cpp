@@ -1367,19 +1367,37 @@ private slots:
             }
         }
         QVERIFY(startIndex >= 0);
-        QList<int> statusReadIndexes;
+        int firstStatusVoltageIndex = -1;
+        int firstStatusFaultIndex = -1;
+        int nextStatusVoltageIndex = -1;
         for (int index = startIndex + 1; index < requests.size(); ++index) {
-            if (quint8(requests.at(index).at(1)) == quint8(0x04)
-                && FakeChargePile::requestAddress(requests.at(index))
-                       == kRegOutVoltage) {
-                statusReadIndexes.append(index);
-                if (statusReadIndexes.size() == 2)
-                    break;
+            const QByteArray &request = requests.at(index);
+            const bool isInputRead =
+                quint8(request.at(1)) == quint8(0x04);
+            const quint16 address = FakeChargePile::requestAddress(request);
+            const quint16 count = FakeChargePile::requestValue(request);
+            if (firstStatusVoltageIndex < 0 && isInputRead
+                && address == kRegOutVoltage && count == 2) {
+                // Start 后第一轮完整状态组的首帧。
+                firstStatusVoltageIndex = index;
+            } else if (firstStatusVoltageIndex >= 0
+                       && firstStatusFaultIndex < 0 && isInputRead
+                       && address == kRegError && count == 1) {
+                // 同一轮完整状态组的末帧。轮询间隔从该帧完整响应后开始，
+                // 因此不能用两轮 voltage 首帧间距，避免被组内4×70ms节流掩盖。
+                firstStatusFaultIndex = index;
+            } else if (firstStatusFaultIndex >= 0 && isInputRead
+                       && address == kRegOutVoltage && count == 2) {
+                // 下一轮完整状态组的首帧。
+                nextStatusVoltageIndex = index;
+                break;
             }
         }
-        QCOMPARE(statusReadIndexes.size(), 2);
-        QVERIFY2(times.at(statusReadIndexes.at(1))
-                         - times.at(statusReadIndexes.at(0)) >= 200,
+        QVERIFY(firstStatusVoltageIndex >= 0);
+        QVERIFY(firstStatusFaultIndex > firstStatusVoltageIndex);
+        QVERIFY(nextStatusVoltageIndex > firstStatusFaultIndex);
+        QVERIFY2(times.at(nextStatusVoltageIndex)
+                         - times.at(firstStatusFaultIndex) >= 200,
                  "活动会话错误采用了候选轮询间隔");
     }
 
