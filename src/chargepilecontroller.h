@@ -123,6 +123,16 @@ public:
     void requestSafeStop(StopReason reason);
 
     /**
+     * @brief 在先前会话已以不安全终态结束后启动一轮独立保守恢复。
+     *
+     * 恢复先完整读取真实状态，再按停止、确认无输出、缩回、释放缩回线圈、
+     * 复位和终检顺序推进；绝不发送 Start，也不重复结果不确定的同一写命令。
+     * 成功或失败只通过 chargeSessionFinished 返回传入来源，不冒充应用关闭。
+     */
+    bool requestConservativeRecovery(SessionOrigin origin, StopReason reason,
+                                     QString *error);
+
+    /**
      * @brief 请求程序关闭前完成安全收尾。
      *
      * 若已有较低优先级停止在进行，仅升级原因并等待同一在途命令完成；绝不创建
@@ -194,6 +204,13 @@ private:
         RetryFinalSafetyQuery
     };
 
+    /** 最近一条结果不确定的写命令；保守恢复据此禁止盲目重发相同地址和值。 */
+    struct UncertainWrite {
+        quint8 function = 0;
+        quint16 address = 0;
+        quint16 value = 0;
+    };
+
     void enqueueRead(quint8 function, quint16 address, quint16 count,
                      std::function<void(const QByteArray &response)> onSuccess);
     void enqueueInputRead(quint16 address, quint16 count,
@@ -229,6 +246,8 @@ private:
     void pollWaitingForRetracted();
     void sendResetAndFinalCheck();
     void beginFinalSafetyQuery();
+    void beginConservativeRecoveryAfterSnapshot();
+    void finishConservativeRecoveryUnsafe(const QString &reason);
     void handleReadFailure(const QString &reason);
     void beginCommunicationRecovery(RecoveryAction action, const QString &reason);
     void startRecoveryConnection();
@@ -298,6 +317,7 @@ private:
     int m_recoveryAttempts = 0;
     QString m_recoveryReason;
     QString m_terminalFailureAfterRetractOff;
+    std::optional<UncertainWrite> m_uncertainWrite;
     quint16 m_expectedVoltageRaw = 0;
     quint16 m_expectedCurrentRaw = 0;
     std::optional<quint16> m_expectedCutoffRaw;

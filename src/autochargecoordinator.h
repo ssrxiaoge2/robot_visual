@@ -121,6 +121,10 @@ signals:
     void automaticChargeStartRequested();
     /// 请求唯一控制器汇入安全收尾；原因用于保持控制器停止优先级。
     void automaticChargeSafeStopRequested(ChargePileController::StopReason reason);
+    /// 不安全终态已结束原控制器会话时，请求建立一轮独立保守恢复会话。
+    void automaticChargeConservativeRecoveryRequested(
+        ChargePileController::SessionOrigin origin,
+        ChargePileController::StopReason reason);
     /// 真正系统故障才请求主调度进入 Error；10%电量报警不通过此信号强停当前任务。
     void lineErrorRequested(const QString &reason);
     /// 电量小于等于 Roboshop 10%报警线时发出一次边沿报警。
@@ -146,4 +150,6 @@ private:
     bool m_stopIntentIssued = false;     ///< 同一活动会话只提交一套安全收尾。
     bool m_lineErrorIssued = false;      ///< 同一故障条件只上报一次 Error。
     bool m_criticalAlarmIssued = false;  ///< 同一次 <=10%区间只报警一次。
+    bool m_conservativeRecoveryIntentIssued = false; ///< 同一不安全终态只建一轮恢复。
+    bool m_lowBatteryChargeRequired = false; ///< 当前任务低电后跨测量抖动保持充电需求。
 };

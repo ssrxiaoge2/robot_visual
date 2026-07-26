@@ -35,6 +35,10 @@ private slots:
     void coordinatorSuppressesRepeatedActionEdges();
     void manualControllerActivityNeverBecomesAnAutomaticSession();
     void unsafeAutomaticCompletionKeepsOwnershipAndReportsErrorOnce();
+    void staleAutomaticCompletionIsIgnoredWithoutOwnership();
+    void identicalInputsDoNotRetryRejectedStartUntilRelevantChange();
+    void errorEdgeStaysLatchedThroughoutOneRecoveryCycle();
+    void runningTaskLowBatteryRequirementSurvivesMeasurementRecovery();
 };
 
 void AutoChargeCoordinatorTest::disabledModeIsExactPassThrough()
@@ -312,8 +316,9 @@ void AutoChargeCoordinatorTest::manualControllerActivityNeverBecomesAnAutomaticS
 void AutoChargeCoordinatorTest::unsafeAutomaticCompletionKeepsOwnershipAndReportsErrorOnce()
 {
     AutoChargeCoordinator coordinator;
-    QSignalSpy stopSpy(&coordinator,
-                       &AutoChargeCoordinator::automaticChargeSafeStopRequested);
+    QSignalSpy recoverySpy(
+        &coordinator,
+        &AutoChargeCoordinator::automaticChargeConservativeRecoveryRequested);
     QSignalSpy errorSpy(&coordinator,
                         &AutoChargeCoordinator::lineErrorRequested);
     QSignalSpy holdSpy(&coordinator,
@@ -338,7 +343,7 @@ void AutoChargeCoordinatorTest::unsafeAutomaticCompletionKeepsOwnershipAndReport
         QStringLiteral("重复终态通知"));
 
     QVERIFY(coordinator.automaticSessionActive());
-    QCOMPARE(stopSpy.count(), 1);
+    QCOMPARE(recoverySpy.count(), 1);
     QCOMPARE(errorSpy.count(), 1);
 
     // 用正常阈值快照隔离“未知锁存是否清除”这一行为，避免安全完成后因为
@@ -351,6 +356,148 @@ void AutoChargeCoordinatorTest::unsafeAutomaticCompletionKeepsOwnershipAndReport
     QVERIFY(!coordinator.automaticSessionActive());
     QCOMPARE(errorSpy.count(), 1);
     QCOMPARE(holdSpy.last().at(0).toBool(), false);
+}
+
+void AutoChargeCoordinatorTest::staleAutomaticCompletionIsIgnoredWithoutOwnership()
+{
+    AutoChargeCoordinator coordinator;
+    QSignalSpy holdSpy(&coordinator,
+                       &AutoChargeCoordinator::dispatchHoldRequested);
+    QSignalSpy stopSpy(&coordinator,
+                       &AutoChargeCoordinator::automaticChargeSafeStopRequested);
+    QSignalSpy recoverySpy(
+        &coordinator,
+        &AutoChargeCoordinator::automaticChargeConservativeRecoveryRequested);
+    QSignalSpy errorSpy(&coordinator,
+                        &AutoChargeCoordinator::lineErrorRequested);
+
+    coordinator.onChargeControllerStateChanged(
+        ChargePileController::State::Unknown, QStringLiteral("旧未知状态"));
+    coordinator.onChargeSessionFinished(
+        false, ChargePileController::SessionOrigin::Automatic,
+        QStringLiteral("陈旧不安全终态"));
+    coordinator.onChargeSessionFinished(
+        true, ChargePileController::SessionOrigin::Automatic,
+        QStringLiteral("陈旧安全终态"));
+
+    QVERIFY(!coordinator.automaticSessionActive());
+    QCOMPARE(holdSpy.count(), 0);
+    QCOMPARE(stopSpy.count(), 0);
+    QCOMPARE(recoverySpy.count(), 0);
+    QCOMPARE(errorSpy.count(), 0);
+
+    // 陈旧 safe 回执不得清除 controllerUnknown；真正开启自动模式后仍应保守报错。
+    coordinator.setEnabled(true);
+    coordinator.onLineStateChanged(LineSystemState::Running,
+                                   QStringLiteral("主调度运行"));
+    AgvMonitorData monitor;
+    monitor.battery = 50;
+    monitor.curStation = 1;
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(errorSpy.count(), 1);
+    QCOMPARE(holdSpy.last().at(0).toBool(), true);
+}
+
+void AutoChargeCoordinatorTest::identicalInputsDoNotRetryRejectedStartUntilRelevantChange()
+{
+    AutoChargeCoordinator coordinator;
+    QSignalSpy startSpy(&coordinator,
+                        &AutoChargeCoordinator::automaticChargeStartRequested);
+    coordinator.setEnabled(true);
+    coordinator.onLineStateChanged(LineSystemState::Running,
+                                   QStringLiteral("主调度运行"));
+
+    AgvMonitorData monitor;
+    monitor.battery = 14;
+    monitor.curStation = 1;
+    monitor.navStatus = static_cast<quint16>(AgvController::NavStatus::Arrived);
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(startSpy.count(), 1);
+    coordinator.onAutomaticChargeStartResult(
+        false, QStringLiteral("控制器暂时忙碌"));
+
+    coordinator.onAgvMonitorUpdated(monitor);
+    coordinator.onAgvMonitorUpdated(monitor);
+    coordinator.onLineStateChanged(LineSystemState::Running,
+                                   QStringLiteral("仅文案重复"));
+    coordinator.onQueueChanged({});
+    coordinator.onQueueChanged({});
+    coordinator.onChargeControllerStateChanged(
+        ChargePileController::State::Idle, QStringLiteral("重复空闲"));
+    coordinator.onChargeControllerStateChanged(
+        ChargePileController::State::Idle, QStringLiteral("重复空闲"));
+    QCOMPARE(startSpy.count(), 1);
+
+    monitor.battery = 13;
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(startSpy.count(), 2);
+}
+
+void AutoChargeCoordinatorTest::errorEdgeStaysLatchedThroughoutOneRecoveryCycle()
+{
+    AutoChargeCoordinator coordinator;
+    QSignalSpy errorSpy(&coordinator,
+                        &AutoChargeCoordinator::lineErrorRequested);
+    coordinator.setEnabled(true);
+    coordinator.onLineStateChanged(LineSystemState::Running,
+                                   QStringLiteral("主调度运行"));
+    AgvMonitorData monitor;
+    monitor.battery = 14;
+    monitor.curStation = 1;
+    monitor.navStatus = static_cast<quint16>(AgvController::NavStatus::Arrived);
+    coordinator.onAgvMonitorUpdated(monitor);
+    coordinator.onAutomaticChargeStartResult(true, QString());
+
+    coordinator.onChargeControllerStateChanged(
+        ChargePileController::State::Unknown, QStringLiteral("恢复前未知"));
+    coordinator.onChargeControllerStateChanged(
+        ChargePileController::State::Connecting, QStringLiteral("恢复连接"));
+    coordinator.onChargeControllerStateChanged(
+        ChargePileController::State::SendingStop, QStringLiteral("恢复停止"));
+    coordinator.onChargeControllerStateChanged(
+        ChargePileController::State::Unknown, QStringLiteral("同轮再次未知"));
+    QCOMPARE(errorSpy.count(), 1);
+}
+
+void AutoChargeCoordinatorTest::runningTaskLowBatteryRequirementSurvivesMeasurementRecovery()
+{
+    AutoChargeCoordinator coordinator;
+    QSignalSpy holdSpy(&coordinator,
+                       &AutoChargeCoordinator::dispatchHoldRequested);
+    QSignalSpy returnSpy(&coordinator,
+                         &AutoChargeCoordinator::returnHomeRequested);
+    QSignalSpy startSpy(&coordinator,
+                        &AutoChargeCoordinator::automaticChargeStartRequested);
+
+    coordinator.setEnabled(true);
+    coordinator.onLineStateChanged(LineSystemState::Running,
+                                   QStringLiteral("主调度运行"));
+    Task running;
+    running.state = TaskState::Running;
+    coordinator.onQueueChanged({running});
+
+    AgvMonitorData monitor;
+    monitor.battery = 14;
+    monitor.curStation = 9;
+    monitor.navStatus = static_cast<quint16>(AgvController::NavStatus::None);
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(holdSpy.last().at(0).toBool(), true);
+
+    monitor.battery = 15;
+    coordinator.onAgvMonitorUpdated(monitor);
+    monitor.battery = 16;
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(holdSpy.last().at(0).toBool(), true);
+
+    Task pending;
+    pending.state = TaskState::Pending;
+    coordinator.onQueueChanged({pending});
+    QCOMPARE(returnSpy.count(), 1);
+
+    monitor.curStation = 1;
+    monitor.navStatus = static_cast<quint16>(AgvController::NavStatus::Arrived);
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(startSpy.count(), 1);
 }
 
 QTEST_MAIN(AutoChargeCoordinatorTest)

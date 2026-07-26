@@ -180,6 +180,7 @@ bool ChargePileController::startCharge(const SessionOrigin origin, QString *erro
     m_recoveryAttempts = 0;
     m_recoveryReason.clear();
     m_terminalFailureAfterRetractOff.clear();
+    m_uncertainWrite.reset();
     m_queryInProgress = true;
     m_flowMode = FlowMode::Charge;
     clearTransportWork();
@@ -246,6 +247,66 @@ void ChargePileController::requestSafeStop(const StopReason reason)
             m_socket.connectToHost(m_settings.host.trimmed(), m_settings.port);
         }
     }
+}
+
+bool ChargePileController::requestConservativeRecovery(
+    const SessionOrigin origin, const StopReason reason, QString *error)
+{
+    if (error)
+        error->clear();
+    if (m_queryInProgress) {
+        if (error)
+            *error = QStringLiteral("控制器仍有查询、充电或恢复操作在途。");
+        return false;
+    }
+    const ChargeSettingsValidation validation = validateChargeSettings(m_settings);
+    if (!validation.ok) {
+        if (error)
+            *error = QStringLiteral("充电桩设置无效：%1")
+                         .arg(validation.errors.join(QStringLiteral("；")));
+        return false;
+    }
+
+    ++m_sessionId;
+    m_sessionOrigin = origin;
+    m_stopReason = reason;
+    m_seenChargingOutput = false;
+    // 预检五组真实状态完成前保持为 false，避免 handleReadyRead() 在首帧后
+    // 把保守恢复误导入普通停止入口并盲目重发结果不确定的 Stop。
+    m_safeStopRequested = false;
+    m_safeShutdownStarted = false;
+    m_applicationShutdownRequested = false;
+    m_sessionFinishedEmitted = false;
+    m_startCommandConfirmed = false;
+    m_stopCommandConfirmed = false;
+    m_retractOnConfirmed = false;
+    m_retractOffConfirmed = false;
+    m_resetCommandConfirmed = false;
+    m_recoveryAction = RecoveryAction::None;
+    m_recoveryAttempts = 0;
+    m_recoveryReason.clear();
+    m_terminalFailureAfterRetractOff.clear();
+    m_queryInProgress = true;
+    m_flowMode = FlowMode::Charge;
+    clearTransportWork();
+
+    emit logMessage(
+        QStringLiteral("[充电会话%1][%2] 接受不安全终态后的保守恢复请求。")
+            .arg(m_sessionId).arg(originText(origin)));
+    enqueueSnapshotReads(
+        State::Prechecking,
+        QStringLiteral("保守恢复：先完整读取真实状态，禁止盲目重复未知写命令。"),
+        [this] { beginConservativeRecoveryAfterSnapshot(); });
+
+    if (m_socket.state() == QAbstractSocket::ConnectedState) {
+        beginNextRequest();
+    } else {
+        setState(State::Connecting,
+                 QStringLiteral("正在连接充电桩以执行保守恢复。"));
+        m_responseTimer.start(m_settings.connectTimeoutMs);
+        m_socket.connectToHost(m_settings.host.trimmed(), m_settings.port);
+    }
+    return true;
 }
 
 void ChargePileController::requestApplicationShutdown()
@@ -663,6 +724,15 @@ void ChargePileController::failOperation(
             ? QStringLiteral("%1；写命令结果不确定，设备状态未知，需要人工确认。")
                   .arg(reason)
             : reason;
+    if (commandResultUnknown && m_inFlightRequest.has_value()) {
+        const Request &request = *m_inFlightRequest;
+        if (request.frame.size() >= 6) {
+            m_uncertainWrite = UncertainWrite{
+                quint8(request.frame.at(1)),
+                responseWord(request.frame, 2),
+                responseWord(request.frame, 4)};
+        }
+    }
     clearTransportWork();
     m_socket.abort();
     m_queryInProgress = false;
@@ -715,6 +785,8 @@ void ChargePileController::finishChargeSession(
     m_responseTimer.stop();
     m_actionPollTimer.stop();
     m_phaseTimer.stop();
+    if (safe)
+        m_uncertainWrite.reset();
     emit chargeSessionFinished(safe, origin, message);
     if (notifyApplication)
         emit applicationShutdownFinished(safe, message);
@@ -1039,6 +1111,85 @@ void ChargePileController::beginFinalSafetyQuery()
             true, QStringLiteral("充电会话已完成统一安全收尾。"));
     });
     beginNextRequest();
+}
+
+void ChargePileController::beginConservativeRecoveryAfterSnapshot()
+{
+    if (!m_uncertainWrite.has_value()) {
+        beginSafeShutdown();
+        return;
+    }
+
+    const UncertainWrite uncertain = *m_uncertainWrite;
+    if (uncertain.function == 0x06) {
+        // 参数寄存器写结果不确定时，保守恢复不再写任何参数，只执行停止链。
+        beginSafeShutdown();
+        return;
+    }
+    if (uncertain.function != 0x05) {
+        finishConservativeRecoveryUnsafe(
+            QStringLiteral("未知写命令类型无法安全自动恢复。"));
+        return;
+    }
+
+    if (uncertain.address == ChargePileProtocol::kCoilStart) {
+        // Start 结果不确定时只能发送语义相反的 Stop，绝不能再次发送 Start。
+        beginSafeShutdown();
+        return;
+    }
+    if (uncertain.address == ChargePileProtocol::kCoilStop) {
+        if (!snapshotHasNoOutput()) {
+            finishConservativeRecoveryUnsafe(
+                QStringLiteral("停止命令结果不确定且仍检测到输出，禁止盲目重发停止。"));
+            return;
+        }
+        m_stopCommandConfirmed = true;
+        setState(State::WaitingForNoOutput,
+                 QStringLiteral("停止结果不确定，但完整查询已确认无输出，继续缩回。"));
+        sendRetractCommand();
+        return;
+    }
+    if (uncertain.address == ChargePileProtocol::kCoilRetract) {
+        if (uncertain.value == 0xFF00
+            && m_snapshot.retracted && !m_snapshot.extended) {
+            // ON 不确定但机构已明确缩到位时，只允许发送相反的 OFF，不重复 ON。
+            m_retractOnConfirmed = true;
+            enqueueWriteCoil(ChargePileProtocol::kCoilRetract, false, [this] {
+                m_retractOffConfirmed = true;
+            });
+            m_onQueueDrained = [this] { sendResetAndFinalCheck(); };
+            beginNextRequest();
+            return;
+        }
+        finishConservativeRecoveryUnsafe(
+            uncertain.value == 0x0000
+                ? QStringLiteral("缩回 OFF 结果不确定，位置到位不能证明线圈已经释放。")
+                : QStringLiteral("缩回 ON 结果不确定且未确认缩到位，禁止重复写入。"));
+        return;
+    }
+    if (uncertain.address == ChargePileProtocol::kCoilReset) {
+        if (snapshotConfirmsSafe(m_snapshot, m_settings)) {
+            m_unknownGate = false;
+            setState(State::SafeComplete,
+                     QStringLiteral("复位结果不确定，但最终完整快照已明确安全。"));
+            finishChargeSession(true, QStringLiteral("保守恢复已由完整快照确认安全。"));
+        } else {
+            finishConservativeRecoveryUnsafe(
+                QStringLiteral("复位结果不确定且完整快照未确认安全，禁止重复复位。"));
+        }
+        return;
+    }
+
+    finishConservativeRecoveryUnsafe(
+        QStringLiteral("结果不确定的线圈命令不属于可自动恢复范围。"));
+}
+
+void ChargePileController::finishConservativeRecoveryUnsafe(
+    const QString &reason)
+{
+    m_unknownGate = true;
+    setState(State::Unknown, reason);
+    finishChargeSession(false, reason);
 }
 
 void ChargePileController::handleReadFailure(const QString &reason)

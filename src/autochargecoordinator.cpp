@@ -18,6 +18,35 @@ bool lineAllowsAutomaticPolicy(const LineSystemState state)
     return state != LineSystemState::Idle && state != LineSystemState::Error;
 }
 
+bool relevantAgvChanged(const AgvMonitorData &left, const AgvMonitorData &right)
+{
+    return left.battery != right.battery
+           || left.curStation != right.curStation
+           || left.navStatus != right.navStatus;
+}
+
+bool relevantSettingsChanged(const ChargeSettings &left,
+                             const ChargeSettings &right)
+{
+    return left.host != right.host || left.port != right.port
+           || left.slaveId != right.slaveId || left.voltageV != right.voltageV
+           || left.currentA != right.currentA
+           || left.cutoffCurrentA != right.cutoffCurrentA
+           || left.maxChargeSeconds != right.maxChargeSeconds
+           || left.responseTimeoutMs != right.responseTimeoutMs
+           || left.connectTimeoutMs != right.connectTimeoutMs
+           || left.pollIntervalMs != right.pollIntervalMs
+           || left.startTimeoutMs != right.startTimeoutMs
+           || left.monitorTimeoutMs != right.monitorTimeoutMs
+           || left.stopTimeoutMs != right.stopTimeoutMs
+           || left.motionTimeoutMs != right.motionTimeoutMs
+           || left.safeCurrentA != right.safeCurrentA
+           || left.chargeDetectCurrentA != right.chargeDetectCurrentA
+           || left.startChargePercent != right.startChargePercent
+           || left.dispatchReadyPercent != right.dispatchReadyPercent
+           || left.stopChargePercent != right.stopChargePercent;
+}
+
 } // namespace
 
 AutoChargeDecision decideAutoCharge(const AutoChargeInputs &inputs,
@@ -186,6 +215,8 @@ void AutoChargeCoordinator::setEnabled(const bool enabled)
     if (m_inputs.enabled != enabled) {
         m_inputs.enabled = enabled;
         m_startRejectedUntilInputChanges = false;
+        if (!enabled && !m_inputs.automaticSessionActive)
+            m_lowBatteryChargeRequired = false;
         emit logMessage(enabled ? QStringLiteral("自动充电模式已开启")
                                 : QStringLiteral("自动充电模式已关闭"));
     }
@@ -194,34 +225,43 @@ void AutoChargeCoordinator::setEnabled(const bool enabled)
 
 void AutoChargeCoordinator::applySettings(const ChargeSettings &settings)
 {
+    const bool changed = relevantSettingsChanged(m_settings, settings);
     m_settings = settings;
-    m_startRejectedUntilInputChanges = false;
+    if (changed)
+        m_startRejectedUntilInputChanges = false;
     evaluate();
 }
 
 void AutoChargeCoordinator::onAgvMonitorUpdated(const AgvMonitorData &data)
 {
+    const bool changed = !m_inputs.hasAgvMonitor
+                         || relevantAgvChanged(m_inputs.agv, data);
     m_inputs.agv = data;
     m_inputs.hasAgvMonitor = true;
     m_monitorLostReason.clear();
-    m_startRejectedUntilInputChanges = false;
+    if (changed)
+        m_startRejectedUntilInputChanges = false;
     evaluate();
 }
 
 void AutoChargeCoordinator::onAgvMonitorLost(const QString &reason)
 {
+    const bool changed = m_inputs.hasAgvMonitor;
     m_inputs.hasAgvMonitor = false;
     m_monitorLostReason = reason;
-    m_startRejectedUntilInputChanges = false;
+    if (changed)
+        m_startRejectedUntilInputChanges = false;
     evaluate();
 }
 
 void AutoChargeCoordinator::onLineStateChanged(const LineSystemState state,
                                                const QString &text)
 {
+    const bool changed = m_inputs.lineState != state;
     m_inputs.lineState = state;
     m_lineStateText = text;
-    m_startRejectedUntilInputChanges = false;
+    if (changed)
+        m_startRejectedUntilInputChanges = false;
     evaluate();
 }
 
@@ -237,20 +277,30 @@ void AutoChargeCoordinator::onQueueChanged(const QList<Task> &tasks)
         }
     }
 
+    const bool changed = m_inputs.pendingCount != pendingCount
+                         || m_inputs.currentTaskRunning != currentTaskRunning;
     m_inputs.pendingCount = pendingCount;
     m_inputs.currentTaskRunning = currentTaskRunning;
-    m_startRejectedUntilInputChanges = false;
+    if (changed)
+        m_startRejectedUntilInputChanges = false;
     evaluate();
 }
 
 void AutoChargeCoordinator::onChargeControllerStateChanged(
     const ChargePileController::State state, const QString &text)
 {
-    m_inputs.chargeControllerBusy = isControllerBusyState(state);
-    m_inputs.chargeControllerUnknown =
+    const bool busy = isControllerBusyState(state);
+    const bool unknown =
         state == ChargePileController::State::Unknown
         || state == ChargePileController::State::Fault;
-    m_startRejectedUntilInputChanges = false;
+    const bool changed = m_inputs.chargeControllerBusy != busy
+                         || m_inputs.chargeControllerUnknown != unknown;
+    m_inputs.chargeControllerBusy = busy;
+    m_inputs.chargeControllerUnknown = unknown;
+    if (changed)
+        m_startRejectedUntilInputChanges = false;
+    if (state == ChargePileController::State::SafeComplete)
+        m_lineErrorIssued = false;
     Q_UNUSED(text);
     evaluate();
 }
@@ -270,6 +320,7 @@ void AutoChargeCoordinator::onAutomaticChargeStartResult(
     if (accepted) {
         m_inputs.automaticSessionActive = true;
         m_stopIntentIssued = false;
+        m_conservativeRecoveryIntentIssued = false;
         emit logMessage(QStringLiteral("自动充电会话已由控制器接受"));
         evaluate();
         return;
@@ -287,6 +338,12 @@ void AutoChargeCoordinator::onChargeSessionFinished(
     if (origin != ChargePileController::SessionOrigin::Automatic) {
         return;
     }
+    if (!m_inputs.automaticSessionActive) {
+        emit logMessage(
+            QStringLiteral("忽略没有自动会话所有权的 Automatic 终态：%1")
+                .arg(message));
+        return;
+    }
 
     if (safe) {
         m_inputs.automaticSessionActive = false;
@@ -297,6 +354,8 @@ void AutoChargeCoordinator::onChargeSessionFinished(
         m_startIntentPending = false;
         m_stopIntentIssued = false;
         m_lineErrorIssued = false;
+        m_conservativeRecoveryIntentIssued = false;
+        m_lowBatteryChargeRequired = false;
         emit logMessage(QStringLiteral("自动充电会话已安全完成：%1").arg(message));
         evaluate();
         return;
@@ -308,9 +367,10 @@ void AutoChargeCoordinator::onChargeSessionFinished(
     // 将不安全终态锁存为“状态未知”，使后续重复输入仍落在同一故障分支，
     // 避免 evaluate() 因普通阈值分支过早清除 Error 边沿抑制。
     m_inputs.chargeControllerUnknown = true;
-    if (!m_stopIntentIssued) {
-        m_stopIntentIssued = true;
-        emit automaticChargeSafeStopRequested(
+    if (!m_conservativeRecoveryIntentIssued) {
+        m_conservativeRecoveryIntentIssued = true;
+        emit automaticChargeConservativeRecoveryRequested(
+            ChargePileController::SessionOrigin::Automatic,
             ChargePileController::StopReason::Fault);
     }
     if (!m_lineErrorIssued) {
@@ -323,7 +383,26 @@ void AutoChargeCoordinator::onChargeSessionFinished(
 
 void AutoChargeCoordinator::evaluate()
 {
-    const AutoChargeDecision decision = decideAutoCharge(m_inputs, m_settings);
+    if (m_inputs.enabled && !m_inputs.automaticSessionActive
+        && lineAllowsAutomaticPolicy(m_inputs.lineState)
+        && m_inputs.hasAgvMonitor && m_inputs.currentTaskRunning
+        && m_inputs.agv.battery < m_settings.startChargePercent) {
+        m_lowBatteryChargeRequired = true;
+    }
+    if (!m_inputs.enabled && !m_inputs.automaticSessionActive)
+        m_lowBatteryChargeRequired = false;
+
+    AutoChargeInputs effectiveInputs = m_inputs;
+    if (m_lowBatteryChargeRequired && !m_inputs.automaticSessionActive
+        && effectiveInputs.hasAgvMonitor
+        && effectiveInputs.agv.battery >= m_settings.startChargePercent) {
+        // 只为“是否仍需回站/开始”保留低电语义；活动自动会话始终使用真实电量，
+        // 因而不会破坏 20%/80% 停止阈值。
+        effectiveInputs.agv.battery =
+            static_cast<quint16>(m_settings.startChargePercent - 1);
+    }
+    const AutoChargeDecision decision =
+        decideAutoCharge(effectiveInputs, m_settings);
 
     if (decision.statusText != m_lastDecisionText) {
         m_lastDecisionText = decision.statusText;
@@ -360,7 +439,11 @@ void AutoChargeCoordinator::evaluate()
         emit automaticChargeStartRequested();
     }
 
-    if (decision.requestSafeStop) {
+    const bool recoveryOwnsStop =
+        m_conservativeRecoveryIntentIssued
+        || (m_inputs.automaticSessionActive
+            && m_inputs.chargeControllerUnknown);
+    if (decision.requestSafeStop && !recoveryOwnsStop) {
         if (!m_stopIntentIssued) {
             m_stopIntentIssued = true;
             emit logMessage(QStringLiteral("自动充电请求安全收尾"));
@@ -380,8 +463,6 @@ void AutoChargeCoordinator::evaluate()
             emit lineErrorRequested(reason);
             emit logMessage(reason);
         }
-    } else {
-        m_lineErrorIssued = false;
     }
 
     const bool criticalBattery =
