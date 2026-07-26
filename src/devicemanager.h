@@ -26,9 +26,6 @@ class SettingsManager;
 
 Q_DECLARE_METATYPE(NScanScheduler::ScanResult)
 Q_DECLARE_METATYPE(NScanScheduler::ScanOptions)
-Q_DECLARE_METATYPE(Task)
-Q_DECLARE_METATYPE(QList<Task>)
-Q_DECLARE_METATYPE(LineSystemState)
 
 /**
  * @brief 所有设备对象和跨线程 worker 的唯一所有者/接线中心。

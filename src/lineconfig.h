@@ -3,6 +3,8 @@
 
 #include <QDateTime>
 #include <QChar>
+#include <QList>
+#include <QMetaType>
 #include <QString>
 
 #include <optional>
@@ -71,6 +73,12 @@ struct Task {
     QString statusText;                         ///< 面向现场人员的当前状态说明。
     QString lastError;                          ///< 最近一次失败原因；成功任务为空。
 };
+
+// 元类型声明必须紧跟类型定义，确保任何带 QList<Task>/LineSystemState 槽的
+// Q_OBJECT 都能在合并 MOC 编译单元中安全实例化，且不依赖 DeviceManager 包含顺序。
+Q_DECLARE_METATYPE(Task)
+Q_DECLARE_METATYPE(QList<Task>)
+Q_DECLARE_METATYPE(LineSystemState)
 
 /// 一个工位从取料到倒料所需的固定现场配置。
 struct StationTaskConfig {

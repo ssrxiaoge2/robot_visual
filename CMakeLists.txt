@@ -55,6 +55,8 @@ set(PROJECT_SOURCES
         src/chargepileprotocol.h
         src/chargepilecontroller.cpp
         src/chargepilecontroller.h
+        src/autochargecoordinator.cpp
+        src/autochargecoordinator.h
         src/settingsmanager.cpp
         src/settingsmanager.h
         src/settingsdialog.cpp

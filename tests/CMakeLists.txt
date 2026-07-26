@@ -1,5 +1,29 @@
 find_package(Qt6 REQUIRED COMPONENTS Core Test Network Gui)
 
+add_executable(auto_charge_coordinator_tests
+    test_auto_charge_coordinator.cpp
+    ../src/autochargecoordinator.cpp
+    ../src/chargesettings.cpp
+    # 协调器信号直接复用控制器的来源/停止原因强类型；链接现有控制器实现，
+    # 仅用于提供其 QMetaObject，不在本测试中建立真实连接或发送任何写命令。
+    ../src/chargepilecontroller.cpp
+    ../src/chargepileprotocol.cpp
+)
+
+target_include_directories(auto_charge_coordinator_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(auto_charge_coordinator_tests PRIVATE
+    Qt6::Core
+    Qt6::Network
+    Qt6::SerialBus
+    Qt6::Test
+)
+
+add_test(NAME auto_charge_coordinator_tests
+         COMMAND auto_charge_coordinator_tests)
+
 add_executable(charge_pile_controller_tests
     test_charge_pile_controller.cpp
     ../src/chargesettings.cpp
