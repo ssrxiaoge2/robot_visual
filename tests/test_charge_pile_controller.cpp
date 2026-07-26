@@ -73,6 +73,10 @@ public:
     void corruptNextStatusCrcAfterStart() { m_corruptStatusAfterStart = true; }
     void exceptionNextStatusAfterStart() { m_exceptionStatusAfterStart = true; }
     void timeoutNextStatusAfterStart() { m_timeoutStatusAfterStart = true; }
+    void suppressAllStatusResponsesAfterStart()
+    {
+        m_suppressAllStatusResponsesAfterStart = true;
+    }
     void disconnectNextStatusAfterStop() { m_disconnectAfterStop = true; }
     void disconnectNextStatusAfterRetractOn() { m_disconnectAfterRetractOn = true; }
     void disconnectNextStatusAfterReset() { m_disconnectAfterReset = true; }
@@ -138,6 +142,9 @@ public:
     }
 
 signals:
+    /** 首轮预检开始时同步通知测试，以便在参数写入前尝试修改活动会话设置。 */
+    void firstPrecheckStatusReadReceived();
+
     /** 测试可在回显发出前同步尝试切换目标，精确覆盖缩回活动阶段。 */
     void retractOnReceived();
 
@@ -259,6 +266,11 @@ private:
     {
         const quint8 function = quint8(request.at(1));
         const quint16 address = requestAddress(request);
+        if (m_chargeScenario && function == 0x04 && address == kRegOutVoltage
+            && !m_started && !m_firstPrecheckStatusReadEmitted) {
+            m_firstPrecheckStatusReadEmitted = true;
+            emit firstPrecheckStatusReadReceived();
+        }
         updateScenarioBeforeResponse(request);
 
         if ((function == 0x05 || function == 0x06)) {
@@ -403,6 +415,11 @@ private:
             const bool isFirstStatusFrameAfterStart =
                 quint8(request.at(1)) == quint8(0x04)
                 && requestAddress(request) == kRegOutVoltage && m_started;
+            if (isFirstStatusFrameAfterStart && m_suppressAllStatusResponsesAfterStart) {
+                // 所有恢复连接仍保持TCP可达，但首组完整状态永远不回应，用于证明
+                // 控制器按有限预算退出，且不会重发已唯一确认的启动或停止命令。
+                continue;
+            }
             if (isFirstStatusFrameAfterStart && m_timeoutStatusAfterStart) {
                 // 保持TCP连接但不回应，精确模拟已确认启动后的只读响应超时。
                 m_timeoutStatusAfterStart = false;
@@ -472,9 +489,11 @@ private:
     bool m_corruptStatusAfterStart = false;
     bool m_exceptionStatusAfterStart = false;
     bool m_timeoutStatusAfterStart = false;
+    bool m_suppressAllStatusResponsesAfterStart = false;
     bool m_disconnectAfterStop = false;
     bool m_disconnectAfterRetractOn = false;
     bool m_disconnectAfterReset = false;
+    bool m_firstPrecheckStatusReadEmitted = false;
     int m_chargeStatusReadCount = 0;
     quint16 m_currentAfterStop = 0;
     quint16 m_faultAfterRetract = 0x0080;
@@ -1225,6 +1244,143 @@ private slots:
         }
         QVERIFY(sawUnknown);
         QVERIFY(finishedSpy.first().at(2).toString().contains(QStringLiteral("人工")));
+    }
+
+    void unknownWriteThenConservativeShutdownClearsGateAndAllowsNextStart()
+    {
+        FakeChargePile pile;
+        QVERIFY(pile.listen());
+        pile.enableChargeScenario();
+        pile.dropFirstEchoForCoil(kCoilStart);
+
+        ChargePileController controller;
+        ChargeSettings settings = loopbackSettings(pile);
+        controller.applySettings(settings);
+        QSignalSpy chargeFinishedSpy(
+            &controller, &ChargePileController::chargeSessionFinished);
+        QSignalSpy shutdownFinishedSpy(
+            &controller, &ChargePileController::applicationShutdownFinished);
+        QSignalSpy stateSpy(&controller, &ChargePileController::stateChanged);
+        QString error;
+        QVERIFY(controller.startCharge(
+            ChargePileController::SessionOrigin::Manual, &error));
+        QTRY_COMPARE_WITH_TIMEOUT(chargeFinishedSpy.count(), 1, 8000);
+        QVERIFY(!chargeFinishedSpy.first().at(0).toBool());
+        QCOMPARE(stateSpy.last().first().value<ChargePileController::State>(),
+                 ChargePileController::State::Unknown);
+
+        controller.requestApplicationShutdown();
+        QTRY_COMPARE_WITH_TIMEOUT(shutdownFinishedSpy.count(), 1, 10000);
+        QVERIFY2(shutdownFinishedSpy.first().at(0).toBool(),
+                 qPrintable(shutdownFinishedSpy.first().at(1).toString()));
+        QCOMPARE(stateSpy.last().first().value<ChargePileController::State>(),
+                 ChargePileController::State::SafeComplete);
+        QVERIFY(!controller.shutdownRequired());
+        QTest::qWait(200);
+        QCOMPARE(shutdownFinishedSpy.count(), 1);
+
+        QString nextStartError;
+        QVERIFY2(controller.startCharge(
+                     ChargePileController::SessionOrigin::Manual, &nextStartError),
+                 qPrintable(nextStartError));
+        controller.requestSafeStop(ChargePileController::StopReason::Manual);
+    }
+
+    void persistentReadFailureAfterConfirmedStartExhaustsTwoRecoveries()
+    {
+        FakeChargePile pile;
+        QVERIFY(pile.listen());
+        pile.enableChargeScenario();
+        pile.suppressAllStatusResponsesAfterStart();
+
+        ChargePileController controller;
+        ChargeSettings settings = loopbackSettings(pile);
+        settings.responseTimeoutMs = 50;
+        controller.applySettings(settings);
+        QSignalSpy finishedSpy(
+            &controller, &ChargePileController::chargeSessionFinished);
+        QSignalSpy stateSpy(&controller, &ChargePileController::stateChanged);
+        QString error;
+        QVERIFY(controller.startCharge(
+            ChargePileController::SessionOrigin::Manual, &error));
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 8000);
+
+        QVERIFY(!finishedSpy.first().at(0).toBool());
+        QVERIFY(finishedSpy.first().at(2).toString().contains(
+            QStringLiteral("有限重连失败")));
+        QCOMPARE(stateSpy.last().first().value<ChargePileController::State>(),
+                 ChargePileController::State::Unknown);
+        QCOMPARE(pile.coilCount(kCoilStart), 1);
+        QCOMPARE(pile.coilCount(kCoilStop), 1);
+        QCOMPARE(pile.connectionCount(), 3);
+        const int stableRequestCount = pile.requests().size();
+        QTest::qWait(300);
+        QCOMPARE(pile.requests().size(), stableRequestCount);
+        QCOMPARE(pile.connectionCount(), 3);
+        QCOMPARE(finishedSpy.count(), 1);
+        QVERIFY(!controller.isBusy());
+    }
+
+    void activeChargeRejectsNonTargetSettingsAndKeepsOriginalValuesAndTiming()
+    {
+        FakeChargePile pile;
+        QVERIFY(pile.listen());
+        pile.enableChargeScenario();
+
+        ChargePileController controller;
+        ChargeSettings original = loopbackSettings(pile);
+        original.pollIntervalMs = 250;
+        controller.applySettings(original);
+
+        ChargeSettings candidate = original;
+        candidate.voltageV = 60.0;
+        candidate.currentA = 40.0;
+        candidate.responseTimeoutMs = 1;
+        candidate.pollIntervalMs = 1;
+        connect(&pile, &FakeChargePile::firstPrecheckStatusReadReceived,
+                &controller, [&controller, candidate] {
+                    controller.applySettings(candidate);
+                });
+
+        QSignalSpy finishedSpy(
+            &controller, &ChargePileController::chargeSessionFinished);
+        QString error;
+        QVERIFY(controller.startCharge(
+            ChargePileController::SessionOrigin::Manual, &error));
+        QTRY_COMPARE_WITH_TIMEOUT(finishedSpy.count(), 1, 15000);
+        QVERIFY2(finishedSpy.first().at(0).toBool(),
+                 qPrintable(finishedSpy.first().at(2).toString()));
+
+        QVERIFY(pile.receivedWriteValue(kRegSetVoltage, 584));
+        QVERIFY(pile.receivedWriteValue(kRegSetCurrent, 500));
+        QVERIFY(!pile.receivedWriteValue(kRegSetVoltage, 600));
+        QVERIFY(!pile.receivedWriteValue(kRegSetCurrent, 400));
+
+        const QList<QByteArray> requests = pile.requests();
+        const QList<qint64> times = pile.requestTimesMs();
+        int startIndex = -1;
+        for (int index = 0; index < requests.size(); ++index) {
+            if (quint8(requests.at(index).at(1)) == quint8(0x05)
+                && FakeChargePile::requestAddress(requests.at(index)) == kCoilStart) {
+                startIndex = index;
+                break;
+            }
+        }
+        QVERIFY(startIndex >= 0);
+        QList<int> statusReadIndexes;
+        for (int index = startIndex + 1; index < requests.size(); ++index) {
+            if (quint8(requests.at(index).at(1)) == quint8(0x04)
+                && FakeChargePile::requestAddress(requests.at(index))
+                       == kRegOutVoltage) {
+                statusReadIndexes.append(index);
+                if (statusReadIndexes.size() == 2)
+                    break;
+            }
+        }
+        QCOMPARE(statusReadIndexes.size(), 2);
+        QVERIFY2(times.at(statusReadIndexes.at(1))
+                         - times.at(statusReadIndexes.at(0)) >= 200,
+                 "活动会话错误采用了候选轮询间隔");
     }
 
     void activeChargeRejectsTargetSwitchAndKeepsAllSafetyWritesOnOriginalPile()

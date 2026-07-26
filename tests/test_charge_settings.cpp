@@ -84,6 +84,54 @@ private slots:
         QVERIFY(!validateChargeSettings(settings).ok);
     }
 
+    void loadsOptionalRegisterValuesAtExactIniBoundary()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("charge.ini"));
+        QSettings ini(path, QSettings::IniFormat);
+        ini.setValue(QStringLiteral("charge/cutoffCurrentA"), 6553.5);
+        ini.setValue(QStringLiteral("charge/maxChargeSeconds"), 65535);
+        ini.sync();
+
+        const ChargeSettingsLoadResult loaded = loadChargeSettings(path);
+        QCOMPARE(loaded.settings.cutoffCurrentA, std::optional<double>{6553.5});
+        QCOMPARE(loaded.settings.maxChargeSeconds, std::optional<int>{65535});
+        QVERIFY(loaded.warnings.isEmpty());
+    }
+
+    void rejectsOnlyOverflowingOptionalIniFieldsAndKeepsUnrelatedValues()
+    {
+        QTemporaryDir dir;
+        QVERIFY(dir.isValid());
+        const QString path = dir.filePath(QStringLiteral("charge.ini"));
+        QSettings ini(path, QSettings::IniFormat);
+        ini.setValue(QStringLiteral("connection/host"), QStringLiteral("10.20.30.40"));
+        ini.setValue(QStringLiteral("charge/voltageV"), 55.5);
+        ini.setValue(QStringLiteral("charge/currentA"), 42.0);
+        ini.setValue(QStringLiteral("charge/cutoffCurrentA"), 6553.6);
+        ini.setValue(QStringLiteral("charge/maxChargeSeconds"), 65536);
+        ini.setValue(QStringLiteral("timeout/responseTimeoutMs"), 1234);
+        ini.setValue(QStringLiteral("threshold/startChargePercent"), 16);
+        ini.setValue(QStringLiteral("threshold/dispatchReadyPercent"), 25);
+        ini.setValue(QStringLiteral("threshold/stopChargePercent"), 85);
+        ini.sync();
+
+        const ChargeSettingsLoadResult loaded = loadChargeSettings(path);
+        QVERIFY(!loaded.settings.cutoffCurrentA.has_value());
+        QVERIFY(!loaded.settings.maxChargeSeconds.has_value());
+        QCOMPARE(loaded.settings.host, QStringLiteral("10.20.30.40"));
+        QCOMPARE(loaded.settings.voltageV, 55.5);
+        QCOMPARE(loaded.settings.currentA, 42.0);
+        QCOMPARE(loaded.settings.responseTimeoutMs, 1234);
+        QCOMPARE(loaded.settings.startChargePercent, 16);
+        QCOMPARE(loaded.settings.dispatchReadyPercent, 25);
+        QCOMPARE(loaded.settings.stopChargePercent, 85);
+        const QString warningText = loaded.warnings.join(QStringLiteral("；"));
+        QVERIFY(warningText.contains(QStringLiteral("charge/cutoffCurrentA")));
+        QVERIFY(warningText.contains(QStringLiteral("charge/maxChargeSeconds")));
+    }
+
     void persistsOptionalValuesAndRestoresInvalidFieldsToDefaults()
     {
         QTemporaryDir dir;

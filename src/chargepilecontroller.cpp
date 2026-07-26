@@ -1029,6 +1029,10 @@ void ChargePileController::beginFinalSafetyQuery()
                 false, QStringLiteral("安全收尾最终确认失败，需要人工检查。"));
             return;
         }
+        // Unknown 只能由完整快照明确安全来解除。保守关闭的终检与手动查询使用
+        // 同一套 snapshotConfirmsSafe 判据，因此成功分支必须同步放行后续充电，
+        // 不能只把界面状态改成 SafeComplete 而遗留内部未知门禁。
+        m_unknownGate = false;
         setState(State::SafeComplete,
                  QStringLiteral("工作清零、继电器断开、电流安全且机构明确缩到位。"));
         finishChargeSession(

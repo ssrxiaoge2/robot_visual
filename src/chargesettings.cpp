@@ -190,17 +190,24 @@ ChargeSettingsLoadResult loadChargeSettings(const QString &iniPath)
 
     if (ini.contains(QLatin1String(kCutoffCurrentA))) {
         double value = 0.0;
-        if (readDouble(ini, kCutoffCurrentA, &value) && value > 0.0)
+        // 充电桩寄存器以 0.1A 为单位，加载时即限制为可无损表示的16位值。
+        // 非法可选项只保持默认未启用，不影响其他已独立验证的配置字段。
+        if (readDouble(ini, kCutoffCurrentA, &value)
+            && value > 0.0 && value * 10.0 <= 65535.0) {
             result.settings.cutoffCurrentA = value;
-        else
+        } else {
             appendWarning(result.warnings, kCutoffCurrentA);
+        }
     }
     if (ini.contains(QLatin1String(kMaxChargeSeconds))) {
         int value = 0;
-        if (readInt(ini, kMaxChargeSeconds, &value) && value > 0)
+        // 最大充电时长直接写单个16位秒寄存器，逐字段加载时拒绝回绕值。
+        if (readInt(ini, kMaxChargeSeconds, &value)
+            && value >= 1 && value <= 65535) {
             result.settings.maxChargeSeconds = value;
-        else
+        } else {
             appendWarning(result.warnings, kMaxChargeSeconds);
+        }
     }
 
     if (!validateChargeSettings(result.settings).ok) {
