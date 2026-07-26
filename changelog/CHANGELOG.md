@@ -5,6 +5,48 @@
 
 ---
 
+## 2026-07-26 | 未发布 | 4D 视觉联合对准与现场复测
+
+### 变更
+- 将阶段一原多轮 X/Y/Rz 分轴视觉闭环改为一次联合 MoveJ 到目标预抓取位，随后按配置执行 0～2 次工具坐标系 XY/Rz 联合 MoveL 精修。
+- XY/Rz 最终对准与 Z 稳定共用 4～8 秒观察窗口；达到精修次数、视觉超时或目标丢失后统一安全停止，不自动重选目标、重试或下探。
+- 运行设置中的旧“最大矫正次数”语义替换为联合精修次数，删除生产流程对旧 15 轮逐轴闭环的依赖。
+
+### 修复
+- Z 稳定判定改为最近 5 个真实新帧去掉一高一低，以核心 3 帧极差判稳，并使用 5 帧中值作为最终下探深度，降低单帧深度异常造成的误停止。
+- 目标临时丢失继续保持立即停止，撤销没有稳定 `track_id` 时使用历史目标续抓的方案。
+- 完善联合 MoveJ、联合 MoveL 的完成证据、8 秒硬截止、运动失败出口和诊断日志。
+
+### 现场结论
+- 现场仍观察到大角度 Rz 下 XY/Rz 难以同时稳定的问题；真实夹爪 TCP 尚未标定，错误旋转中心被列为高优先级待验证假设，但不认定为唯一根因。
+- 后续需标定真实夹爪 TCP，人工迁移全部示教器 `Func_*` 运动节点，统一 C++ 直接运动使用的 TCP 名称，确认 Modbus `1036 Actual_PCS_Base` 的位姿原点后重新手眼标定。
+- Python 手眼标定程序当前不主动选择 TCP，暂不修改 Modbus 地址；是否需要调整位姿语义取决于 `1036` 静止切换测试。
+
+### 文档
+- 新增并持续更新 4D 视觉联合对准设计、实施计划和现场问题修复记录。
+- 更新智能体协作规则：中文 Markdown 命名带日期、修复过程必须留档、push 前同步 README 和 CHANGELOG。
+- 删除已合并进根目录 `AGENTS.md` 的重复 `agents.d` 中文文档规则。
+
+### 验证
+- 使用 Qt 6.8.3、MSVC 2022 64 位 Debug 完整构建成功。
+- 完整 CTest 通过：`22/22`，失败 `0`。
+
+### 文件
+- `src/huayanScheduler.*`
+- `src/visionalignmentdecision.*`
+- `src/visionclient.*`
+- `src/runtimesettings.*`
+- `src/settingsdialog.cpp`
+- `src/settingsmanager.cpp`
+- `tests/`
+- `docs/superpowers/specs/`
+- `docs/superpowers/plans/`
+- `README.md`
+- `AGENTS.md`
+- `changelog/CHANGELOG.md`
+
+---
+
 ## 2026-07-23 | v0.3.0 | 运行参数设置与视觉深度自动下探
 
 ### 新增
