@@ -19,6 +19,7 @@
 #include "devicemanager.h"
 #include "themeswitch.h"
 #include "agvcontroller.h"
+#include "chargeshutdownpolicy.h"
 
 class HandEyeDialog;
 class HuayanScheduler;
@@ -285,12 +286,7 @@ private:
     QPointer<ChargePileSettingsDialog> m_chargeSettingsDialog; ///< 模态窗口仍接收异步锁定更新。
     QString m_chargeDecisionText =
         QStringLiteral("自动充电未授权，主调度逻辑保持原样");
-    bool m_chargeClosePending = false; ///< 首次 close 已忽略，唯一关闭收尾正在异步执行。
-    bool m_chargeShutdownResultConsumed = false; ///< 防止迟到/重复完成信号二次触发 close。
-    bool m_chargeShutdownFailed = false; ///< 最近一次关闭收尾失败，允许进入双确认强退路径。
-    bool m_chargeCloseSafeConfirmed = false; ///< 仅 safe=true 且控制器确认为安全时置位。
-    bool m_forceChargeExitFirstConfirmed = false; ///< 操作员已确认“停止结果未知”。
-    bool m_forceChargeExitConfirmed = false; ///< 操作员已再次确认退出不代表停止或缩回。
+    ChargeShutdownPolicy m_chargeShutdownPolicy; ///< 关闭代次、防重入和强退资格的唯一真值。
 
     // ── 主题开关 ─────────────────────────────────────────────
     ThemeSwitch    *m_themeSwitch = nullptr;

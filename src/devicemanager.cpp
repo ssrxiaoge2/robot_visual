@@ -329,7 +329,12 @@ DeviceManager::DeviceManager(QObject *parent)
     connect(m_chargePileController,
             &ChargePileController::applicationShutdownFinished,
             this,
-            &DeviceManager::applicationShutdownFinished);
+            [this](const bool safe, const QString &message) {
+        // 失败后解除门禁，允许操作员查询或重试保守恢复；成功后继续冻结，
+        // 直到 MainWindow 的排队关闭真正析构 DeviceManager。
+        m_chargeApplicationShutdownGate.finishRequest(safe);
+        emit applicationShutdownFinished(safe, message);
+    });
 
     connect(m_autoChargeCoordinator, &AutoChargeCoordinator::dispatchHoldRequested,
             m_lineManager, &LineManager::setChargeDispatchHold);
@@ -344,6 +349,11 @@ DeviceManager::DeviceManager(QObject *parent)
             this, [this] {
         // 协调器在发意图前已锁存 startIntentPending；这里同步反馈一次接受结果，
         // 即使 startCharge 内同步发布 Connecting，也不会丢失或重复接受回执。
+        if (m_chargeApplicationShutdownGate.blocksNewActions()) {
+            m_autoChargeCoordinator->onAutomaticChargeStartResult(
+                false, QStringLiteral("程序正在执行充电安全关闭"));
+            return;
+        }
         QString error;
         const bool accepted = m_chargePileController->startCharge(
             ChargePileController::SessionOrigin::Automatic, &error);
@@ -472,6 +482,11 @@ bool DeviceManager::applyChargeSettingsCandidate(
 {
     if (error)
         error->clear();
+    if (m_chargeApplicationShutdownGate.blocksNewActions()) {
+        if (error)
+            *error = QStringLiteral("程序正在执行充电安全关闭，不能修改充电参数");
+        return false;
+    }
 
     const ChargeSettingsValidation validation = validateChargeSettings(candidate);
     if (!validation.ok) {
@@ -524,6 +539,8 @@ bool DeviceManager::startManualCharge(QString *error)
 
     if (!m_lineManager || !m_chargePileController || !m_autoChargeCoordinator)
         return reject(QStringLiteral("充电业务对象尚未初始化"));
+    if (m_chargeApplicationShutdownGate.blocksNewActions())
+        return reject(QStringLiteral("程序正在执行充电安全关闭，不能开始新会话"));
 
     ManualChargeStartContext context;
     context.lineState = m_lineManager->state();
@@ -557,6 +574,11 @@ bool DeviceManager::queryChargePileStatus(QString *error)
             *error = QStringLiteral("充电控制器尚未初始化");
         return false;
     }
+    if (m_chargeApplicationShutdownGate.blocksNewActions()) {
+        if (error)
+            *error = QStringLiteral("程序正在执行充电安全关闭，不能开始状态查询");
+        return false;
+    }
     if (m_chargePileController->isBusy()) {
         if (error)
             *error = QStringLiteral("充电控制器正在执行其他操作");
@@ -583,10 +605,19 @@ bool DeviceManager::stopChargePile(QString *error)
         return true;
     }
 
+    if (m_chargePileController->isBusy()) {
+        if (error)
+            *error = QStringLiteral("只读查询或其他非充电操作正在执行，不能启动安全恢复");
+        return false;
+    }
+
     if (m_chargePileController->shutdownRequired()) {
+        const bool automaticSessionActive =
+            m_autoChargeCoordinator
+            && m_autoChargeCoordinator->automaticSessionActive();
         const bool accepted =
             m_chargePileController->requestConservativeRecovery(
-                ChargePileController::SessionOrigin::Manual,
+                selectStopRecoveryOrigin(automaticSessionActive),
                 ChargePileController::StopReason::Manual,
                 error);
         emit logMessage(
@@ -611,7 +642,13 @@ bool DeviceManager::chargePileShutdownRequired() const
 
 void DeviceManager::requestApplicationShutdown()
 {
+    // 冻结必须发生在任何协调器或控制器调用之前，避免同步信号重入接受新动作。
+    m_chargeApplicationShutdownGate.beginRequest();
+    if (m_autoChargeCoordinator)
+        m_autoChargeCoordinator->setEnabled(false);
+
     if (!m_chargePileController) {
+        m_chargeApplicationShutdownGate.finishRequest(false);
         emit applicationShutdownFinished(
             false, QStringLiteral("充电控制器尚未初始化，无法确认充电桩安全状态。"));
         return;
@@ -626,6 +663,13 @@ bool DeviceManager::setAutoChargeEnabled(const bool enabled, QString *error)
     if (!m_autoChargeCoordinator || !m_chargePileController) {
         if (error)
             *error = QStringLiteral("自动充电业务对象尚未初始化");
+        return false;
+    }
+    if (m_chargeApplicationShutdownGate.blocksNewActions()) {
+        // requestApplicationShutdown() 已经直接关闭协调器授权；这里拒绝所有
+        // 新开关动作，防止旧 UI 事件在关闭流程中重新开启自动策略。
+        if (error)
+            *error = QStringLiteral("程序正在执行充电安全关闭，不能改变自动充电授权");
         return false;
     }
 

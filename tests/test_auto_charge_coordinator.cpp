@@ -2,6 +2,7 @@
 
 #include "agvmonitorfreshnessguard.h"
 #include "autochargecoordinator.h"
+#include "chargeshutdownpolicy.h"
 
 namespace {
 
@@ -38,6 +39,7 @@ private slots:
     void staleMonitorWithoutActiveSessionOnlyHoldsDispatchOnce();
     void coordinatorSuppressesRepeatedActionEdges();
     void manualControllerActivityNeverBecomesAnAutomaticSession();
+    void shutdownFreezeKeepsAutomaticRecoveryOwnershipAndPreventsRestart();
     void unsafeAutomaticCompletionKeepsOwnershipAndReportsErrorOnce();
     void staleAutomaticCompletionIsIgnoredWithoutOwnership();
     void identicalInputsDoNotRetryRejectedStartUntilRelevantChange();
@@ -405,6 +407,53 @@ void AutoChargeCoordinatorTest::manualControllerActivityNeverBecomesAnAutomaticS
     QVERIFY(!coordinator.automaticSessionActive());
     QVERIFY(releaseSpy.count() >= 2);
     QCOMPARE(releaseSpy.last().at(0).toBool(), false);
+}
+
+void AutoChargeCoordinatorTest::
+    shutdownFreezeKeepsAutomaticRecoveryOwnershipAndPreventsRestart()
+{
+    AutoChargeCoordinator coordinator;
+    QSignalSpy startSpy(
+        &coordinator, &AutoChargeCoordinator::automaticChargeStartRequested);
+    QSignalSpy holdSpy(
+        &coordinator, &AutoChargeCoordinator::dispatchHoldRequested);
+
+    coordinator.setEnabled(true);
+    coordinator.onLineStateChanged(
+        LineSystemState::Running, QStringLiteral("主调度运行"));
+    AgvMonitorData monitor;
+    monitor.battery = 14;
+    monitor.curStation = 1;
+    monitor.navStatus =
+        static_cast<quint16>(AgvController::NavStatus::Arrived);
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(startSpy.count(), 1);
+    coordinator.onAutomaticChargeStartResult(
+        true, QStringLiteral("自动会话已接受"));
+    QVERIFY(coordinator.automaticSessionActive());
+
+    // DeviceManager 开始应用关闭时必须先撤销自动授权；旧 Automatic 终态即使
+    // 到达，也不能因为电量仍低于 15%而建立下一次自动启动意图。
+    coordinator.setEnabled(false);
+    QVERIFY(!coordinator.isEnabled());
+    coordinator.onChargeSessionFinished(
+        false, ChargePileController::SessionOrigin::Automatic,
+        QStringLiteral("第一次关闭收尾结果未知"));
+    QVERIFY(coordinator.automaticSessionActive());
+
+    const ChargePileController::SessionOrigin recoveryOrigin =
+        selectStopRecoveryOrigin(coordinator.automaticSessionActive());
+    QCOMPARE(recoveryOrigin,
+             ChargePileController::SessionOrigin::Automatic);
+    coordinator.onChargeSessionFinished(
+        true, recoveryOrigin, QStringLiteral("人工重试后确认安全"));
+
+    QVERIFY(!coordinator.automaticSessionActive());
+    QCOMPARE(holdSpy.last().at(0).toBool(), false);
+    coordinator.onChargeControllerStateChanged(
+        ChargePileController::State::Idle, QStringLiteral("恢复后空闲"));
+    coordinator.onAgvMonitorUpdated(monitor);
+    QCOMPARE(startSpy.count(), 1);
 }
 
 void AutoChargeCoordinatorTest::unsafeAutomaticCompletionKeepsOwnershipAndReportsErrorOnce()

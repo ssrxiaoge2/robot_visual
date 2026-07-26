@@ -9,6 +9,7 @@ add_executable(auto_charge_coordinator_tests
     ../src/chargepilecontroller.cpp
     ../src/chargepileprotocol.cpp
     ../src/agvmonitorfreshnessguard.cpp
+    ../src/chargeshutdownpolicy.cpp
 )
 
 target_include_directories(auto_charge_coordinator_tests PRIVATE
@@ -136,6 +137,24 @@ target_link_libraries(charge_ui_and_shutdown_contract_tests PRIVATE
 
 add_test(NAME charge_ui_and_shutdown_contract_tests
          COMMAND charge_ui_and_shutdown_contract_tests)
+
+add_executable(charge_shutdown_policy_tests
+    test_charge_shutdown_policy.cpp
+    ../src/chargeshutdownpolicy.cpp
+)
+
+target_include_directories(charge_shutdown_policy_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(charge_shutdown_policy_tests PRIVATE
+    Qt6::Core
+    Qt6::Network
+    Qt6::Test
+)
+
+add_test(NAME charge_shutdown_policy_tests
+         COMMAND charge_shutdown_policy_tests)
 
 add_executable(vision_alignment_decision_tests
     test_vision_alignment_decision.cpp

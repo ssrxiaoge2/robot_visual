@@ -36,6 +36,17 @@ void requireNotContains(const QString &source,
         throw std::runtime_error(message.toStdString());
 }
 
+void requireBefore(const QString &source,
+                   const QString &first,
+                   const QString &second,
+                   const QString &message)
+{
+    const qsizetype firstIndex = source.indexOf(first);
+    const qsizetype secondIndex = source.indexOf(second, firstIndex + 1);
+    if (firstIndex < 0 || secondIndex < 0 || firstIndex >= secondIndex)
+        throw std::runtime_error(message.toStdString());
+}
+
 } // namespace
 
 int main(int argc, char *argv[])
@@ -51,6 +62,10 @@ int main(int argc, char *argv[])
             readUtf8File(root + QStringLiteral("/src/devicemanager.h"));
         const QString deviceSource =
             readUtf8File(root + QStringLiteral("/src/devicemanager.cpp"));
+        const QString shutdownPolicyHeader =
+            readUtf8File(root + QStringLiteral("/src/chargeshutdownpolicy.h"));
+        const QString shutdownPolicySource =
+            readUtf8File(root + QStringLiteral("/src/chargeshutdownpolicy.cpp"));
 
         // 主窗口第一次收到关闭事件时必须先阻止析构，并把安全收尾交给
         // DeviceManager 所拥有的唯一控制器，不能只断开 TCP 或直接删除控制器。
@@ -66,17 +81,17 @@ int main(int argc, char *argv[])
                         QStringLiteral("m_devMgr->requestApplicationShutdown();"),
                         QStringLiteral("关闭必须进入 DeviceManager 的唯一安全收尾入口"));
         requireContains(mainSource,
-                        QStringLiteral("m_chargeClosePending"),
-                        QStringLiteral("关闭流程必须有防重入状态"));
+                        QStringLiteral("m_chargeShutdownPolicy"),
+                        QStringLiteral("关闭流程必须使用显式代次策略防重入"));
         requireContains(mainSource,
-                        QStringLiteral("m_chargeCloseSafeConfirmed"),
-                        QStringLiteral("只有已确认安全才能触发第二次关闭"));
+                        QStringLiteral("canRunQueuedClose("),
+                        QStringLiteral("排队关闭必须实时复核安全状态"));
         requireContains(mainSource,
                         QStringLiteral("applicationShutdownFinished"),
                         QStringLiteral("主窗口必须消费应用关闭最终结果"));
         requireContains(mainSource,
-                        QStringLiteral("m_chargeShutdownResultConsumed"),
-                        QStringLiteral("应用关闭结果必须只消费一次"));
+                        QStringLiteral("onApplicationShutdownFinished("),
+                        QStringLiteral("应用关闭结果必须交给当前代次消费"));
         requireContains(mainSource,
                         QStringLiteral("QTimer::singleShot"),
                         QStringLiteral("安全完成后应排队二次关闭以避免同步重入"));
@@ -89,8 +104,8 @@ int main(int argc, char *argv[])
 
         // 关闭处理中，所有可能发起新查询、开始或改参的入口必须被统一锁住。
         requireContains(mainSource,
-                        QStringLiteral("const bool closePending = m_chargeClosePending;"),
-                        QStringLiteral("控件刷新必须统一读取关闭处理中状态"));
+                        QStringLiteral("chargeApplicationShutdownInProgress()"),
+                        QStringLiteral("控件刷新必须读取 DeviceManager 关闭冻结门禁"));
         requireContains(mainSource,
                         QStringLiteral("!closePending && !parametersLocked"),
                         QStringLiteral("关闭处理中必须锁定参数入口"));
@@ -109,11 +124,8 @@ int main(int argc, char *argv[])
                         QStringLiteral("退出程序不代表已经停止或缩回"),
                         QStringLiteral("第二次确认必须重复说明退出不代表安全"));
         requireContains(mainSource,
-                        QStringLiteral("m_forceChargeExitFirstConfirmed"),
-                        QStringLiteral("必须记录第一次强制退出确认"));
-        requireContains(mainSource,
-                        QStringLiteral("m_forceChargeExitConfirmed"),
-                        QStringLiteral("必须记录第二次强制退出确认"));
+                        QStringLiteral("CloseAction::OfferForceExit"),
+                        QStringLiteral("强退只能由失败关闭代次策略授予"));
         requireContains(mainSource,
                         QStringLiteral("[充电强制退出][确认前快照]"),
                         QStringLiteral("确认前必须写结构化安全快照日志"));
@@ -148,11 +160,20 @@ int main(int argc, char *argv[])
                         QStringLiteral("void requestApplicationShutdown();"),
                         QStringLiteral("DeviceManager 必须提供关闭收尾入口"));
         requireContains(deviceHeader,
+                        QStringLiteral("chargeApplicationShutdownInProgress()"),
+                        QStringLiteral("DeviceManager 必须公开只读关闭冻结状态"));
+        requireContains(deviceHeader,
                         QStringLiteral("void applicationShutdownFinished(bool safe,"),
                         QStringLiteral("DeviceManager 必须转发关闭最终结果"));
         requireContains(deviceSource,
                         QStringLiteral("m_chargePileController->shutdownRequired()"),
                         QStringLiteral("人工停止必须识别无活动 flow 的不安全终态"));
+        requireContains(deviceSource,
+                        QStringLiteral("selectStopRecoveryOrigin(automaticSessionActive)"),
+                        QStringLiteral("自动会话的人工恢复必须保留 Automatic 来源"));
+        requireContains(deviceSource,
+                        QStringLiteral("只读查询或其他非充电操作正在执行，不能启动安全恢复"),
+                        QStringLiteral("无活动充电 flow 的 busy 状态必须明确拒绝恢复"));
         requireContains(
             deviceSource,
             QStringLiteral("requestConservativeRecovery("),
@@ -164,6 +185,41 @@ int main(int argc, char *argv[])
         requireContains(deviceSource,
                         QStringLiteral("m_chargePileController->requestApplicationShutdown();"),
                         QStringLiteral("DeviceManager 关闭入口必须转发到唯一控制器"));
+        requireContains(deviceSource,
+                        QStringLiteral("m_chargeApplicationShutdownGate.beginRequest();"),
+                        QStringLiteral("关闭必须先冻结所有新充电动作"));
+        for (const QString &blockedAction : {
+                 QStringLiteral("不能修改充电参数"),
+                 QStringLiteral("不能开始新会话"),
+                 QStringLiteral("不能开始状态查询"),
+                 QStringLiteral("不能改变自动充电授权")}) {
+            requireContains(
+                deviceSource, blockedAction,
+                QStringLiteral("应用关闭门禁缺少业务拒绝：%1").arg(blockedAction));
+        }
+        requireContains(deviceSource,
+                        QStringLiteral("m_autoChargeCoordinator->setEnabled(false);"),
+                        QStringLiteral("应用关闭必须先撤销自动充电授权"));
+        requireBefore(
+            deviceSource,
+            QStringLiteral("m_chargeApplicationShutdownGate.beginRequest();"),
+            QStringLiteral("m_autoChargeCoordinator->setEnabled(false);"),
+            QStringLiteral("关闭冻结必须先于撤销自动授权"));
+        requireBefore(
+            deviceSource,
+            QStringLiteral("m_autoChargeCoordinator->setEnabled(false);"),
+            QStringLiteral("m_chargePileController->requestApplicationShutdown();"),
+            QStringLiteral("撤销自动授权必须先于控制器关闭收尾"));
+        requireContains(shutdownPolicyHeader,
+                        QStringLiteral("quint64 m_generation"),
+                        QStringLiteral("强退资格必须绑定明确关闭代次"));
+        requireContains(shutdownPolicySource,
+                        QStringLiteral("ControllerOperationInProgress"),
+                        QStringLiteral("新控制器操作必须清除旧强退资格"));
+        requireNotContains(
+            mainSource,
+            QStringLiteral("m_chargeCloseSafeConfirmed"),
+            QStringLiteral("历史 safe 布尔值不得绕过实时 shutdownRequired 复核"));
 
         return 0;
     } catch (const std::exception &error) {

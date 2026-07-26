@@ -510,57 +510,60 @@ void MainWindow::closeEvent(QCloseEvent *event)
     if (!event)
         return;
 
-    // 第二次 close 只可能来自已确认安全的排队回调，或控制器当前已经用完整
-    // 快照证明安全。这里接受后再交给基类继续既有窗口关闭生命周期。
-    if (m_chargeCloseSafeConfirmed
-        || (m_devMgr && !m_devMgr->chargePileShutdownRequired())) {
+    ChargePileController *controller =
+        m_devMgr ? m_devMgr->chargePileController() : nullptr;
+    const bool shutdownRequired =
+        !m_devMgr || m_devMgr->chargePileShutdownRequired();
+    const bool controllerBusy = controller && controller->isBusy();
+    const ChargeShutdownPolicy::CloseAction action =
+        m_chargeShutdownPolicy.onCloseRequested(
+            shutdownRequired, controllerBusy);
+
+    // 每次关闭都实时读取 shutdownRequired；历史 safe 结果不能绕过后来出现的
+    // 新会话、未知写命令或不安全快照。
+    if (action == ChargeShutdownPolicy::CloseAction::AcceptClose) {
         event->accept();
         QMainWindow::closeEvent(event);
         return;
     }
 
-    // 安全状态未确认时一律先忽略。这样 DeviceManager/控制器仍作为本窗口子对象
-    // 存活，停止、无输出确认、缩回和复位不会被析构中途截断。
     event->ignore();
-    if (m_chargeClosePending) {
+    if (action
+        == ChargeShutdownPolicy::CloseAction::WaitForApplicationShutdown) {
         updateChargePanel();
         updateChargeControls();
         return;
     }
 
-    // 只有一次真实安全收尾已经明确失败，才开放人工强制退出。确认前记录的
-    // 快照与确认后的选择分开写日志，便于现场追溯当时风险和人工决策。
-    if (m_chargeShutdownFailed) {
+    if (action == ChargeShutdownPolicy::CloseAction::OfferForceExit) {
         logChargeForceExitSnapshot();
         if (!confirmForceChargeExit())
             return;
+        m_chargeShutdownPolicy.onForceExitConfirmed();
         event->accept();
         QMainWindow::closeEvent(event);
         return;
     }
 
-    m_chargeClosePending = true;
-    m_chargeShutdownResultConsumed = false;
-    m_chargeCloseSafeConfirmed = false;
-    m_forceChargeExitFirstConfirmed = false;
-    m_forceChargeExitConfirmed = false;
+    // 普通首次关闭和恢复在途再次关闭都进入这里。后者会让应用关闭原因接管/
+    // 升级唯一控制器流程，不允许继续使用上一代失败留下的强退资格。
     m_chargeDecisionText =
         QStringLiteral("程序关闭请求已接管控制器，正在安全停止");
-    log(QStringLiteral("[充电关闭] 首次关闭已阻止，正在安全停止、确认无输出、缩回并复位"));
-    updateChargePanel();
-    updateChargeControls();
+    log(QStringLiteral("[充电关闭] 关闭已阻止，正在安全停止、确认无输出、缩回并复位"));
 
     if (!m_devMgr) {
-        m_chargeClosePending = false;
-        m_chargeShutdownResultConsumed = true;
-        m_chargeShutdownFailed = true;
+        m_chargeShutdownPolicy.onApplicationShutdownFinished(false, true);
         m_chargeDecisionText =
             QStringLiteral("状态未知，必须人工检查：设备管理器不可用");
         updateChargePanel();
         updateChargeControls();
         return;
     }
+    // DeviceManager 内部先冻结所有新充电入口，再关闭自动授权并请求控制器；
+    // 只有门禁已经生效后才禁用 UI，避免控件失焦的 editingFinished 抢先改参。
     m_devMgr->requestApplicationShutdown();
+    updateChargePanel();
+    updateChargeControls();
 }
 
 void MainWindow::logChargeForceExitSnapshot()
@@ -601,9 +604,6 @@ void MainWindow::logChargeForceExitSnapshot()
 
 bool MainWindow::confirmForceChargeExit()
 {
-    m_forceChargeExitFirstConfirmed = false;
-    m_forceChargeExitConfirmed = false;
-
     const QMessageBox::StandardButton firstChoice = QMessageBox::question(
         this,
         QStringLiteral("第一次强制退出确认"),
@@ -619,7 +619,6 @@ bool MainWindow::confirmForceChargeExit()
                      : QStringLiteral("取消")));
     if (firstChoice != QMessageBox::Yes)
         return false;
-    m_forceChargeExitFirstConfirmed = true;
 
     const QMessageBox::StandardButton secondChoice = QMessageBox::question(
         this,
@@ -635,12 +634,9 @@ bool MainWindow::confirmForceChargeExit()
                      ? QStringLiteral("强制退出")
                      : QStringLiteral("取消")));
     if (secondChoice != QMessageBox::Yes) {
-        // 两次必须连续成立；第二次取消后不能沿用第一次选择到下一次关闭。
-        m_forceChargeExitFirstConfirmed = false;
         return false;
     }
 
-    m_forceChargeExitConfirmed = true;
     return true;
 }
 
@@ -1635,7 +1631,10 @@ void MainWindow::initChargePanel(QVBoxLayout *leftPanel)
     Q_ASSERT(controller != nullptr);
     Q_ASSERT(coordinator != nullptr);
     connect(controller, &ChargePileController::stateChanged,
-            this, [this](ChargePileController::State, const QString &) {
+            this, [this, controller](ChargePileController::State,
+                                    const QString &) {
+        if (controller->isBusy())
+            m_chargeShutdownPolicy.onControllerOperationStarted();
         updateChargePanel();
         updateChargeControls();
     });
@@ -1646,6 +1645,7 @@ void MainWindow::initChargePanel(QVBoxLayout *leftPanel)
     });
     connect(controller, &ChargePileController::queryFinished,
             this, [this](bool ok, const QString &message) {
+        m_chargeShutdownPolicy.onControllerOperationFinished();
         log(ok ? QStringLiteral("[充电查询] %1").arg(message)
                : QStringLiteral("[充电查询失败] %1").arg(message));
         updateChargePanel();
@@ -1655,6 +1655,7 @@ void MainWindow::initChargePanel(QVBoxLayout *leftPanel)
             this,
             [this](bool safe, ChargePileController::SessionOrigin,
                    const QString &message) {
+        m_chargeShutdownPolicy.onControllerOperationFinished();
         log(safe ? QStringLiteral("[充电会话] %1").arg(message)
                  : QStringLiteral("[充电会话不安全终态] %1").arg(message));
         updateChargePanel();
@@ -1662,32 +1663,41 @@ void MainWindow::initChargePanel(QVBoxLayout *leftPanel)
     });
     connect(m_devMgr, &DeviceManager::applicationShutdownFinished,
             this, [this](const bool safe, const QString &message) {
-        // 一次关闭请求只消费一个最终结果。连接使用 this 作为上下文，窗口若因
-        // 人工强退析构，Qt 会自动断开迟到信号，不会访问悬空 UI。
-        if (!m_chargeClosePending || m_chargeShutdownResultConsumed)
+        const bool shutdownRequired =
+            m_devMgr->chargePileShutdownRequired();
+        // 只有当前 ApplicationShutdownPending 代次能够消费结果；迟到或重复
+        // 信号不会改变后来恢复操作的代次和强退资格。
+        if (!m_chargeShutdownPolicy.onApplicationShutdownFinished(
+                safe, shutdownRequired)) {
             return;
-        m_chargeShutdownResultConsumed = true;
-        m_chargeClosePending = false;
+        }
 
-        if (safe && !m_devMgr->chargePileShutdownRequired()) {
-            m_chargeCloseSafeConfirmed = true;
-            m_chargeShutdownFailed = false;
+        if (m_chargeShutdownPolicy.phase()
+            == ChargeShutdownPolicy::Phase::SafeCloseQueued) {
             m_chargeDecisionText =
                 QStringLiteral("充电桩安全收尾完成，程序可以关闭");
             log(QStringLiteral("[充电关闭] 安全收尾完成：%1").arg(message));
             updateChargePanel();
             updateChargeControls();
             // 避免在控制器完成信号的同步调用栈中再次进入 closeEvent；队列回调
-            // 绑定窗口生命周期，若窗口先被销毁则自动取消。
+            // 绑定窗口生命周期，并在真正执行前再次读取实时 shutdownRequired。
             QTimer::singleShot(0, this, [this] {
-                if (m_chargeCloseSafeConfirmed)
+                const bool realtimeShutdownRequired =
+                    m_devMgr->chargePileShutdownRequired();
+                if (m_chargeShutdownPolicy.canRunQueuedClose(
+                        realtimeShutdownRequired)) {
                     close();
+                    return;
+                }
+                // 排队间隙若出现新风险，历史 safe 资格失效；重新进入 closeEvent
+                // 会建立新的应用关闭代次，绝不会直接接受关闭。
+                log(QStringLiteral(
+                    "[充电关闭] 排队关闭前检测到新的不安全状态，重新请求安全收尾"));
+                close();
             });
             return;
         }
 
-        m_chargeCloseSafeConfirmed = false;
-        m_chargeShutdownFailed = true;
         m_chargeDecisionText =
             QStringLiteral("状态未知，必须人工检查：%1").arg(message);
         log(QStringLiteral("[充电关闭] 状态未知，必须人工检查：%1").arg(message));
@@ -1775,12 +1785,12 @@ void MainWindow::updateChargePanel()
         m_autoChargeSwitch->setChecked(enabled);
     }
 
-    if (m_chargeClosePending) {
+    if (m_devMgr->chargeApplicationShutdownInProgress()) {
         m_chargeModeNotice->setText(
             QStringLiteral("程序关闭处理中：正在安全停止、缩回并复位"));
         m_chargeModeNotice->setStyleSheet(
             QStringLiteral("color:#b36b00; font-weight:700;"));
-    } else if (m_chargeShutdownFailed
+    } else if (m_chargeShutdownPolicy.canOfferForceExit()
                && controller
                && controller->shutdownRequired()) {
         m_chargeModeNotice->setText(
@@ -1882,7 +1892,8 @@ void MainWindow::updateChargeControls()
     }
 
     const bool parametersLocked = chargeSettingsLocked();
-    const bool closePending = m_chargeClosePending;
+    const bool closePending =
+        m_devMgr->chargeApplicationShutdownInProgress();
     m_chargeStartPercentSpin->setEnabled(!closePending && !parametersLocked);
     m_chargeDispatchPercentSpin->setEnabled(!closePending && !parametersLocked);
     m_chargeStopPercentSpin->setEnabled(!closePending && !parametersLocked);
@@ -1892,7 +1903,7 @@ void MainWindow::updateChargeControls()
         !closePending && lineIdle && agvAtLm1AndIdle && !busy && !unsafeState
         && !autoEnabled && !automaticSessionActive);
     // 关闭失败后即使没有活动 flow，只要控制器仍不安全也开放“停止充电”，
-    // DeviceManager 会把它解释为 Manual 保守恢复，而不是建立新发送器。
+    // DeviceManager 会按当前自动会话所有权选择恢复来源，而不是建立新发送器。
     m_chargeStopButton->setEnabled(
         !closePending
         && ((controller && controller->hasActiveChargeSession())

@@ -13,6 +13,7 @@
 #include "agvmonitorfreshnessguard.h"
 #include "chargepilecontroller.h"
 #include "chargesettings.h"
+#include "chargeshutdownpolicy.h"
 #include "customSysScheduler.h"
 #include "lineconfig.h"
 #include "linemanager.h"
@@ -106,12 +107,17 @@ public:
      * @brief 将人工停止或不安全终态后的重试汇入控制器唯一的安全状态机。
      *
      * 活动充电会话使用 requestSafeStop()；若先前会话已经以 Unknown/Fault
-     * 结束、当前没有活动 flow 但 shutdownRequired() 仍为真，则显式启动
-     * Manual 保守恢复。这样面板“停止充电”不会在最需要人工补救时退化为 no-op。
+     * 结束、当前没有活动 flow 但 shutdownRequired() 仍为真，则显式启动保守
+     * 恢复。自动会话仍保留 Automatic 来源，使协调器能接收最终结果并释放保持；
+     * 非自动所有权才使用 Manual，避免面板“停止充电”退化为 no-op。
      */
     bool stopChargePile(QString *error = nullptr);
     /// 返回唯一控制器是否仍有输出、机构或未知写命令等关闭风险。
     bool chargePileShutdownRequired() const;
+    /// 应用关闭收尾开始后冻结所有新充电动作；失败结果到达后解除供人工补救。
+    bool chargeApplicationShutdownInProgress() const {
+        return m_chargeApplicationShutdownGate.blocksNewActions();
+    }
     /**
      * @brief 请求程序关闭前安全收尾，只转发给唯一 ChargePileController。
      *
@@ -214,6 +220,7 @@ private:
     AgvMonitorData m_lastAgvMonitor; ///< 最近完整 AGV 电量、位置和导航状态。
     ChargePileController::State m_chargePileState =
         ChargePileController::State::Idle; ///< 缓存同步 stateChanged，供事务门禁使用。
+    ChargeApplicationShutdownGate m_chargeApplicationShutdownGate; ///< 关闭期间的新动作冻结门禁。
 };
 
 #endif // DEVICEMANAGER_H
