@@ -1059,10 +1059,11 @@ requestNextStableZFrame();
 1. 继续执行现有锚点目标一致性和可信范围检查；
 2. 使用已经归一化并经过大角度保护的 Rz；
 3. 仅对不同 `frame_id` 且时间戳更新的帧增加 `m_stableZUniqueFrames`；
-4. 把 Z 加入最近三帧窗口；
-5. 用最近三帧最大值减最小值不大于 5mm 判断 `zStable`；
-6. 用运行时 `xyToleranceMm`、`rzToleranceDeg` 和 `maxFineCorrectionCount` 组装 `WindowPolicy`；
-7. 调用 `decideWindow()`。
+4. 把 Z 加入最近五个真实新帧窗口；
+5. 将五帧排序后去掉一个最大值和一个最小值，以中间三帧极差不大于 5mm 判断 `zStable`；
+6. 保存五帧中值作为通过判稳后的最终下探深度；
+7. 用运行时 `xyToleranceMm`、`rzToleranceDeg` 和 `maxFineCorrectionCount` 组装 `WindowPolicy`；
+8. 调用 `decideWindow()`。
 
 不得在 4 秒前因为单帧对准直接下探。
 
@@ -1076,7 +1077,7 @@ case VisionAlignment::WindowAction::ContinueObserving:
     requestNextStableZFrame();
     return;
 case VisionAlignment::WindowAction::Descend:
-    m_grabOffset.z = sample.zMm;
+    m_grabOffset.z = stableDepth.filteredZMm;
     m_stageStep = StageStep::DescendZ;
     proceedStage();
     return;
@@ -1188,7 +1189,7 @@ ctest --test-dir $BuildDirectory -C Debug --output-on-failure -R "vision_joint_m
 [阶段一][位姿组合] captureBase=(...) toolDelta=(X,Y,0,0,0,Rz) pregraspBase=(...)
 [阶段一][初始联合MoveJ] command=... referenceJoints=(...)
 [阶段一][联合运动完成] kind=初始/精修 accumulatedToolXY=(...) completedFine=N/M
-[阶段一][统一窗口] elapsed=...ms uniqueFrames=... XY/Rz=(...) ZRange=... action=...
+[阶段一][统一窗口] elapsed=...ms uniqueFrames=... XY/Rz=(...) ZCoreRange=... ZMedian=... action=...
 [阶段一][安全停止] station=... anchor=... reason=...
 ```
 
@@ -1337,7 +1338,7 @@ finally {
 每次观察窗口耗时和真实新帧数
 精修正次数
 最终 XY/Rz 残差
-Z 三帧极差
+Z 五帧样本、核心三帧极差和五帧中值
 下探量
 成功/停止原因
 ```
