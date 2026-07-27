@@ -1,5 +1,9 @@
 # 仓储机器人上位机可视化系统
 
+> 项目调度、模块职责、状态安全和代码测试导航，统一从
+> [`docs/project-knowledge/项目认知入口.md`](docs/project-knowledge/项目认知入口.md)
+> 开始阅读。历史设计与实施计划用于追溯原因，不代表当前代码事实。
+
 基于 **Qt 6 + C++17** 开发的工业仓储自动化上位机软件，运行于 Windows / Linux 工控机。机械臂通过 **华沿 SDK** 控制，AGV 通过 **Modbus TCP** 控制，视觉服务通过 **HTTP** 通信，扫码枪通过 **N-ScanHub SDK / TCP** 主动触发读取。
 
 当前主流程由 `LineManager + TaskExecutor` 驱动：现场 12 个工位发生缺料后进入 FIFO 队列，系统依次完成 AGV 前往取料位、机械臂视觉取料、夹紧前扫码、AGV 前往倒料位、机械臂倒料、AGV 前往码垛位、机械臂放置空箱，队列为空时 AGV 回到 LM1 待机。

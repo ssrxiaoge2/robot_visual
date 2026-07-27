@@ -1,0 +1,4 @@
+interface:
+  display_name: "Robot Visual 文档同步"
+  short_description: "检查核心代码差异并同步长期项目认知文档和关键安全约束"
+  default_prompt: "使用 $robot-visual-doc-sync 分析本次代码改动并同步受影响的项目认知文档。"
