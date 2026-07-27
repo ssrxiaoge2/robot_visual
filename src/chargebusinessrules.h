@@ -58,3 +58,42 @@ struct AutomaticChargeEnableContext
  */
 QString automaticChargeEnableRejectionReason(
     const AutomaticChargeEnableContext &context);
+
+/**
+ * @brief 只读预检完成后的分类结果。
+ *
+ * DeviceSafetyFailure 仅表示充电桩通信、协议或实时安全快照不可信；Canceled
+ * 表示查询期间上层业务条件变化。只有前者在主调度自动开始场景升级为 Error。
+ */
+enum class ChargePreflightOutcome {
+    Safe,
+    DeviceSafetyFailure,
+    Canceled
+};
+
+/**
+ * @brief 判断手动开始是否允许发起只读预检。
+ *
+ * 与最终启动门禁相比，本门禁仅暂时忽略 shutdownRequired，使初始 Idle 状态
+ * 可以通过一次现场只读查询建立安全事实；忙碌、故障、位置和模式冲突仍会拒绝。
+ */
+QString manualChargePreflightRejectionReason(
+    const ManualChargeStartContext &context);
+
+/**
+ * @brief 判断自动授权是否允许发起只读基线预检。
+ */
+QString automaticChargeEnablePreflightRejectionReason(
+    const AutomaticChargeEnableContext &context);
+
+/**
+ * @brief 根据查询结果、控制器实时终态和业务条件分类预检结果。
+ *
+ * 业务条件失效优先归类为 Canceled，避免操作员关闭授权或主调度停止的同时，
+ * 一个迟到的查询失败被误升级为系统故障。
+ */
+ChargePreflightOutcome classifyChargePreflightOutcome(
+    bool queryOk,
+    ChargePileController::State controllerState,
+    bool controllerShutdownRequired,
+    bool businessConditionsStillValid);

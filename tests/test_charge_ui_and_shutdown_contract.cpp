@@ -243,6 +243,35 @@ int main(int argc, char *argv[])
         requireContains(deviceSource, QStringLiteral("setInterval(30000)"),
                         QStringLiteral("充电期间DO0监控周期必须为30秒"));
 
+        // 手动开始、自动授权、主调度自动开始必须汇入 DeviceManager 的同一异步预检，
+        // MainWindow 只显示结果，不能持有预检意图或越过预检直接控制 DO0。
+        requireContains(deviceHeader,
+                        QStringLiteral("enum class ChargePreflightIntent"),
+                        QStringLiteral("DeviceManager 必须持有统一的充电预检意图"));
+        for (const QString &intent : {
+                 QStringLiteral("ChargePreflightIntent::ManualStart"),
+                 QStringLiteral("ChargePreflightIntent::EnableAutomatic"),
+                 QStringLiteral("ChargePreflightIntent::AutomaticStart")}) {
+            requireContains(deviceSource, intent,
+                            QStringLiteral("缺少充电预检入口：%1").arg(intent));
+        }
+        requireContains(deviceSource,
+                        QStringLiteral("handleChargePreflightFinished"),
+                        QStringLiteral("查询结果必须由统一预检完成处理器消费"));
+        requireContains(deviceSource,
+                        QStringLiteral("raiseExternalSystemError"),
+                        QStringLiteral("自动开始的设备安全失败必须交给主调度 Error"));
+        requireContains(mainSource,
+                        QStringLiteral("manualChargePreflightFinished"),
+                        QStringLiteral("主窗口必须异步显示手动预检结果"));
+        requireNotContains(mainHeader,
+                           QStringLiteral("ChargePreflightIntent"),
+                           QStringLiteral("主窗口不得持有充电预检意图"));
+        requireBefore(deviceSource,
+                      QStringLiteral("beginChargePreflight"),
+                      QStringLiteral("ensureDo0(true"),
+                      QStringLiteral("充电桩只读预检必须先于 DO0 置高"));
+
         const QDir sourceDir(root + QStringLiteral("/src"));
         const QStringList unexpectedCoordinators =
             sourceDir.entryList(

@@ -1570,6 +1570,9 @@ void MainWindow::initChargePanel(QVBoxLayout *leftPanel)
         QString error;
         if (!m_devMgr->startManualCharge(&error)) {
             QMessageBox::warning(this, QStringLiteral("手动充电被拒绝"), error);
+        } else {
+            m_chargeDecisionText =
+                QStringLiteral("正在查询充电桩实时状态，安全后自动开始");
         }
         updateChargePanel();
         updateChargeControls();
@@ -1621,6 +1624,9 @@ void MainWindow::initChargePanel(QVBoxLayout *leftPanel)
                 m_devMgr->autoChargeCoordinator()->isEnabled());
             QMessageBox::warning(
                 this, QStringLiteral("自动充电授权未生效"), error);
+        } else if (enabled) {
+            m_chargeDecisionText =
+                QStringLiteral("正在确认充电桩安全，自动充电尚未授权");
         }
         updateChargePanel();
         updateChargeControls();
@@ -1630,6 +1636,30 @@ void MainWindow::initChargePanel(QVBoxLayout *leftPanel)
     AutoChargeCoordinator *coordinator = m_devMgr->autoChargeCoordinator();
     Q_ASSERT(controller != nullptr);
     Q_ASSERT(coordinator != nullptr);
+    connect(m_devMgr, &DeviceManager::manualChargePreflightFinished,
+            this, [this](const bool accepted, const QString &message) {
+        m_chargeDecisionText = message;
+        if (!accepted) {
+            QMessageBox::warning(
+                this, QStringLiteral("手动充电安全预检未通过"), message);
+        }
+        updateChargePanel();
+        updateChargeControls();
+    });
+    connect(m_devMgr, &DeviceManager::automaticChargeEnablePreflightFinished,
+            this, [this](const bool enabled, const QString &message) {
+        {
+            const QSignalBlocker blocker(m_autoChargeSwitch);
+            m_autoChargeSwitch->setChecked(enabled);
+        }
+        m_chargeDecisionText = message;
+        if (!enabled) {
+            QMessageBox::warning(
+                this, QStringLiteral("自动充电授权未生效"), message);
+        }
+        updateChargePanel();
+        updateChargeControls();
+    });
     connect(controller, &ChargePileController::stateChanged,
             this, [this, controller](ChargePileController::State,
                                     const QString &) {

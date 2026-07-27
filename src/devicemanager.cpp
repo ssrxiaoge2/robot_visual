@@ -356,6 +356,15 @@ DeviceManager::DeviceManager(QObject *parent)
     connect(m_lineManager, &LineManager::systemStateChanged, this,
             [this](LineSystemState state, const QString &text) {
         m_autoChargeCoordinator->onLineStateChanged(state, text);
+        if (state == LineSystemState::Error) {
+            cancelChargePreflight(
+                QStringLiteral("主调度已停止或进入错误状态"));
+        } else if (m_chargePreflightIntent
+                       == ChargePreflightIntent::ManualStart
+                   && state != LineSystemState::Idle) {
+            cancelChargePreflight(
+                QStringLiteral("主调度状态已变化，取消手动充电预检"));
+        }
         if (state == LineSystemState::Error
             && m_chargeDo0Phase == ChargeDo0Phase::Opening) {
             cancelPendingChargeStart(
@@ -393,8 +402,11 @@ DeviceManager::DeviceManager(QObject *parent)
     });
     connect(m_chargePileController, &ChargePileController::queryFinished,
             this, [this](const bool ok, const QString &message) {
-        if (!m_startupDo0PileQueryPending)
+        if (!m_startupDo0PileQueryPending) {
+            if (m_chargePreflightIntent != ChargePreflightIntent::None)
+                handleChargePreflightFinished(ok, message);
             return;
+        }
         m_startupDo0PileQueryPending = false;
         if (!ok) {
             m_chargeDo0Phase = ChargeDo0Phase::Idle;
@@ -418,7 +430,7 @@ DeviceManager::DeviceManager(QObject *parent)
         }
         beginDo0CloseBestEffort(
             QStringLiteral("启动恢复确认充电桩无输出"));
-    });
+    }, Qt::QueuedConnection);
     // MainWindow 只订阅 DeviceManager 的业务边界信号；控制器仍由本对象唯一
     // 拥有，关闭流程不会因此出现第二个套接字或第二套安全状态机。
     connect(m_chargePileController,
@@ -452,20 +464,25 @@ DeviceManager::DeviceManager(QObject *parent)
     connect(m_autoChargeCoordinator,
             &AutoChargeCoordinator::automaticChargeStartRequested,
             this, [this] {
-        // 协调器在发意图前已锁存 startIntentPending；这里同步反馈一次接受结果，
-        // 即使 startCharge 内同步发布 Connecting，也不会丢失或重复接受回执。
         if (m_chargeApplicationShutdownGate.blocksNewActions()) {
             m_autoChargeCoordinator->onAutomaticChargeStartResult(
                 false, QStringLiteral("程序正在执行充电安全关闭"));
             return;
         }
+        const QString continuationRejection =
+            automaticStartContinuationRejection();
+        if (!continuationRejection.isEmpty()) {
+            m_autoChargeCoordinator->onAutomaticChargeStartResult(
+                false, continuationRejection);
+            return;
+        }
         QString error;
-        const bool accepted = requestChargeStartWithDo0(
-            ChargePileController::SessionOrigin::Automatic, &error);
-        // 接受只代表已经开始置高并确认 DO0；真正的自动会话回执在确认完成后
-        // 统一发送，避免协调器把“DO0 尚未确认”误认为充电桩已启动。
-        if (!accepted)
+        if (!beginChargePreflight(
+                ChargePreflightIntent::AutomaticStart, &error)) {
             m_autoChargeCoordinator->onAutomaticChargeStartResult(false, error);
+            m_lineManager->raiseExternalSystemError(
+                QStringLiteral("自动充电安全预检未启动：%1").arg(error));
+        }
     });
     connect(m_autoChargeCoordinator,
             &AutoChargeCoordinator::automaticChargeSafeStopRequested,
@@ -660,6 +677,238 @@ bool DeviceManager::requestChargeStartWithDo0(
             ? QStringLiteral("[自动充电] 正在确认车辆 DO0 高电平")
             : QStringLiteral("[手动充电] 正在确认车辆 DO0 高电平"));
     return true;
+}
+
+QString DeviceManager::manualChargePreflightRejection() const
+{
+    if (!m_lineManager || !m_chargePileController || !m_autoChargeCoordinator)
+        return QStringLiteral("充电业务对象尚未初始化");
+
+    ManualChargeStartContext context;
+    context.lineState = m_lineManager->state();
+    context.hasAgvMonitor = m_agvMonitorFreshness.hasFreshSnapshot();
+    context.agv = m_lastAgvMonitor;
+    context.controllerBusy = m_chargePileController->isBusy();
+    context.controllerState = m_chargePileState;
+    context.controllerShutdownRequired =
+        m_chargePileController->shutdownRequired();
+    context.automaticEnabled = m_autoChargeCoordinator->isEnabled();
+    context.automaticSessionActive =
+        m_autoChargeCoordinator->automaticSessionActive();
+    return manualChargePreflightRejectionReason(context);
+}
+
+QString DeviceManager::automaticEnablePreflightRejection() const
+{
+    if (!m_chargePileController || !m_autoChargeCoordinator)
+        return QStringLiteral("自动充电业务对象尚未初始化");
+
+    AutomaticChargeEnableContext context;
+    context.controllerBusy = m_chargePileController->isBusy();
+    context.controllerState = m_chargePileState;
+    context.automaticSessionActive =
+        m_autoChargeCoordinator->automaticSessionActive();
+    context.controllerShutdownRequired =
+        m_chargePileController->shutdownRequired();
+    return automaticChargeEnablePreflightRejectionReason(context);
+}
+
+QString DeviceManager::automaticStartContinuationRejection() const
+{
+    if (!m_lineManager || !m_chargePileController || !m_autoChargeCoordinator)
+        return QStringLiteral("自动充电业务对象尚未初始化");
+    if (!m_autoChargeCoordinator->isEnabled())
+        return QStringLiteral("自动充电授权已关闭");
+    if (m_chargeApplicationShutdownGate.blocksNewActions())
+        return QStringLiteral("程序正在执行充电安全关闭");
+    if (m_lineManager->state() == LineSystemState::Idle
+        || m_lineManager->state() == LineSystemState::Error) {
+        return QStringLiteral("主调度当前不允许自动充电");
+    }
+    if (!m_agvMonitorFreshness.hasFreshSnapshot()
+        || m_lastAgvMonitor.curStation != 1) {
+        return QStringLiteral("AGV 未以新鲜状态确认位于 LM1");
+    }
+    const quint16 navStatus = m_lastAgvMonitor.navStatus;
+    if (navStatus != static_cast<quint16>(AgvController::NavStatus::None)
+        && navStatus
+               != static_cast<quint16>(AgvController::NavStatus::Arrived)) {
+        return QStringLiteral("AGV 导航状态已不允许自动开始充电");
+    }
+    if (m_autoChargeCoordinator->automaticSessionActive())
+        return QStringLiteral("自动充电会话已经启动");
+    return {};
+}
+
+bool DeviceManager::beginChargePreflight(
+    const ChargePreflightIntent intent, QString *error)
+{
+    if (error)
+        error->clear();
+    if (!m_chargePileController) {
+        if (error)
+            *error = QStringLiteral("充电控制器尚未初始化");
+        return false;
+    }
+    if (intent == ChargePreflightIntent::None) {
+        if (error)
+            *error = QStringLiteral("充电预检意图无效");
+        return false;
+    }
+    if (m_chargePreflightIntent != ChargePreflightIntent::None
+        || m_chargePileController->isBusy()) {
+        if (error)
+            *error = QStringLiteral("充电控制器正在执行其他操作");
+        return false;
+    }
+    if (m_chargeDo0Phase != ChargeDo0Phase::Idle
+        || m_startupDo0PileQueryPending) {
+        if (error)
+            *error = QStringLiteral("DO0 启动恢复或充电时序正在执行");
+        return false;
+    }
+    if (m_chargeApplicationShutdownGate.blocksNewActions()) {
+        if (error)
+            *error = QStringLiteral("程序正在执行充电安全关闭");
+        return false;
+    }
+
+    // 必须先锁存来源再发起查询，因为控制器可在参数或连接错误时同步发布
+    // queryFinished；结果处理器由此仍能准确消费本次预检且不会误入普通查询。
+    m_chargePreflightIntent = intent;
+    m_chargePileController->queryStatus();
+    emit logMessage(QStringLiteral("[充电预检] 已发起充电桩实时只读安全查询"));
+    return true;
+}
+
+void DeviceManager::cancelChargePreflight(const QString &reason)
+{
+    if (m_chargePreflightIntent == ChargePreflightIntent::None)
+        return;
+
+    const ChargePreflightIntent canceledIntent = m_chargePreflightIntent;
+    m_chargePreflightIntent = ChargePreflightIntent::None;
+    emit logMessage(QStringLiteral("[充电预检] 已取消：%1").arg(reason));
+
+    // 协调器已经锁存 startIntentPending，自动开始被取消时必须且只需回执一次，
+    // 否则后续人工复位后协调器仍会误认为旧启动请求在途。
+    if (canceledIntent == ChargePreflightIntent::AutomaticStart) {
+        m_autoChargeCoordinator->onAutomaticChargeStartResult(false, reason);
+    }
+}
+
+void DeviceManager::handleChargePreflightFinished(
+    const bool queryOk, const QString &message)
+{
+    // 先清除在途意图再继续，避免后续 setEnabled、DO0 或 Error 信号同步重入时
+    // 把已完成查询再次当作有效预检。
+    const ChargePreflightIntent intent = m_chargePreflightIntent;
+    m_chargePreflightIntent = ChargePreflightIntent::None;
+    if (intent == ChargePreflightIntent::None)
+        return;
+
+    QString continuationRejection;
+    switch (intent) {
+    case ChargePreflightIntent::ManualStart: {
+        ManualChargeStartContext context;
+        context.lineState = m_lineManager->state();
+        context.hasAgvMonitor = m_agvMonitorFreshness.hasFreshSnapshot();
+        context.agv = m_lastAgvMonitor;
+        context.controllerBusy = m_chargePileController->isBusy();
+        context.controllerState = m_chargePileState;
+        context.controllerShutdownRequired =
+            m_chargePileController->shutdownRequired();
+        context.automaticEnabled = m_autoChargeCoordinator->isEnabled();
+        context.automaticSessionActive =
+            m_autoChargeCoordinator->automaticSessionActive();
+        continuationRejection = manualChargeStartRejectionReason(context);
+        break;
+    }
+    case ChargePreflightIntent::EnableAutomatic: {
+        AutomaticChargeEnableContext context;
+        context.controllerBusy = m_chargePileController->isBusy();
+        context.controllerState = m_chargePileState;
+        context.automaticSessionActive =
+            m_autoChargeCoordinator->automaticSessionActive();
+        context.controllerShutdownRequired =
+            m_chargePileController->shutdownRequired();
+        continuationRejection =
+            automaticChargeEnableRejectionReason(context);
+        break;
+    }
+    case ChargePreflightIntent::AutomaticStart:
+        continuationRejection = automaticStartContinuationRejection();
+        break;
+    case ChargePreflightIntent::None:
+        return;
+    }
+
+    const ChargePreflightOutcome outcome = classifyChargePreflightOutcome(
+        queryOk,
+        m_chargePileState,
+        m_chargePileController->shutdownRequired(),
+        continuationRejection.isEmpty());
+    if (outcome == ChargePreflightOutcome::Canceled) {
+        emit logMessage(
+            QStringLiteral("[充电预检] 查询期间条件变化，已取消：%1")
+                .arg(continuationRejection));
+        if (intent == ChargePreflightIntent::ManualStart) {
+            emit manualChargePreflightFinished(
+                false, continuationRejection);
+        } else if (intent == ChargePreflightIntent::EnableAutomatic) {
+            emit automaticChargeEnablePreflightFinished(
+                false, continuationRejection);
+        } else {
+            m_autoChargeCoordinator->onAutomaticChargeStartResult(
+                false, continuationRejection);
+        }
+        return;
+    }
+
+    if (outcome == ChargePreflightOutcome::DeviceSafetyFailure) {
+        const QString failure =
+            QStringLiteral("充电桩实时安全预检失败：%1").arg(message);
+        emit logMessage(QStringLiteral("[充电预检] %1").arg(failure));
+        if (intent == ChargePreflightIntent::ManualStart) {
+            emit manualChargePreflightFinished(false, failure);
+        } else if (intent == ChargePreflightIntent::EnableAutomatic) {
+            emit automaticChargeEnablePreflightFinished(false, failure);
+        } else {
+            m_autoChargeCoordinator->onAutomaticChargeStartResult(
+                false, failure);
+            m_lineManager->raiseExternalSystemError(failure);
+        }
+        return;
+    }
+
+    if (intent == ChargePreflightIntent::EnableAutomatic) {
+        m_autoChargeCoordinator->setEnabled(true);
+        emit automaticChargeEnablePreflightFinished(
+            true, QStringLiteral("充电桩安全预检通过，自动充电授权已开启"));
+        return;
+    }
+
+    QString startError;
+    const ChargePileController::SessionOrigin origin =
+        intent == ChargePreflightIntent::ManualStart
+            ? ChargePileController::SessionOrigin::Manual
+            : ChargePileController::SessionOrigin::Automatic;
+    if (!requestChargeStartWithDo0(origin, &startError)) {
+        if (intent == ChargePreflightIntent::ManualStart) {
+            emit manualChargePreflightFinished(false, startError);
+        } else {
+            m_autoChargeCoordinator->onAutomaticChargeStartResult(
+                false, startError);
+            m_lineManager->raiseExternalSystemError(
+                QStringLiteral("自动充电启动失败：%1").arg(startError));
+        }
+        return;
+    }
+
+    if (intent == ChargePreflightIntent::ManualStart) {
+        emit manualChargePreflightFinished(
+            true, QStringLiteral("安全预检通过，正在确认车辆 DO0 高电平"));
+    }
 }
 
 void DeviceManager::cancelPendingChargeStart(const QString &reason)
@@ -879,28 +1128,18 @@ bool DeviceManager::startManualCharge(QString *error)
     if (m_chargeApplicationShutdownGate.blocksNewActions())
         return reject(QStringLiteral("程序正在执行充电安全关闭，不能开始新会话"));
 
-    ManualChargeStartContext context;
-    context.lineState = m_lineManager->state();
-    context.hasAgvMonitor = m_agvMonitorFreshness.hasFreshSnapshot();
-    context.agv = m_lastAgvMonitor;
-    context.controllerBusy = m_chargePileController->isBusy();
-    context.controllerState = m_chargePileState;
-    context.controllerShutdownRequired =
-        m_chargePileController->shutdownRequired();
-    context.automaticEnabled = m_autoChargeCoordinator->isEnabled();
-    context.automaticSessionActive =
-        m_autoChargeCoordinator->automaticSessionActive();
-    const QString rejection = manualChargeStartRejectionReason(context);
+    const QString rejection = manualChargePreflightRejection();
     if (!rejection.isEmpty())
         return reject(rejection);
 
-    QString controllerError;
-    const bool accepted = requestChargeStartWithDo0(
-        ChargePileController::SessionOrigin::Manual, &controllerError);
-    if (!accepted)
-        return reject(controllerError);
+    QString preflightError;
+    if (!beginChargePreflight(
+            ChargePreflightIntent::ManualStart, &preflightError)) {
+        return reject(preflightError);
+    }
 
-    emit logMessage(QStringLiteral("[手动充电] 已接受启动请求，等待 DO0 高电平确认"));
+    emit logMessage(
+        QStringLiteral("[手动充电] 正在查询充电桩实时状态，预检通过后自动继续"));
     return true;
 }
 
@@ -936,6 +1175,10 @@ bool DeviceManager::stopChargePile(QString *error)
         if (error)
             *error = QStringLiteral("充电控制器尚未初始化");
         return false;
+    }
+    if (m_chargePreflightIntent != ChargePreflightIntent::None) {
+        cancelChargePreflight(QStringLiteral("操作员请求停止充电"));
+        return true;
     }
 
     if (m_chargeDo0Phase == ChargeDo0Phase::Opening) {
@@ -988,6 +1231,7 @@ void DeviceManager::requestApplicationShutdown()
 {
     // 冻结必须发生在任何协调器或控制器调用之前，避免同步信号重入接受新动作。
     m_chargeApplicationShutdownGate.beginRequest();
+    cancelChargePreflight(QStringLiteral("应用正在关闭"));
     if (m_autoChargeCoordinator)
         m_autoChargeCoordinator->setEnabled(false);
     if (m_chargeDo0Phase == ChargeDo0Phase::Opening)
@@ -1022,6 +1266,12 @@ bool DeviceManager::setAutoChargeEnabled(const bool enabled, QString *error)
     // 关闭授权永远允许；若存在 Automatic 会话，协调器会保持派单并请求同一
     // 控制器安全收尾。关闭且无活动会话时，决策严格旁路原主调度。
     if (!enabled) {
+        if (m_chargePreflightIntent
+                == ChargePreflightIntent::EnableAutomatic
+            || m_chargePreflightIntent
+                   == ChargePreflightIntent::AutomaticStart) {
+            cancelChargePreflight(QStringLiteral("自动充电授权已关闭"));
+        }
         if (m_chargeDo0Phase == ChargeDo0Phase::Opening
             && m_pendingChargeOrigin
                    == ChargePileController::SessionOrigin::Automatic) {
@@ -1030,23 +1280,19 @@ bool DeviceManager::setAutoChargeEnabled(const bool enabled, QString *error)
         m_autoChargeCoordinator->setEnabled(false);
         return true;
     }
-    AutomaticChargeEnableContext context;
-    context.controllerBusy = m_chargePileController->isBusy();
-    context.controllerState = m_chargePileState;
-    context.automaticSessionActive =
-        m_autoChargeCoordinator->automaticSessionActive();
-    context.controllerShutdownRequired =
-        m_chargePileController->shutdownRequired();
-    const QString rejection = automaticChargeEnableRejectionReason(context);
+    const QString rejection = automaticEnablePreflightRejection();
     if (!rejection.isEmpty()) {
         if (error)
             *error = rejection;
         return false;
     }
 
-    // 这里只授权策略，不调用 LineManager::start()；Idle 时协调器会继续等待
-    // 用户显式启动主调度，保证自动开关不改变既有 Start/Stop 生命周期。
-    m_autoChargeCoordinator->setEnabled(true);
+    if (!beginChargePreflight(
+            ChargePreflightIntent::EnableAutomatic, error)) {
+        return false;
+    }
+    emit logMessage(
+        QStringLiteral("[自动充电] 正在确认充电桩安全，授权尚未生效"));
     return true;
 }
 

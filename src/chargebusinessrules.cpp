@@ -50,3 +50,35 @@ QString automaticChargeEnableRejectionReason(
     }
     return {};
 }
+
+QString manualChargePreflightRejectionReason(
+    const ManualChargeStartContext &context)
+{
+    ManualChargeStartContext queryContext = context;
+    queryContext.controllerShutdownRequired = false;
+    return manualChargeStartRejectionReason(queryContext);
+}
+
+QString automaticChargeEnablePreflightRejectionReason(
+    const AutomaticChargeEnableContext &context)
+{
+    AutomaticChargeEnableContext queryContext = context;
+    queryContext.controllerShutdownRequired = false;
+    return automaticChargeEnableRejectionReason(queryContext);
+}
+
+ChargePreflightOutcome classifyChargePreflightOutcome(
+    const bool queryOk,
+    const ChargePileController::State controllerState,
+    const bool controllerShutdownRequired,
+    const bool businessConditionsStillValid)
+{
+    if (!businessConditionsStillValid)
+        return ChargePreflightOutcome::Canceled;
+    if (!queryOk
+        || controllerState != ChargePileController::State::SafeComplete
+        || controllerShutdownRequired) {
+        return ChargePreflightOutcome::DeviceSafetyFailure;
+    }
+    return ChargePreflightOutcome::Safe;
+}

@@ -462,6 +462,56 @@ private slots:
                     .contains(QStringLiteral("安全")));
     }
 
+    void initialControllerStateMayQueryButMayNotStart()
+    {
+        ManualChargeStartContext context;
+        context.lineState = LineSystemState::Idle;
+        context.hasAgvMonitor = true;
+        context.agv.curStation = 1;
+        context.agv.navStatus =
+            static_cast<quint16>(AgvController::NavStatus::None);
+        context.controllerState = ChargePileController::State::Idle;
+        context.controllerShutdownRequired = true;
+
+        QVERIFY(manualChargePreflightRejectionReason(context).isEmpty());
+        QVERIFY(!manualChargeStartRejectionReason(context).isEmpty());
+    }
+
+    void automaticAuthorizationMayQueryInitialIdleOnly()
+    {
+        AutomaticChargeEnableContext context;
+        context.controllerState = ChargePileController::State::Idle;
+        context.controllerShutdownRequired = true;
+        QVERIFY(automaticChargeEnablePreflightRejectionReason(context).isEmpty());
+
+        context.controllerBusy = true;
+        QVERIFY(!automaticChargeEnablePreflightRejectionReason(context).isEmpty());
+
+        context.controllerBusy = false;
+        context.controllerState = ChargePileController::State::Unknown;
+        QVERIFY(!automaticChargeEnablePreflightRejectionReason(context).isEmpty());
+    }
+
+    void preflightOutcomeSeparatesDeviceFailureFromCancellation()
+    {
+        QCOMPARE(classifyChargePreflightOutcome(
+                     true, ChargePileController::State::SafeComplete,
+                     false, true),
+                 ChargePreflightOutcome::Safe);
+        QCOMPARE(classifyChargePreflightOutcome(
+                     false, ChargePileController::State::Unknown,
+                     true, true),
+                 ChargePreflightOutcome::DeviceSafetyFailure);
+        QCOMPARE(classifyChargePreflightOutcome(
+                     true, ChargePileController::State::Idle,
+                     true, true),
+                 ChargePreflightOutcome::DeviceSafetyFailure);
+        QCOMPARE(classifyChargePreflightOutcome(
+                     true, ChargePileController::State::SafeComplete,
+                     false, false),
+                 ChargePreflightOutcome::Canceled);
+    }
+
     void phasePollingDelayUsesRemainingDeadlineDeterministically()
     {
         // 与控制器实际调度共用同一纯函数：有限阶段只等待剩余120ms，不能再

@@ -186,8 +186,26 @@ signals:
     void logMessage(const QString &msg);
     /// 唯一控制器对一次应用关闭请求发布的最终安全结果。
     void applicationShutdownFinished(bool safe, const QString &message);
+    /// 手动开始的一键只读预检及后续 DO0 启动请求的异步接受结果。
+    void manualChargePreflightFinished(bool accepted, const QString &message);
+    /// 自动授权基线预检的异步结果；enabled=true 时协调器授权已实际生效。
+    void automaticChargeEnablePreflightFinished(bool enabled,
+                                                 const QString &message);
 
 private:
+    /**
+     * @brief 三个入口共用的在途只读预检意图。
+     *
+     * 该枚举只负责把一次 queryFinished 路由回原业务入口，不复制充电控制器
+     * 状态机。None 也确保普通“查询状态”和启动 DO0 恢复查询不会误触发启动。
+     */
+    enum class ChargePreflightIntent {
+        None,
+        ManualStart,
+        EnableAutomatic,
+        AutomaticStart
+    };
+
     /**
      * @brief DeviceManager 内部的轻量 DO0 时序阶段。
      *
@@ -207,6 +225,12 @@ private:
     void saveStationMap() const;
     bool requestChargeStartWithDo0(
         ChargePileController::SessionOrigin origin, QString *error);
+    bool beginChargePreflight(ChargePreflightIntent intent, QString *error);
+    void handleChargePreflightFinished(bool queryOk, const QString &message);
+    void cancelChargePreflight(const QString &reason);
+    QString manualChargePreflightRejection() const;
+    QString automaticEnablePreflightRejection() const;
+    QString automaticStartContinuationRejection() const;
     void cancelPendingChargeStart(const QString &reason);
     void handleDo0EnsureFinished(bool targetHigh, bool confirmed,
                                  bool actualHigh, const QString &message);
@@ -256,6 +280,8 @@ private:
     bool m_startupDo0PileQueryPending = false; ///< 启动恢复高电平后等待充电桩只读查询。
     bool m_applicationShutdownWaitingForDo0 = false; ///< 充电桩安全后等待一次 DO0 关闭尝试。
     QString m_pendingApplicationShutdownMessage; ///< 暂存充电桩关闭成功说明。
+    ChargePreflightIntent m_chargePreflightIntent =
+        ChargePreflightIntent::None; ///< 当前唯一在途的一键只读预检来源。
 };
 
 #endif // DEVICEMANAGER_H
