@@ -1,5 +1,24 @@
 find_package(Qt6 REQUIRED COMPONENTS Core Test Network Gui)
 
+add_executable(agv_do0_tests
+    test_agv_do0.cpp
+    ../src/agvcontroller.cpp
+)
+
+target_include_directories(agv_do0_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
+target_link_libraries(agv_do0_tests PRIVATE
+    Qt6::Core
+    Qt6::Network
+    Qt6::SerialBus
+    Qt6::Test
+)
+
+add_test(NAME agv_do0_tests
+         COMMAND agv_do0_tests)
+
 add_executable(auto_charge_coordinator_tests
     test_auto_charge_coordinator.cpp
     ../src/autochargecoordinator.cpp

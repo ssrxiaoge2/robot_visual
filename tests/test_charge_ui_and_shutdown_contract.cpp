@@ -1,4 +1,5 @@
 #include <QCoreApplication>
+#include <QDir>
 #include <QFile>
 #include <QString>
 #include <QTextStream>
@@ -62,6 +63,8 @@ int main(int argc, char *argv[])
             readUtf8File(root + QStringLiteral("/src/devicemanager.h"));
         const QString deviceSource =
             readUtf8File(root + QStringLiteral("/src/devicemanager.cpp"));
+        const QString agvHeader =
+            readUtf8File(root + QStringLiteral("/src/agvcontroller.h"));
         const QString shutdownPolicyHeader =
             readUtf8File(root + QStringLiteral("/src/chargeshutdownpolicy.h"));
         const QString shutdownPolicySource =
@@ -150,6 +153,10 @@ int main(int argc, char *argv[])
             mainSource,
             QStringLiteral("chargePileController()->disconnectFromHost"),
             QStringLiteral("普通关闭路径不得只断开充电桩 TCP"));
+        requireNotContains(mainHeader, QStringLiteral("DO0"),
+                           QStringLiteral("DO0不得增加主窗口接口"));
+        requireNotContains(mainSource, QStringLiteral("DO0"),
+                           QStringLiteral("DO0不得增加主窗口控件或逻辑"));
 
         // DeviceManager 只做所有权边界和转发。人工会话在不安全终态结束后，
         // “停止充电”必须可重试保守恢复，不能因没有活动 flow 退化为 no-op。
@@ -220,6 +227,34 @@ int main(int argc, char *argv[])
             mainSource,
             QStringLiteral("m_chargeCloseSafeConfirmed"),
             QStringLiteral("历史 safe 布尔值不得绕过实时 shutdownRequired 复核"));
+
+        // 单个DO0只允许在既有AgvController和DeviceManager边界内接入，不得
+        // 新增跨设备协调器或让手动/自动入口形成两套启动顺序。
+        requireContains(agvHeader,
+                        QStringLiteral("bool ensureDo0(bool high"),
+                        QStringLiteral("DO0写入和确认必须由AgvController拥有"));
+        requireContains(deviceSource,
+                        QStringLiteral("requestChargeStartWithDo0"),
+                        QStringLiteral("手动和自动开始必须汇入同一DO0入口"));
+        requireBefore(deviceSource,
+                      QStringLiteral("ensureDo0(true"),
+                      QStringLiteral("m_chargePileController->startCharge("),
+                      QStringLiteral("DO0确认必须发生在充电桩启动之前"));
+        requireContains(deviceSource, QStringLiteral("setInterval(30000)"),
+                        QStringLiteral("充电期间DO0监控周期必须为30秒"));
+
+        const QDir sourceDir(root + QStringLiteral("/src"));
+        const QStringList unexpectedCoordinators =
+            sourceDir.entryList(
+                {QStringLiteral("*charge*do0*coordinator*"),
+                 QStringLiteral("*do0*charge*coordinator*")},
+                QDir::Files);
+        if (!unexpectedCoordinators.isEmpty()) {
+            throw std::runtime_error(
+                QStringLiteral("DO0不得新增生产协调器：%1")
+                    .arg(unexpectedCoordinators.join(QStringLiteral(", ")))
+                    .toStdString());
+        }
 
         return 0;
     } catch (const std::exception &error) {

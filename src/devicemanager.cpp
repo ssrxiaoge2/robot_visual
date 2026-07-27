@@ -283,6 +283,36 @@ DeviceManager::DeviceManager(QObject *parent)
     m_autoChargeCoordinator = new AutoChargeCoordinator(this);
     m_autoChargeCoordinator->applySettings(m_chargeSettings);
 
+    // 充电期间仅每 30 秒只读复核一次 DO0，避免对仙工控制器造成高频轮询。
+    // 定时器只在充电桩已经接受会话后启动；置高确认阶段绝不会并发查询。
+    m_chargeDo0MonitorTimer = new QTimer(this);
+    m_chargeDo0MonitorTimer->setInterval(30000);
+    connect(m_chargeDo0MonitorTimer, &QTimer::timeout, this, [this] {
+        if (m_chargeDo0Phase != ChargeDo0Phase::Active
+            || m_do0SafeStopRequested) {
+            return;
+        }
+        QString error;
+        if (!m_agvCtrl->queryDo0(&error)) {
+            // “已有 DO0 操作”表示上一轮尚未结束，不计作一次现场读失败；
+            // 断线等明确无法读的错误才进入连续失败计数。
+            if (m_agvCtrl->isConnected()) {
+                emit logMessage(
+                    QStringLiteral("[充电DO0] 本轮监控查询未启动：%1").arg(error));
+                return;
+            }
+            ++m_do0MonitorReadFailures;
+            emit logMessage(
+                QStringLiteral("[充电DO0] 监控读取失败（%1/3）：%2")
+                    .arg(m_do0MonitorReadFailures)
+                    .arg(error));
+            if (m_do0MonitorReadFailures >= 3) {
+                requestDo0SafetyStop(
+                    QStringLiteral("DO0 连续三次无法读取，不能确认车辆充电允许信号"));
+            }
+        }
+    });
+
     m_agvMonitorFreshnessTimer = new QTimer(this);
     m_agvMonitorFreshnessTimer->setSingleShot(true);
     m_agvMonitorFreshnessTimer->setInterval(
@@ -303,7 +333,17 @@ DeviceManager::DeviceManager(QObject *parent)
                 m_agvMonitorFreshness, *m_autoChargeCoordinator, reason)) {
             emit logMessage(QStringLiteral("[自动充电] %1").arg(reason));
         }
+        if (m_chargeDo0Phase == ChargeDo0Phase::Opening)
+            cancelPendingChargeStart(reason);
+        if (m_chargeDo0Phase == ChargeDo0Phase::Active)
+            requestDo0SafetyStop(QStringLiteral("AGV Modbus 断开，无法继续确认 DO0"));
     });
+    connect(m_agvCtrl, &AgvController::connected,
+            this, &DeviceManager::beginStartupDo0Check);
+    connect(m_agvCtrl, &AgvController::do0EnsureFinished,
+            this, &DeviceManager::handleDo0EnsureFinished);
+    connect(m_agvCtrl, &AgvController::do0StateRead,
+            this, &DeviceManager::handleDo0StateRead);
 
     connect(m_agvCtrl, &AgvController::monitorUpdated, this,
             [this](const AgvMonitorData &data) {
@@ -313,8 +353,15 @@ DeviceManager::DeviceManager(QObject *parent)
         m_agvMonitorFreshnessTimer->start();
         m_autoChargeCoordinator->onAgvMonitorUpdated(data);
     });
-    connect(m_lineManager, &LineManager::systemStateChanged,
-            m_autoChargeCoordinator, &AutoChargeCoordinator::onLineStateChanged);
+    connect(m_lineManager, &LineManager::systemStateChanged, this,
+            [this](LineSystemState state, const QString &text) {
+        m_autoChargeCoordinator->onLineStateChanged(state, text);
+        if (state == LineSystemState::Error
+            && m_chargeDo0Phase == ChargeDo0Phase::Opening) {
+            cancelPendingChargeStart(
+                QStringLiteral("主调度进入错误状态，取消待启动充电"));
+        }
+    });
     connect(m_lineManager, &LineManager::queueChanged,
             m_autoChargeCoordinator, &AutoChargeCoordinator::onQueueChanged);
     connect(m_chargePileController, &ChargePileController::stateChanged, this,
@@ -322,18 +369,76 @@ DeviceManager::DeviceManager(QObject *parent)
         m_chargePileState = state;
         m_autoChargeCoordinator->onChargeControllerStateChanged(state, text);
     });
-    connect(m_chargePileController, &ChargePileController::chargeSessionFinished,
-            m_autoChargeCoordinator, &AutoChargeCoordinator::onChargeSessionFinished);
+    connect(m_chargePileController,
+            &ChargePileController::chargeSessionFinished,
+            this,
+            [this](const bool safe,
+                   ChargePileController::SessionOrigin origin,
+                   const QString &message) {
+        m_chargeDo0MonitorTimer->stop();
+        m_do0SafeStopRequested = false;
+
+        // 只有充电桩已经明确完成停止、缩回、复位和终检后才关闭 DO0。
+        // 不安全结果必须保留高电平，等待既有保守恢复流程给出后续安全结果。
+        if (safe) {
+            beginDo0CloseBestEffort(
+                QStringLiteral("充电桩已安全收尾"));
+        } else {
+            m_chargeDo0Phase = ChargeDo0Phase::Active;
+            emit logMessage(
+                QStringLiteral("[充电DO0] 充电桩尚未确认安全，暂不关闭 DO0"));
+        }
+        m_autoChargeCoordinator->onChargeSessionFinished(
+            safe, origin, message);
+    });
+    connect(m_chargePileController, &ChargePileController::queryFinished,
+            this, [this](const bool ok, const QString &message) {
+        if (!m_startupDo0PileQueryPending)
+            return;
+        m_startupDo0PileQueryPending = false;
+        if (!ok) {
+            m_chargeDo0Phase = ChargeDo0Phase::Idle;
+            emit logMessage(
+                QStringLiteral("[充电DO0] 启动恢复无法确认充电桩状态，保留 DO0 高电平：%1")
+                    .arg(message));
+            return;
+        }
+
+        const ChargePileSnapshot snapshot =
+            m_chargePileController->snapshot();
+        const bool clearlySafe =
+            !snapshot.working
+            && !snapshot.relayOn
+            && snapshot.outputCurrentA <= m_chargeSettings.safeCurrentA;
+        if (!clearlySafe) {
+            m_chargeDo0Phase = ChargeDo0Phase::Idle;
+            emit logMessage(
+                QStringLiteral("[充电DO0] 启动恢复发现充电桩可能仍在工作，保留 DO0 高电平"));
+            return;
+        }
+        beginDo0CloseBestEffort(
+            QStringLiteral("启动恢复确认充电桩无输出"));
+    });
     // MainWindow 只订阅 DeviceManager 的业务边界信号；控制器仍由本对象唯一
     // 拥有，关闭流程不会因此出现第二个套接字或第二套安全状态机。
     connect(m_chargePileController,
             &ChargePileController::applicationShutdownFinished,
             this,
             [this](const bool safe, const QString &message) {
-        // 失败后解除门禁，允许操作员查询或重试保守恢复；成功后继续冻结，
-        // 直到 MainWindow 的排队关闭真正析构 DeviceManager。
-        m_chargeApplicationShutdownGate.finishRequest(safe);
-        emit applicationShutdownFinished(safe, message);
+        if (!safe) {
+            // 充电桩未安全时绝不为了退出程序关闭 DO0；沿用既有失败门禁，
+            // 让操作员查询或重试保守恢复。
+            m_chargeApplicationShutdownGate.finishRequest(false);
+            emit applicationShutdownFinished(false, message);
+            return;
+        }
+
+        // DO0 关闭失败只记录，不改变充电桩已经给出的安全结论；若关闭操作
+        // 已由 chargeSessionFinished 启动，则只等待这一次轻量尝试结束。
+        m_applicationShutdownWaitingForDo0 = true;
+        m_pendingApplicationShutdownMessage = message;
+        if (m_chargeDo0Phase != ChargeDo0Phase::Closing)
+            beginDo0CloseBestEffort(QStringLiteral("应用关闭前"));
     });
 
     connect(m_autoChargeCoordinator, &AutoChargeCoordinator::dispatchHoldRequested,
@@ -355,11 +460,12 @@ DeviceManager::DeviceManager(QObject *parent)
             return;
         }
         QString error;
-        const bool accepted = m_chargePileController->startCharge(
+        const bool accepted = requestChargeStartWithDo0(
             ChargePileController::SessionOrigin::Automatic, &error);
-        m_autoChargeCoordinator->onAutomaticChargeStartResult(
-            accepted,
-            accepted ? QStringLiteral("控制器已接受自动充电会话") : error);
+        // 接受只代表已经开始置高并确认 DO0；真正的自动会话回执在确认完成后
+        // 统一发送，避免协调器把“DO0 尚未确认”误认为充电桩已启动。
+        if (!accepted)
+            m_autoChargeCoordinator->onAutomaticChargeStartResult(false, error);
     });
     connect(m_autoChargeCoordinator,
             &AutoChargeCoordinator::automaticChargeSafeStopRequested,
@@ -526,6 +632,237 @@ bool DeviceManager::applyChargeSettingsCandidate(
     return true;
 }
 
+bool DeviceManager::requestChargeStartWithDo0(
+    const ChargePileController::SessionOrigin origin, QString *error)
+{
+    if (error)
+        error->clear();
+    if (m_chargeDo0Phase != ChargeDo0Phase::Idle) {
+        if (error)
+            *error = QStringLiteral("DO0 启动、监控或关闭操作正在执行");
+        return false;
+    }
+
+    m_chargeDo0Phase = ChargeDo0Phase::Opening;
+    m_pendingChargeOrigin = origin;
+    m_pendingChargeStartCanceled = false;
+    QString do0Error;
+    if (!m_agvCtrl->ensureDo0(true, &do0Error)) {
+        m_chargeDo0Phase = ChargeDo0Phase::Idle;
+        m_pendingChargeOrigin.reset();
+        if (error)
+            *error = QStringLiteral("DO0 置高请求未启动：%1").arg(do0Error);
+        return false;
+    }
+
+    emit logMessage(
+        origin == ChargePileController::SessionOrigin::Automatic
+            ? QStringLiteral("[自动充电] 正在确认车辆 DO0 高电平")
+            : QStringLiteral("[手动充电] 正在确认车辆 DO0 高电平"));
+    return true;
+}
+
+void DeviceManager::cancelPendingChargeStart(const QString &reason)
+{
+    if (m_chargeDo0Phase != ChargeDo0Phase::Opening
+        || !m_pendingChargeOrigin.has_value()) {
+        return;
+    }
+    m_pendingChargeStartCanceled = true;
+    emit logMessage(
+        QStringLiteral("[充电DO0] 已取消待启动会话：%1").arg(reason));
+}
+
+void DeviceManager::handleDo0EnsureFinished(
+    const bool targetHigh,
+    const bool confirmed,
+    const bool actualHigh,
+    const QString &message)
+{
+    Q_UNUSED(actualHigh)
+
+    if (m_chargeDo0Phase == ChargeDo0Phase::Closing) {
+        if (!confirmed || targetHigh) {
+            // DO0 是车辆侧普通 IO；关闭失败不推翻充电桩已经确认的安全结果，
+            // 也不阻断主调度或应用退出，只保留一条现场可追溯日志。
+            emit logMessage(
+                QStringLiteral("[充电DO0] 关闭未确认，仅记录：%1").arg(message));
+        } else {
+            emit logMessage(QStringLiteral("[充电DO0] 已确认关闭：%1").arg(message));
+        }
+        m_chargeDo0Phase = ChargeDo0Phase::Idle;
+        finishPendingApplicationShutdownAfterDo0();
+        return;
+    }
+
+    if (m_chargeDo0Phase != ChargeDo0Phase::Opening
+        || !m_pendingChargeOrigin.has_value()) {
+        emit logMessage(
+            QStringLiteral("[充电DO0] 收到非当前阶段的确认结果，已忽略：%1")
+                .arg(message));
+        return;
+    }
+
+    const ChargePileController::SessionOrigin origin =
+        *m_pendingChargeOrigin;
+    const bool canceled = m_pendingChargeStartCanceled;
+    m_pendingChargeOrigin.reset();
+    m_pendingChargeStartCanceled = false;
+
+    if (!targetHigh || !confirmed || canceled) {
+        const QString failure =
+            canceled
+                ? QStringLiteral("启动条件在 DO0 确认期间失效，已取消充电")
+                : QStringLiteral("DO0 高电平未确认：%1").arg(message);
+        if (origin == ChargePileController::SessionOrigin::Automatic) {
+            m_autoChargeCoordinator->onAutomaticChargeStartResult(
+                false, failure);
+        } else {
+            emit logMessage(
+                QStringLiteral("[手动充电] 启动失败：%1").arg(failure));
+        }
+        beginDo0CloseBestEffort(QStringLiteral("启动失败或取消"));
+        return;
+    }
+
+    QString controllerError;
+    const bool accepted = m_chargePileController->startCharge(
+        origin, &controllerError);
+    if (origin == ChargePileController::SessionOrigin::Automatic) {
+        m_autoChargeCoordinator->onAutomaticChargeStartResult(
+            accepted,
+            accepted ? QStringLiteral("DO0 已确认，控制器已接受自动充电会话")
+                     : controllerError);
+    }
+
+    if (!accepted) {
+        if (origin == ChargePileController::SessionOrigin::Manual) {
+            emit logMessage(
+                QStringLiteral("[手动充电] 充电桩拒绝启动：%1")
+                    .arg(controllerError));
+        }
+        beginDo0CloseBestEffort(QStringLiteral("充电桩拒绝启动"));
+        return;
+    }
+
+    m_chargeDo0Phase = ChargeDo0Phase::Active;
+    m_do0MonitorReadFailures = 0;
+    m_do0SafeStopRequested = false;
+    m_chargeDo0MonitorTimer->start();
+    emit logMessage(
+        origin == ChargePileController::SessionOrigin::Automatic
+            ? QStringLiteral("[自动充电] DO0 已确认，充电桩启动流程已开始")
+            : QStringLiteral("[手动充电] DO0 已确认，充电桩启动流程已开始"));
+}
+
+void DeviceManager::handleDo0StateRead(
+    const bool ok, const bool high, const QString &message)
+{
+    if (m_chargeDo0Phase == ChargeDo0Phase::StartupChecking) {
+        if (!ok) {
+            m_chargeDo0Phase = ChargeDo0Phase::Idle;
+            emit logMessage(
+                QStringLiteral("[充电DO0] 启动恢复读取失败，保持现状：%1")
+                    .arg(message));
+            return;
+        }
+        if (!high) {
+            m_chargeDo0Phase = ChargeDo0Phase::Idle;
+            emit logMessage(QStringLiteral("[充电DO0] 启动恢复确认 DO0 已关闭"));
+            return;
+        }
+
+        // 遗留高电平不能直接关闭：先只读查询一次充电桩，只有工作位、
+        // 继电器和输出电流都明确安全时才做一次关闭尝试。
+        m_startupDo0PileQueryPending = true;
+        m_chargePileController->queryStatus();
+        return;
+    }
+
+    if (m_chargeDo0Phase != ChargeDo0Phase::Active
+        || m_do0SafeStopRequested) {
+        return;
+    }
+    if (ok && high) {
+        m_do0MonitorReadFailures = 0;
+        return;
+    }
+    if (ok && !high) {
+        requestDo0SafetyStop(
+            QStringLiteral("充电期间读到 DO0 已变为低电平"));
+        return;
+    }
+
+    ++m_do0MonitorReadFailures;
+    emit logMessage(
+        QStringLiteral("[充电DO0] 监控读取失败（%1/3）：%2")
+            .arg(m_do0MonitorReadFailures)
+            .arg(message));
+    if (m_do0MonitorReadFailures >= 3) {
+        requestDo0SafetyStop(
+            QStringLiteral("DO0 连续三次读取失败，不能确认车辆充电允许信号"));
+    }
+}
+
+void DeviceManager::beginDo0CloseBestEffort(const QString &context)
+{
+    m_chargeDo0MonitorTimer->stop();
+    m_chargeDo0Phase = ChargeDo0Phase::Closing;
+    QString error;
+    if (m_agvCtrl->ensureDo0(false, &error))
+        return;
+
+    emit logMessage(
+        QStringLiteral("[充电DO0] %1后关闭请求未启动，仅记录：%2")
+            .arg(context, error));
+    m_chargeDo0Phase = ChargeDo0Phase::Idle;
+    finishPendingApplicationShutdownAfterDo0();
+}
+
+void DeviceManager::requestDo0SafetyStop(const QString &reason)
+{
+    if (m_do0SafeStopRequested)
+        return;
+    m_do0SafeStopRequested = true;
+    m_chargeDo0MonitorTimer->stop();
+    emit logMessage(QStringLiteral("[充电DO0] %1，开始充电桩安全收尾").arg(reason));
+    if (m_chargePileController->hasActiveChargeSession()) {
+        m_chargePileController->requestSafeStop(
+            ChargePileController::StopReason::Fault);
+    }
+}
+
+void DeviceManager::beginStartupDo0Check()
+{
+    if (!m_chargePileController
+        || m_chargeDo0Phase != ChargeDo0Phase::Idle
+        || m_pendingChargeOrigin.has_value()
+        || m_chargePileController->hasActiveChargeSession()
+        || m_chargePileController->isBusy()) {
+        return;
+    }
+
+    m_chargeDo0Phase = ChargeDo0Phase::StartupChecking;
+    QString error;
+    if (!m_agvCtrl->queryDo0(&error)) {
+        m_chargeDo0Phase = ChargeDo0Phase::Idle;
+        emit logMessage(
+            QStringLiteral("[充电DO0] 启动恢复查询未启动，保持现状：%1")
+                .arg(error));
+    }
+}
+
+void DeviceManager::finishPendingApplicationShutdownAfterDo0()
+{
+    if (!m_applicationShutdownWaitingForDo0)
+        return;
+    m_applicationShutdownWaitingForDo0 = false;
+    const QString message = m_pendingApplicationShutdownMessage;
+    m_pendingApplicationShutdownMessage.clear();
+    m_chargeApplicationShutdownGate.finishRequest(true);
+    emit applicationShutdownFinished(true, message);
+}
+
 bool DeviceManager::startManualCharge(QString *error)
 {
     if (error)
@@ -558,12 +895,12 @@ bool DeviceManager::startManualCharge(QString *error)
         return reject(rejection);
 
     QString controllerError;
-    const bool accepted = m_chargePileController->startCharge(
+    const bool accepted = requestChargeStartWithDo0(
         ChargePileController::SessionOrigin::Manual, &controllerError);
     if (!accepted)
         return reject(controllerError);
 
-    emit logMessage(QStringLiteral("[手动充电] 控制器已接受启动请求"));
+    emit logMessage(QStringLiteral("[手动充电] 已接受启动请求，等待 DO0 高电平确认"));
     return true;
 }
 
@@ -599,6 +936,11 @@ bool DeviceManager::stopChargePile(QString *error)
         if (error)
             *error = QStringLiteral("充电控制器尚未初始化");
         return false;
+    }
+
+    if (m_chargeDo0Phase == ChargeDo0Phase::Opening) {
+        cancelPendingChargeStart(QStringLiteral("操作员请求停止充电"));
+        return true;
     }
 
     if (m_chargePileController->hasActiveChargeSession()) {
@@ -648,6 +990,8 @@ void DeviceManager::requestApplicationShutdown()
     m_chargeApplicationShutdownGate.beginRequest();
     if (m_autoChargeCoordinator)
         m_autoChargeCoordinator->setEnabled(false);
+    if (m_chargeDo0Phase == ChargeDo0Phase::Opening)
+        cancelPendingChargeStart(QStringLiteral("应用正在关闭"));
 
     if (!m_chargePileController) {
         m_chargeApplicationShutdownGate.finishRequest(false);
@@ -678,6 +1022,11 @@ bool DeviceManager::setAutoChargeEnabled(const bool enabled, QString *error)
     // 关闭授权永远允许；若存在 Automatic 会话，协调器会保持派单并请求同一
     // 控制器安全收尾。关闭且无活动会话时，决策严格旁路原主调度。
     if (!enabled) {
+        if (m_chargeDo0Phase == ChargeDo0Phase::Opening
+            && m_pendingChargeOrigin
+                   == ChargePileController::SessionOrigin::Automatic) {
+            cancelPendingChargeStart(QStringLiteral("自动充电授权已关闭"));
+        }
         m_autoChargeCoordinator->setEnabled(false);
         return true;
     }

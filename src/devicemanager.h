@@ -9,6 +9,7 @@
 #include <QString>
 
 #include <memory>
+#include <optional>
 
 #include "agvmonitorfreshnessguard.h"
 #include "chargepilecontroller.h"
@@ -187,9 +188,33 @@ signals:
     void applicationShutdownFinished(bool safe, const QString &message);
 
 private:
+    /**
+     * @brief DeviceManager 内部的轻量 DO0 时序阶段。
+     *
+     * 不新增独立协调器类：手动与自动启动共用 Opening，充电期间为 Active，
+     * 安全收尾后共用 Closing；StartupChecking 仅用于连接恢复时清理遗留高电平。
+     */
+    enum class ChargeDo0Phase {
+        Idle,
+        Opening,
+        Active,
+        Closing,
+        StartupChecking
+    };
+
     bool tcpPing(const QString &ip, int port, int timeoutMs = 2000);
     void loadStationMap();
     void saveStationMap() const;
+    bool requestChargeStartWithDo0(
+        ChargePileController::SessionOrigin origin, QString *error);
+    void cancelPendingChargeStart(const QString &reason);
+    void handleDo0EnsureFinished(bool targetHigh, bool confirmed,
+                                 bool actualHigh, const QString &message);
+    void handleDo0StateRead(bool ok, bool high, const QString &message);
+    void beginDo0CloseBestEffort(const QString &context);
+    void requestDo0SafetyStop(const QString &reason);
+    void beginStartupDo0Check();
+    void finishPendingApplicationShutdownAfterDo0();
 
     AgvController    *m_agvCtrl     = nullptr;       ///< QObject 子对象，唯一 AGV 通信实例。
     VisionHttpClient *m_visionClient = nullptr;      ///< QObject 子对象，视觉 HTTP 与坐标转换。
@@ -221,6 +246,16 @@ private:
     ChargePileController::State m_chargePileState =
         ChargePileController::State::Idle; ///< 缓存同步 stateChanged，供事务门禁使用。
     ChargeApplicationShutdownGate m_chargeApplicationShutdownGate; ///< 关闭期间的新动作冻结门禁。
+    ChargeDo0Phase m_chargeDo0Phase = ChargeDo0Phase::Idle; ///< 手动/自动共用的轻量 DO0 时序。
+    std::optional<ChargePileController::SessionOrigin>
+        m_pendingChargeOrigin; ///< Opening 阶段等待 DO0 置高确认的会话来源。
+    bool m_pendingChargeStartCanceled = false; ///< Stop/关闭/调度错误是否取消了待启动会话。
+    QTimer *m_chargeDo0MonitorTimer = nullptr; ///< 充电期间每 30 秒只读复核 DO0。
+    int m_do0MonitorReadFailures = 0; ///< 充电期间连续只读失败次数，成功即清零。
+    bool m_do0SafeStopRequested = false; ///< 防止同一 DO0 异常重复请求安全停止。
+    bool m_startupDo0PileQueryPending = false; ///< 启动恢复高电平后等待充电桩只读查询。
+    bool m_applicationShutdownWaitingForDo0 = false; ///< 充电桩安全后等待一次 DO0 关闭尝试。
+    QString m_pendingApplicationShutdownMessage; ///< 暂存充电桩关闭成功说明。
 };
 
 #endif // DEVICEMANAGER_H

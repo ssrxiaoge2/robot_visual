@@ -43,6 +43,12 @@ AgvController::AgvController(QObject *parent)
     m_monitorTimer = new QTimer(this);
     m_monitorTimer->setInterval(1000);
     connect(m_monitorTimer, &QTimer::timeout, this, &AgvController::pollMonitor);
+
+    m_do0ConfirmTimer = new QTimer(this);
+    m_do0ConfirmTimer->setSingleShot(true);
+    m_do0ConfirmTimer->setInterval(DO0_CONFIRM_INTERVAL_MS);
+    connect(m_do0ConfirmTimer, &QTimer::timeout,
+            this, &AgvController::readDo0ForEnsure);
 }
 
 AgvController::~AgvController()
@@ -187,6 +193,243 @@ void AgvController::resumeNavigation()
     });
 }
 
+bool AgvController::ensureDo0(const bool high, QString *error)
+{
+    if (error)
+        error->clear();
+    if (!isConnected()) {
+        if (error)
+            *error = QStringLiteral("AGV未连接，无法设置DO0");
+        return false;
+    }
+    if (m_do0OperationBusy) {
+        if (error)
+            *error = QStringLiteral("DO0已有读取或确认操作正在执行");
+        return false;
+    }
+
+    m_do0OperationBusy = true;
+    m_do0StandaloneQuery = false;
+    m_do0TargetHigh = high;
+    m_do0WriteSent = false;
+    m_do0ConfirmAttempts = 0;
+    m_do0InitialReadFailures = 0;
+    readDo0ForEnsure();
+    return true;
+}
+
+bool AgvController::queryDo0(QString *error)
+{
+    if (error)
+        error->clear();
+    if (!isConnected()) {
+        if (error)
+            *error = QStringLiteral("AGV未连接，无法查询DO0");
+        return false;
+    }
+    if (m_do0OperationBusy) {
+        if (error)
+            *error = QStringLiteral("DO0已有读取或确认操作正在执行");
+        return false;
+    }
+
+    m_do0OperationBusy = true;
+    m_do0StandaloneQuery = true;
+    auto *reply = m_client->sendReadRequest(
+        QModbusDataUnit(QModbusDataUnit::DiscreteInputs,
+                        pdu(DISCRETE_DO0_STATE), 1),
+        1);
+    if (!reply) {
+        finishDo0Query(false, false,
+                       QStringLiteral("DO0只读请求未能发送"));
+        return true;
+    }
+
+    connect(reply, &QModbusReply::finished, this, [this, reply]() {
+        const QModbusDevice::Error replyError = reply->error();
+        const QString replyErrorText = reply->errorString();
+        const bool high =
+            replyError == QModbusDevice::NoError
+            && reply->result().value(0) != 0;
+        reply->deleteLater();
+        if (replyError == QModbusDevice::NoError) {
+            finishDo0Query(
+                true, high,
+                high ? QStringLiteral("DO0当前为高电平")
+                     : QStringLiteral("DO0当前为低电平"));
+        } else {
+            finishDo0Query(
+                false, false,
+                QStringLiteral("DO0只读失败：%1").arg(replyErrorText));
+        }
+    });
+    return true;
+}
+
+void AgvController::readDo0ForEnsure()
+{
+    if (!m_do0OperationBusy || m_do0StandaloneQuery || !isConnected())
+        return;
+
+    auto *reply = m_client->sendReadRequest(
+        QModbusDataUnit(QModbusDataUnit::DiscreteInputs,
+                        pdu(DISCRETE_DO0_STATE), 1),
+        1);
+    if (!reply) {
+        if (m_do0WriteSent) {
+            ++m_do0ConfirmAttempts;
+            if (m_do0ConfirmAttempts >= DO0_CONFIRM_ATTEMPTS) {
+                finishDo0Ensure(
+                    false, false,
+                    QStringLiteral("DO0写入后连续三次无法发送确认读取"));
+            } else {
+                scheduleDo0Confirmation();
+            }
+        } else {
+            ++m_do0InitialReadFailures;
+            if (m_do0InitialReadFailures >= DO0_CONFIRM_ATTEMPTS) {
+                finishDo0Ensure(
+                    false, false,
+                    QStringLiteral("DO0写入前连续三次无法读取当前状态"));
+            } else {
+                scheduleDo0Confirmation();
+            }
+        }
+        return;
+    }
+
+    connect(reply, &QModbusReply::finished, this, [this, reply]() {
+        const QModbusDevice::Error replyError = reply->error();
+        const QString replyErrorText = reply->errorString();
+        const bool actualHigh =
+            replyError == QModbusDevice::NoError
+            && reply->result().value(0) != 0;
+        reply->deleteLater();
+        if (!m_do0OperationBusy || m_do0StandaloneQuery)
+            return;
+
+        if (replyError != QModbusDevice::NoError) {
+            if (m_do0WriteSent) {
+                ++m_do0ConfirmAttempts;
+                if (m_do0ConfirmAttempts >= DO0_CONFIRM_ATTEMPTS) {
+                    finishDo0Ensure(
+                        false, false,
+                        QStringLiteral("DO0写入后连续三次确认读取失败：%1")
+                            .arg(replyErrorText));
+                } else {
+                    scheduleDo0Confirmation();
+                }
+            } else {
+                ++m_do0InitialReadFailures;
+                if (m_do0InitialReadFailures >= DO0_CONFIRM_ATTEMPTS) {
+                    finishDo0Ensure(
+                        false, false,
+                        QStringLiteral("DO0写入前连续三次读取失败：%1")
+                            .arg(replyErrorText));
+                } else {
+                    scheduleDo0Confirmation();
+                }
+            }
+            return;
+        }
+
+        if (!m_do0WriteSent) {
+            if (actualHigh == m_do0TargetHigh) {
+                finishDo0Ensure(
+                    true, actualHigh,
+                    actualHigh ? QStringLiteral("DO0已经是高电平")
+                               : QStringLiteral("DO0已经是低电平"));
+                return;
+            }
+            sendDo0Write();
+            return;
+        }
+
+        ++m_do0ConfirmAttempts;
+        if (actualHigh == m_do0TargetHigh) {
+            finishDo0Ensure(
+                true, actualHigh,
+                actualHigh ? QStringLiteral("DO0已确认置为高电平")
+                           : QStringLiteral("DO0已确认置为低电平"));
+        } else if (m_do0ConfirmAttempts >= DO0_CONFIRM_ATTEMPTS) {
+            finishDo0Ensure(
+                false, actualHigh,
+                QStringLiteral("DO0写入后读取三次仍未达到目标电平"));
+        } else {
+            scheduleDo0Confirmation();
+        }
+    });
+}
+
+void AgvController::sendDo0Write()
+{
+    if (!m_do0OperationBusy || m_do0StandaloneQuery || m_do0WriteSent)
+        return;
+
+    m_do0WriteSent = true;
+    QModbusDataUnit unit(
+        QModbusDataUnit::Coils,
+        pdu(m_do0TargetHigh ? COIL_DO0_HIGH : COIL_DO0_LOW),
+        1);
+    unit.setValue(0, 1);
+    auto *reply = m_client->sendWriteRequest(unit, 1);
+    if (!reply) {
+        scheduleDo0Confirmation();
+        return;
+    }
+
+    // 写回显只能证明命令帧被响应，不能证明DO0最终电平；无论回显成功或失败，
+    // 都只进入只读确认，绝不重发同一个置高/置低命令。
+    connect(reply, &QModbusReply::finished, this, [this, reply]() {
+        reply->deleteLater();
+        if (m_do0OperationBusy && !m_do0StandaloneQuery)
+            scheduleDo0Confirmation();
+    });
+}
+
+void AgvController::scheduleDo0Confirmation()
+{
+    if (m_do0OperationBusy && !m_do0StandaloneQuery)
+        m_do0ConfirmTimer->start(DO0_CONFIRM_INTERVAL_MS);
+}
+
+void AgvController::finishDo0Ensure(
+    const bool confirmed, const bool actualHigh, const QString &message)
+{
+    if (!m_do0OperationBusy || m_do0StandaloneQuery)
+        return;
+    const bool targetHigh = m_do0TargetHigh;
+    m_do0ConfirmTimer->stop();
+    m_do0OperationBusy = false;
+    m_do0WriteSent = false;
+    m_do0ConfirmAttempts = 0;
+    m_do0InitialReadFailures = 0;
+    emit do0EnsureFinished(
+        targetHigh, confirmed, actualHigh, message);
+}
+
+void AgvController::finishDo0Query(
+    const bool ok, const bool high, const QString &message)
+{
+    if (!m_do0OperationBusy || !m_do0StandaloneQuery)
+        return;
+    m_do0OperationBusy = false;
+    m_do0StandaloneQuery = false;
+    emit do0StateRead(ok, high, message);
+}
+
+void AgvController::cancelDo0Operation(const QString &reason)
+{
+    if (!m_do0OperationBusy)
+        return;
+    m_do0ConfirmTimer->stop();
+    if (m_do0StandaloneQuery) {
+        finishDo0Query(false, false, reason);
+    } else {
+        finishDo0Ensure(false, false, reason);
+    }
+}
+
 void AgvController::startMonitor(int intervalMs)
 {
     m_monitorTimer->setInterval(intervalMs);
@@ -283,6 +526,7 @@ void AgvController::onStateChanged(QModbusDevice::State state)
         break;
     case QModbusDevice::UnconnectedState:
         stopMonitor();
+        cancelDo0Operation(QStringLiteral("AGV连接已断开，DO0状态无法确认"));
         emit disconnected();
         if (!m_ip.isEmpty())     // 若是主动连接断开，则尝试重连
             m_reconnectTimer->start();
