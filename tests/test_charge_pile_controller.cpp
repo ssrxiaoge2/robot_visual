@@ -66,8 +66,24 @@ public:
     /** 调整当前故障字，模拟现场复位或人工排障后的下一轮权威状态。 */
     void setLiveFaultWord(const quint16 value) { m_faultWord = value; }
 
+    /** 启动等待期间注入或撤销真实输出，用于复现现场E11短暂出现后恢复。 */
+    void setLiveChargingOutput(const bool enabled)
+    {
+        m_disableNaturalCompletion = true;
+        m_neverProduceChargingOutput = !enabled;
+        m_inputWord = enabled ? 0x0004 : 0x0008;
+        m_currentTenths = enabled ? 50 : 0;
+        m_outputWord = enabled ? 0x0210 : 0;
+    }
+
     /** 启动后始终不出现工作、继电器或电流，验证不会把初始 0A 当作自然结束。 */
     void setNeverProduceChargingOutput(const bool enabled) { m_neverProduceChargingOutput = enabled; }
+
+    /** Start后暂不报告伸到位，用于构造E11发生在任何真实充电动作之前。 */
+    void setDelayExtensionAfterStart(const bool enabled)
+    {
+        m_delayExtensionAfterStart = enabled;
+    }
 
     /** 丢弃指定线圈第一次写回显，模拟命令已经到桩但结果对上位机不确定。 */
     void dropFirstEchoForCoil(const quint16 address) { m_dropEchoCoil = address; }
@@ -251,7 +267,7 @@ private:
         if (address == kCoilStart) {
             m_started = true;
             m_chargeStatusReadCount = 0;
-            m_inputWord = 0x0004;
+            m_inputWord = m_delayExtensionAfterStart ? 0x0008 : 0x0004;
             if (!m_neverProduceChargingOutput) {
                 m_currentTenths = 50;
                 m_outputWord = 0x0210;
@@ -322,7 +338,9 @@ private:
             && !m_stopped) {
             ++m_chargeStatusReadCount;
             // 第一轮为启动确认，第二轮证明已观察过输出，第三轮模拟自然停充。
-            if (!m_neverProduceChargingOutput && m_chargeStatusReadCount >= 3) {
+            if (!m_neverProduceChargingOutput
+                && !m_disableNaturalCompletion
+                && m_chargeStatusReadCount >= 3) {
                 m_currentTenths = 0;
                 m_outputWord = 0;
             }
@@ -500,6 +518,8 @@ private:
     bool m_started = false;
     bool m_stopped = false;
     bool m_neverProduceChargingOutput = false;
+    bool m_disableNaturalCompletion = false;
+    bool m_delayExtensionAfterStart = false;
     bool m_droppedEcho = false;
     bool m_mismatchedEcho = false;
     bool m_droppedOffEcho = false;
@@ -585,6 +605,20 @@ private:
     }
 
 private slots:
+    void startupE11DecisionRespectsThirtySecondReadOnlyGrace()
+    {
+        QCOMPARE(decideChargeStartupFaultAction(0x0400, false, 0),
+                 ChargeStartupFaultAction::ContinueWaiting);
+        QCOMPARE(decideChargeStartupFaultAction(0x0480, false, 29999),
+                 ChargeStartupFaultAction::ContinueWaiting);
+        QCOMPARE(decideChargeStartupFaultAction(0x0400, false, 30000),
+                 ChargeStartupFaultAction::RequestSafeStop);
+        QCOMPARE(decideChargeStartupFaultAction(0x0400, true, 1000),
+                 ChargeStartupFaultAction::RequestSafeStop);
+        QCOMPARE(decideChargeStartupFaultAction(0x0500, false, 1000),
+                 ChargeStartupFaultAction::RequestSafeStop);
+    }
+
     void rejectsSafeCurrentAbovePythonAuthorityAndNeverRetractsAtFiftyAmps()
     {
         FakeChargePile pile;
@@ -1032,6 +1066,70 @@ private slots:
             QVERIFY(!finishedSpy.first().at(0).toBool());
             QVERIFY(!pile.receivedCoil(kCoilStart));
         }
+    }
+
+    void transientE11AfterStartClearsWithoutResendingStart()
+    {
+        FakeChargePile pile;
+        QVERIFY(pile.listen());
+        pile.enableChargeScenario();
+        pile.setNeverProduceChargingOutput(true);
+        pile.setDelayExtensionAfterStart(true);
+
+        ChargePileController controller;
+        ChargeSettings settings = loopbackSettings(pile);
+        // 本用例验证E11清除后的继续启动，不验证启动总超时；留足回环协议
+        // 在整套测试高负载下的执行预算，避免把Windows调度抖动误判为产品失败。
+        settings.startTimeoutMs = 10000;
+        controller.applySettings(settings);
+        QSignalSpy logSpy(&controller, &ChargePileController::logMessage);
+        QSignalSpy finishedSpy(
+            &controller, &ChargePileController::chargeSessionFinished);
+
+        QString error;
+        QVERIFY(controller.startCharge(
+            ChargePileController::SessionOrigin::Manual, &error));
+        QTRY_COMPARE_WITH_TIMEOUT(pile.coilCount(kCoilStart), 1, 5000);
+        pile.setLiveFaultWord(0x0400);
+
+        // 等待生产代码明确记录“已经从完整快照观察到E11”，不依赖固定睡眠
+        // 猜测五组RTU读取何时完成。
+        QTRY_VERIFY_WITH_TIMEOUT(
+            std::any_of(logSpy.cbegin(), logSpy.cend(),
+                        [](const QList<QVariant> &arguments) {
+                return arguments.at(0).toString().contains(
+                    QStringLiteral("启动等待首次出现E11"));
+            }),
+            5000);
+        QCOMPARE(controller.state(),
+                 ChargePileController::State::WaitingForStart);
+        QCOMPARE(pile.coilCount(kCoilStart), 1);
+        QCOMPARE(finishedSpy.count(), 0);
+
+        pile.setLiveFaultWord(0x0080);
+        pile.setLiveChargingOutput(true);
+        QTRY_COMPARE_WITH_TIMEOUT(
+            controller.state(), ChargePileController::State::Monitoring, 5000);
+        QCOMPARE(pile.coilCount(kCoilStart), 1);
+    }
+
+    void e11AfterChargingOutputRequestsImmediateSafeStop()
+    {
+        FakeChargePile pile;
+        QVERIFY(pile.listen());
+        pile.enableChargeScenario();
+
+        ChargePileController controller;
+        controller.applySettings(loopbackSettings(pile));
+        QString error;
+        QVERIFY(controller.startCharge(
+            ChargePileController::SessionOrigin::Manual, &error));
+        QTRY_COMPARE_WITH_TIMEOUT(
+            controller.state(), ChargePileController::State::Monitoring, 5000);
+
+        pile.setLiveFaultWord(0x0400);
+        QTRY_COMPARE_WITH_TIMEOUT(pile.coilCount(kCoilStop), 1, 5000);
+        QCOMPARE(pile.coilCount(kCoilStart), 1);
     }
 
     void initialZeroOutputWaitsForMonitorLimitBeforeSafeShutdown()

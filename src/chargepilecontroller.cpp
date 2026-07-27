@@ -70,6 +70,27 @@ int boundedChargePhasePollDelayMs(const int pollIntervalMs,
                 int(qMax<qint64>(1, remainingMs)));
 }
 
+ChargeStartupFaultAction decideChargeStartupFaultAction(
+    const quint16 faultWord,
+    const bool chargingOutputObserved,
+    const qint64 e11ElapsedMs)
+{
+    const quint16 blockingFaults = faultWord & ~kPrestartIgnoredErrors;
+    const quint16 nonE11BlockingFaults =
+        blockingFaults & ~CHARGE_E11_MASK;
+    if (nonE11BlockingFaults != 0)
+        return ChargeStartupFaultAction::RequestSafeStop;
+
+    const bool hasE11 = (blockingFaults & CHARGE_E11_MASK) != 0;
+    if (!hasE11)
+        return ChargeStartupFaultAction::ContinueWaiting;
+    if (chargingOutputObserved
+        || e11ElapsedMs >= CHARGE_STARTUP_E11_GRACE_MS) {
+        return ChargeStartupFaultAction::RequestSafeStop;
+    }
+    return ChargeStartupFaultAction::ContinueWaiting;
+}
+
 ChargePileController::ChargePileController(QObject *parent)
     : QObject(parent)
 {
@@ -245,6 +266,7 @@ bool ChargePileController::startCharge(const SessionOrigin origin, QString *erro
     m_applicationShutdownRequested = false;
     m_applicationShutdownFinishedEmitted = false;
     m_sessionFinishedEmitted = false;
+    m_startupE11FirstSeenElapsedMs.reset();
     clearSafetyRecoveryContext();
     m_safetyRecoveryContextValid = true;
     m_conservativeRecoveryActive = false;
@@ -1096,10 +1118,69 @@ void ChargePileController::pollWaitingForStart()
     enqueueSnapshotReads(State::WaitingForStart,
                          QStringLiteral("轮询启动后的机械与输出状态。"),
                          [this] {
-        if (snapshotHasBlockingFault(kPrestartIgnoredErrors)) {
+        const bool chargingOutputObserved =
+            m_snapshot.extended
+            || m_snapshot.working
+            || m_snapshot.relayOn
+            || m_snapshot.outputCurrentA
+                   > m_settings.chargeDetectCurrentA;
+        const quint16 blockingFaults =
+            m_snapshot.faultWord & ~kPrestartIgnoredErrors;
+        const bool hasE11 =
+            (blockingFaults & CHARGE_E11_MASK) != 0;
+
+        if (hasE11 && !m_startupE11FirstSeenElapsedMs.has_value()) {
+            m_startupE11FirstSeenElapsedMs =
+                m_phaseElapsedTimer.elapsed();
+            emit logMessage(
+                QStringLiteral("[充电会话%1] 启动等待首次出现E11；30秒内仅只读复核，绝不重发启动命令。")
+                    .arg(m_sessionId));
+        }
+        const qint64 e11ElapsedMs =
+            m_startupE11FirstSeenElapsedMs.has_value()
+                ? m_phaseElapsedTimer.elapsed()
+                      - *m_startupE11FirstSeenElapsedMs
+                : -1;
+
+        // 输出信号自身的故障位继续沿用原有立即停止语义；只有故障字中
+        // 单独出现E11（可伴随厂家已豁免位）才进入30秒只读观察。
+        const bool ignoredFaultWordOnly =
+            m_snapshot.faultWord != 0 && blockingFaults == 0;
+        const bool outputFault = ChargePileProtocol::outputSignalBit(
+            m_snapshot.outputWord,
+            ChargePileProtocol::kOutputFaultBit);
+        if ((outputFault && !ignoredFaultWordOnly)
+            || decideChargeStartupFaultAction(
+                   m_snapshot.faultWord,
+                   chargingOutputObserved,
+                   e11ElapsedMs)
+                   == ChargeStartupFaultAction::RequestSafeStop) {
             requestSafeStop(StopReason::Fault);
             return;
         }
+
+        if (hasE11) {
+            if (m_phaseElapsedTimer.elapsed()
+                >= m_settings.startTimeoutMs) {
+                requestSafeStop(StopReason::MonitorTimeout);
+                return;
+            }
+            // 同时服从原90秒启动总期限和E11首次出现后的30秒期限，取两者
+            // 与正常轮询周期的最小剩余量，避免故障期限被一个完整轮询周期放大。
+            const qint64 startRemainingMs =
+                qint64(m_settings.startTimeoutMs)
+                - m_phaseElapsedTimer.elapsed();
+            const qint64 e11RemainingMs =
+                CHARGE_STARTUP_E11_GRACE_MS - e11ElapsedMs;
+            const int delayMs = int(qMax<qint64>(
+                1,
+                qMin<qint64>(
+                    m_settings.pollIntervalMs,
+                    qMin(startRemainingMs, e11RemainingMs))));
+            schedulePhase(DeferredPhase::WaitForStartPoll, delayMs);
+            return;
+        }
+
         if (m_snapshot.extended || m_snapshot.working
             || m_snapshot.outputCurrentA > m_settings.chargeDetectCurrentA) {
             m_seenChargingOutput =

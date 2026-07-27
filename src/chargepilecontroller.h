@@ -68,6 +68,27 @@ chargePileWriteIdentity(QByteArrayView frame);
 int boundedChargePhasePollDelayMs(int pollIntervalMs, int deadlineMs,
                                   qint64 elapsedMs);
 
+/** @brief 启动命令后对实时故障字应采取的动作，仅用于 WaitingForStart 阶段。 */
+enum class ChargeStartupFaultAction {
+    ContinueWaiting,
+    RequestSafeStop
+};
+
+/// 现场故障字中 E11（充电连接/握手瞬态故障）的位掩码。
+inline constexpr quint16 CHARGE_E11_MASK = 0x0400;
+/// E11 首次出现后的只读观察窗口；窗口内绝不重发正常启动命令。
+inline constexpr qint64 CHARGE_STARTUP_E11_GRACE_MS = 30000;
+
+/**
+ * @brief 确定启动等待阶段遇到故障字时是否允许继续只读观察。
+ *
+ * E2/E3/E4/E7/E8仍沿用现场厂家豁免。只有“尚未观察到任何充电输出且其余
+ * 非豁免故障位均为0”的E11可以等待；达到30秒或已经出现输出后必须安全收尾。
+ * e11ElapsedMs小于0表示本轮尚未观察到E11。
+ */
+ChargeStartupFaultAction decideChargeStartupFaultAction(
+    quint16 faultWord, bool chargingOutputObserved, qint64 e11ElapsedMs);
+
 /**
  * @brief 充电桩通信与后续充电流程共用的唯一控制器。
  *
@@ -384,6 +405,8 @@ private:
     bool m_applicationShutdownRequested = false;
     bool m_applicationShutdownFinishedEmitted = false;
     bool m_sessionFinishedEmitted = false;
+    /** 启动命令后首次观察到E11时相对启动阶段计时器的毫秒值。 */
+    std::optional<qint64> m_startupE11FirstSeenElapsedMs;
     bool m_startCommandConfirmed = false;
     bool m_stopCommandConfirmed = false;
     bool m_retractOnConfirmed = false;
