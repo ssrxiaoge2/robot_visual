@@ -270,6 +270,8 @@ QWidget *ChargePileSettingsDialog::createTimeoutGroup()
 
 ChargeSettings ChargePileSettingsDialog::candidate() const
 {
+    // 始终构造完整候选快照，最终校验、持久化和运行时应用由 DeviceManager
+    // 的事务入口统一完成，避免对话框局部更新造成配置不一致。
     ChargeSettings value;
     value.host = m_hostEdit->text().trimmed();
     value.port = static_cast<quint16>(m_portSpin->value());
@@ -299,6 +301,7 @@ ChargeSettings ChargePileSettingsDialog::candidate() const
 
 void ChargePileSettingsDialog::writeSettings(const ChargeSettings &settings)
 {
+    // 该函数只负责把已生效快照回填控件，不触发保存或设备寄存器写入。
     m_hostEdit->setText(settings.host);
     m_portSpin->setValue(settings.port);
     m_slaveIdSpin->setValue(settings.slaveId);

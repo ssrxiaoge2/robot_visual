@@ -34,26 +34,34 @@ private:
 class ChargeShutdownPolicy
 {
 public:
+    /** @brief 主窗口一次关闭请求当前所处的资格阶段。 */
     enum class Phase {
-        Normal,
-        ApplicationShutdownPending,
-        FailedExitEligible,
-        ControllerOperationInProgress,
-        SafeCloseQueued
+        Normal,                       ///< 无关闭请求或历史资格已失效。
+        ApplicationShutdownPending,   ///< 等待唯一控制器的应用关闭终态。
+        FailedExitEligible,           ///< 本代收尾失败，可向操作员提供双重强退确认。
+        ControllerOperationInProgress, ///< 人工查询/恢复在途，旧强退资格失效。
+        SafeCloseQueued               ///< 本代已安全，等待队列事件再次复核后关闭。
     };
 
+    /** @brief closeEvent 根据实时风险和当前代次应执行的动作。 */
     enum class CloseAction {
-        AcceptClose,
-        RequestApplicationShutdown,
-        WaitForApplicationShutdown,
-        OfferForceExit
+        AcceptClose,               ///< 实时状态已安全，可直接接受窗口关闭。
+        RequestApplicationShutdown, ///< 建立新代次并请求控制器安全收尾。
+        WaitForApplicationShutdown, ///< 同一代仍在途，仅保持窗口打开。
+        OfferForceExit              ///< 本代已失败，允许显示人工双重确认。
     };
 
+    /// 消费一次 closeEvent；历史安全/失败结果不能跨 generation 使用。
     CloseAction onCloseRequested(bool shutdownRequired, bool controllerBusy);
+    /// 仅当前 ApplicationShutdownPending 代次能够消费控制器最终结果。
     bool onApplicationShutdownFinished(bool safe, bool shutdownRequired);
+    /// 人工查询或恢复开始时撤销旧的安全关闭和强退资格。
     void onControllerOperationStarted();
+    /// 普通控制器操作结束后恢复到无资格状态。
     void onControllerOperationFinished();
+    /// 队列关闭真正执行前再次读取 shutdownRequired，防止间隙状态变化。
     bool canRunQueuedClose(bool shutdownRequired);
+    /// 双重确认完成后清除强退资格，避免后续 closeEvent 沿用旧选择。
     void onForceExitConfirmed();
 
     Phase phase() const { return m_phase; }
@@ -66,8 +74,8 @@ public:
     }
 
 private:
-    Phase m_phase = Phase::Normal;
-    quint64 m_generation = 0;
+    Phase m_phase = Phase::Normal; ///< 当前关闭代次的唯一状态。
+    quint64 m_generation = 0;      ///< 每次新建应用关闭请求时单调递增。
 };
 
 /**

@@ -1893,6 +1893,8 @@ void MainWindow::updateChargePanel()
 
 void MainWindow::updateChargeControls()
 {
+    // UI 可用性只反映业务入口是否具备安全前提，真正执行时 DeviceManager
+    // 仍会重新校验并进行实时预检，避免界面刷新与点击之间的竞态。
     if (!m_autoChargeSwitch)
         return;
 

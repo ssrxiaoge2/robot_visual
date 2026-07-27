@@ -46,10 +46,15 @@ signals:
     void saveRequested(const ChargeSettings &candidate);
 
 private:
+    /// 把已生效快照写回全部控件；用于初始化、恢复默认和保存失败后的界面复原。
     void writeSettings(const ChargeSettings &settings);
+    /// 可选项未勾选或窗口锁定时同步禁用对应数值控件。
     void updateOptionalControls();
+    /// 创建主机、端口和从站号分组，不持有任何通信对象。
     QWidget *createCommunicationGroup();
+    /// 创建电压、电流、可选截止条件、安全电流和三级阈值分组。
     QWidget *createChargeGroup();
+    /// 创建连接、响应、轮询以及各安全阶段超时分组。
     QWidget *createTimeoutGroup();
 
     bool m_locked = false; ///< 锁定态只读，禁止恢复默认和保存。

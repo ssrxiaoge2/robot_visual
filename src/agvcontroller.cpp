@@ -195,6 +195,8 @@ void AgvController::resumeNavigation()
 
 bool AgvController::ensureDo0(const bool high, QString *error)
 {
+    // 先读后写并再次只读确认：若当前电平已满足目标则不产生写操作；
+    // 对外完成信号只代表只读状态量已经确认，而不是仅收到写命令回显。
     if (error)
         error->clear();
     if (!isConnected()) {
@@ -220,6 +222,8 @@ bool AgvController::ensureDo0(const bool high, QString *error)
 
 bool AgvController::queryDo0(QString *error)
 {
+    // 独立只读查询与 ensureDo0 共用串行占用标志，避免两条 Modbus 操作链
+    // 同时消费同一设备的异步响应。
     if (error)
         error->clear();
     if (!isConnected()) {
@@ -268,6 +272,8 @@ bool AgvController::queryDo0(QString *error)
 
 void AgvController::readDo0ForEnsure()
 {
+    // 写入前读取用于避免无意义写入；写入后读取用于形成安全确认。
+    // 两个阶段分别计数，任何一次写命令在同一 ensure 操作内最多发送一次。
     if (!m_do0OperationBusy || m_do0StandaloneQuery || !isConnected())
         return;
 
@@ -396,6 +402,8 @@ void AgvController::scheduleDo0Confirmation()
 void AgvController::finishDo0Ensure(
     const bool confirmed, const bool actualHigh, const QString &message)
 {
+    // 在发出完成信号前先释放内部占用，允许上层槽函数同步启动下一阶段
+    // （例如 DO0 置高后启动充电桩，或安全收尾后置低）。
     if (!m_do0OperationBusy || m_do0StandaloneQuery)
         return;
     const bool targetHigh = m_do0TargetHigh;
@@ -420,6 +428,8 @@ void AgvController::finishDo0Query(
 
 void AgvController::cancelDo0Operation(const QString &reason)
 {
+    // 断线等异常统一落到原操作对应的完成信号，保证 DeviceManager 不会
+    // 永久停留在 Opening、Closing 或 StartupChecking 阶段。
     if (!m_do0OperationBusy)
         return;
     m_do0ConfirmTimer->stop();

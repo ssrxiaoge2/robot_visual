@@ -8,6 +8,8 @@ bool applyChargeSettingsTransaction(
     const ChargeSettings &candidate,
     QString *error)
 {
+    // 提交顺序固定为：控制器无副作用门禁→磁盘原子保存→控制器应用→协调器和
+    // DeviceManager 快照。后两份内存状态绝不能先于唯一设备控制器变化。
     if (error)
         error->clear();
     if (targets.settingsPath.trimmed().isEmpty()

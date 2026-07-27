@@ -1,5 +1,7 @@
 #include "chargeshutdownpolicy.h"
 
+// 把窗口关闭请求转换为明确动作；策略对象本身不操作设备，只负责防止
+// 历史收尾结果被后续控制器操作错误复用。
 ChargeShutdownPolicy::CloseAction ChargeShutdownPolicy::onCloseRequested(
     const bool shutdownRequired, const bool controllerBusy)
 {
@@ -21,6 +23,8 @@ ChargeShutdownPolicy::CloseAction ChargeShutdownPolicy::onCloseRequested(
     return CloseAction::RequestApplicationShutdown;
 }
 
+// 只消费当前等待代次的收尾结果。safe 还必须与控制器不再要求收尾同时成立，
+// 才能排队执行真正的窗口关闭。
 bool ChargeShutdownPolicy::onApplicationShutdownFinished(
     const bool safe, const bool shutdownRequired)
 {
@@ -47,6 +51,8 @@ void ChargeShutdownPolicy::onControllerOperationFinished()
         m_phase = Phase::Normal;
 }
 
+// 队列关闭执行前再次读取实时安全标志，避免收尾完成信号与关闭事件之间
+// 设备状态发生变化时仍沿用旧许可。
 bool ChargeShutdownPolicy::canRunQueuedClose(const bool shutdownRequired)
 {
     if (m_phase != Phase::SafeCloseQueued)
@@ -64,6 +70,8 @@ void ChargeShutdownPolicy::onForceExitConfirmed()
         m_phase = Phase::Normal;
 }
 
+// 人工停止或恢复必须继承活动自动会话的来源，确保自动协调器能够收到
+// 对应终态并释放派单锁；没有自动会话时按手动来源处理。
 ChargePileController::SessionOrigin
 selectStopRecoveryOrigin(const bool automaticSessionActive)
 {

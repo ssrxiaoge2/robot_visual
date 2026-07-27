@@ -272,17 +272,17 @@ private:
     QLabel *m_chargeDecisionLabel = nullptr; ///< 协调器最近一次自动决策说明。
     QLabel *m_chargeBatteryLabel = nullptr;  ///< DeviceManager 完整 AGV 快照中的电量。
     QLabel *m_chargeStationLabel = nullptr;  ///< 严格使用 AGV 当前站点，不使用导航目标。
-    QSpinBox *m_chargeStartPercentSpin = nullptr;
-    QSpinBox *m_chargeDispatchPercentSpin = nullptr;
-    QSpinBox *m_chargeStopPercentSpin = nullptr;
-    QLabel *m_chargeControllerStateLabel = nullptr;
-    QLabel *m_chargeElectricalLabel = nullptr;
-    QLabel *m_chargeActuatorLabel = nullptr;
-    QLabel *m_chargeFaultLabel = nullptr;
-    QPushButton *m_chargeSettingsButton = nullptr;
-    QPushButton *m_chargeQueryButton = nullptr;
-    QPushButton *m_chargeStartButton = nullptr;
-    QPushButton *m_chargeStopButton = nullptr;
+    QSpinBox *m_chargeStartPercentSpin = nullptr; ///< 低于该值锁存回 LM1 充电需求。
+    QSpinBox *m_chargeDispatchPercentSpin = nullptr; ///< 有任务时达到该值允许提前停止接单。
+    QSpinBox *m_chargeStopPercentSpin = nullptr; ///< 无任务时的正常目标停止电量。
+    QLabel *m_chargeControllerStateLabel = nullptr; ///< 唯一控制器当前安全状态机阶段。
+    QLabel *m_chargeElectricalLabel = nullptr; ///< 最新完整快照的输出电压和电流。
+    QLabel *m_chargeActuatorLabel = nullptr; ///< 推杆伸/缩输入与工作/继电器组合状态。
+    QLabel *m_chargeFaultLabel = nullptr; ///< 最新事件字和故障字摘要。
+    QPushButton *m_chargeSettingsButton = nullptr; ///< 打开不含自动授权的高级设置窗口。
+    QPushButton *m_chargeQueryButton = nullptr; ///< 独立无写操作五组查询入口。
+    QPushButton *m_chargeStartButton = nullptr; ///< 手动一键预检并续接车辆允许信号与充电入口。
+    QPushButton *m_chargeStopButton = nullptr; ///< 活动会话停止或不安全终态保守恢复入口。
     QPointer<ChargePileSettingsDialog> m_chargeSettingsDialog; ///< 模态窗口仍接收异步锁定更新。
     QString m_chargeDecisionText =
         QStringLiteral("自动充电未授权，主调度逻辑保持原样");

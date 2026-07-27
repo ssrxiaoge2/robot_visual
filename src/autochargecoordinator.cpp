@@ -52,6 +52,8 @@ bool relevantSettingsChanged(const ChargeSettings &left,
 AutoChargeDecision decideAutoCharge(const AutoChargeInputs &inputs,
                                     const ChargeSettings &settings)
 {
+    // 纯决策函数只根据输入快照生成意图，不直接操作 AGV、队列或充电桩；
+    // 外部协调器负责把电平意图去重后交给各自原有对象执行。
     AutoChargeDecision decision;
 
     // Error 本身已经从调度层禁止派单，不能再用独立 hold 覆盖 LineManager
@@ -222,6 +224,8 @@ bool AutoChargeCoordinator::automaticSessionActive() const
 
 void AutoChargeCoordinator::setEnabled(const bool enabled)
 {
+    // enabled 代表是否允许建立新的自动会话；关闭开关不会丢弃已经建立的
+    // 自动会话所有权，已有会话仍必须等待控制器报告安全终态。
     if (m_inputs.enabled != enabled) {
         m_inputs.enabled = enabled;
         m_startRejectedUntilInputChanges = false;
@@ -266,6 +270,8 @@ void AutoChargeCoordinator::onAgvMonitorUpdated(const AgvMonitorData &data)
 
 void AutoChargeCoordinator::onAgvMonitorLost(const QString &reason)
 {
+    // 监控失效后立即撤销旧快照的决策资格；活动会话会因此走故障安全停止，
+    // 未活动时则禁止根据过期电量和站点发起新会话。
     const bool changed = m_inputs.hasAgvMonitor;
     m_inputs.hasAgvMonitor = false;
     m_monitorLostReason = reason;
@@ -338,6 +344,8 @@ void AutoChargeCoordinator::onDispatchHoldChanged(
 void AutoChargeCoordinator::onAutomaticChargeStartResult(
     const bool accepted, const QString &message)
 {
+    // DeviceManager 在实时预检、DO0 置高和控制器接受启动后统一回执。
+    // 只有 accepted 才把自动会话所有权正式锁存在协调器中。
     if (!m_startIntentPending) {
         if (accepted) {
             emit logMessage(
@@ -365,6 +373,8 @@ void AutoChargeCoordinator::onChargeSessionFinished(
     const bool safe, const ChargePileController::SessionOrigin origin,
     const QString &message)
 {
+    // 只消费 Automatic 来源的终态，防止手动调试会话释放自动派单锁；
+    // 不安全终态继续保留会话所有权并升级保守恢复。
     if (origin != ChargePileController::SessionOrigin::Automatic) {
         return;
     }
@@ -413,6 +423,8 @@ void AutoChargeCoordinator::onChargeSessionFinished(
 
 void AutoChargeCoordinator::evaluate()
 {
+    // 所有异步输入最终汇入此处；各意图均通过边沿锁存去重，避免相同监控
+    // 快照反复发送返航、启动、停止或 Error 请求。
     if (m_inputs.enabled && !m_inputs.automaticSessionActive
         && lineAllowsAutomaticPolicy(m_inputs.lineState)
         && m_inputs.hasAgvMonitor

@@ -22,17 +22,17 @@
  */
 struct ChargePileSnapshot
 {
-    double outputVoltageV = 0.0;
-    double outputCurrentA = 0.0;
-    quint16 inputWord = 0;
-    quint16 outputWord = 0;
-    quint16 eventWord = 0;
-    quint16 faultWord = 0;
-    bool extended = false;
-    bool retracted = false;
-    bool working = false;
-    bool relayOn = false;
-    QDateTime sampledAt;
+    double outputVoltageV = 0.0; ///< 保持寄存器 0x0040，原始值按 0.1V 换算。
+    double outputCurrentA = 0.0; ///< 保持寄存器 0x0041，原始值按 0.1A 换算。
+    quint16 inputWord = 0;       ///< 输入信号状态字，保留全部厂家位供诊断。
+    quint16 outputWord = 0;      ///< 输出信号状态字，包含工作和继电器反馈位。
+    quint16 eventWord = 0;       ///< 事件状态字；事件本身不等同于阻断故障。
+    quint16 faultWord = 0;       ///< E1 至 E16 故障位，具体豁免随流程阶段变化。
+    bool extended = false;       ///< 推杆伸到位输入位。
+    bool retracted = false;      ///< 推杆缩到位输入位，是安全终态必要条件。
+    bool working = false;        ///< 充电桩工作反馈位。
+    bool relayOn = false;        ///< 主继电器反馈位；缩枪前必须明确为 false。
+    QDateTime sampledAt;         ///< 完整五组读取完成时间；无效表示尚无权威快照。
 };
 
 Q_DECLARE_METATYPE(ChargePileSnapshot)
@@ -46,9 +46,9 @@ Q_DECLARE_METATYPE(ChargePileSnapshot)
  */
 struct ChargePileWriteIdentity
 {
-    quint8 function = 0;
-    quint16 address = 0;
-    quint16 value = 0;
+    quint8 function = 0; ///< 仅允许写单线圈 0x05 或写单寄存器 0x06。
+    quint16 address = 0; ///< 命令目标地址，用于选择不重复写的恢复路径。
+    quint16 value = 0;   ///< 已尝试写入的原始值或线圈编码。
 };
 
 /**
@@ -100,23 +100,24 @@ class ChargePileController : public QObject
     Q_OBJECT
 
 public:
+    /** @brief 控制器对外发布的通信、业务阶段和安全终态。 */
     enum class State {
-        Idle,
-        Connecting,
-        Prechecking,
-        WritingParameters,
-        ReadingBackParameters,
-        SendingStart,
-        WaitingForStart,
-        Monitoring,
-        SendingStop,
-        WaitingForNoOutput,
-        Retracting,
-        WaitingForRetracted,
-        Resetting,
-        SafeComplete,
-        Fault,
-        Unknown
+        Idle,                 ///< 无活动流程，尚不能单独证明充电桩安全。
+        Connecting,           ///< 正在建立唯一 TCP 连接。
+        Prechecking,          ///< 顺序读取五组状态，尚未发送写命令。
+        WritingParameters,    ///< 正在写入本次启用的电气参数。
+        ReadingBackParameters, ///< 正在回读并逐项确认写入值。
+        SendingStart,         ///< 正在发送并确认正常启动线圈。
+        WaitingForStart,      ///< 启动已确认，等待伸到位、工作或电流输出。
+        Monitoring,           ///< 已观察到真实充电输出，持续轮询状态。
+        SendingStop,          ///< 正在发送并确认停止线圈。
+        WaitingForNoOutput,   ///< 等待工作/继电器关闭且电流降到安全值。
+        Retracting,           ///< 正在发送并确认缩回线圈 ON。
+        WaitingForRetracted,  ///< 等待缩到位，并在成功后释放缩回线圈。
+        Resetting,            ///< 正在复位并执行最终完整安全查询。
+        SafeComplete,         ///< 最新权威快照明确无输出且缩到位。
+        Fault,                ///< 已知设备或协议故障，结果可能仍不安全。
+        Unknown               ///< 写结果或现场状态无法证明，必须人工/保守恢复。
     };
     Q_ENUM(State)
 
@@ -236,12 +237,18 @@ public:
     std::optional<ChargePileWriteIdentity> uncertainWriteIdentity() const;
 
 signals:
+    /// 阶段或安全终态发生变化；text 是可直接展示的中文原因。
     void stateChanged(ChargePileController::State state, const QString &text);
+    /// 完成一轮五组读取后发布字段一致的快照。
     void snapshotChanged(const ChargePileSnapshot &snapshot);
+    /// 只读查询最终结果；ok 不代表快照安全，调用方仍需检查状态和 shutdownRequired。
     void queryFinished(bool ok, const QString &message);
+    /// 充电或保守恢复终态；safe=false 时禁止据此释放设备安全责任。
     void chargeSessionFinished(bool safe, ChargePileController::SessionOrigin origin,
                                const QString &message);
+    /// 应用关闭请求的独立终态，避免普通会话结果误关闭窗口。
     void applicationShutdownFinished(bool safe, const QString &message);
+    /// 结构化流程说明统一交给 DeviceManager 汇入主日志。
     void logMessage(const QString &message);
 
 protected:
@@ -261,87 +268,129 @@ private:
      * 实际发送开始时间和成功回调，保证响应不能被错误地交给下一条请求处理。
      */
     struct Request {
-        quint8 expectedSlaveId = 0;
-        quint8 expectedFunction = 0;
-        QByteArray frame;
-        int expectedDataBytes = 0;
-        bool isWriteCommand = false;
-        QDateTime startedAt;
-        std::function<void(const QByteArray &response)> onSuccess;
+        quint8 expectedSlaveId = 0;   ///< 响应必须回显的从站号。
+        quint8 expectedFunction = 0;  ///< 响应必须匹配的功能码，异常码单独解析。
+        QByteArray frame;             ///< 包含 CRC 的完整待发送 RTU 帧。
+        int expectedDataBytes = 0;    ///< 读响应的数据区字节数；写请求固定为 0。
+        bool isWriteCommand = false;  ///< 写失败时必须建立不确定写入恢复上下文。
+        QDateTime startedAt;          ///< 真正调用 writeFrame() 的时刻，用于日志诊断。
+        std::function<void(const QByteArray &response)> onSuccess; ///< 校验成功后的单次回调。
     };
 
+    /** @brief 当前串行请求队列属于普通查询还是具有写入安全责任的会话。 */
     enum class FlowMode {
-        None,
-        Query,
-        Charge
+        None,   ///< 没有队列所有者。
+        Query,  ///< 无副作用五组只读查询。
+        Charge  ///< 正常充电或保守恢复流程。
     };
 
+    /** @brief phaseTimer 到期时需要恢复执行的业务阶段。 */
     enum class DeferredPhase {
-        None,
-        WaitForStartPoll,
-        MonitoringPoll,
-        WaitForNoOutputPoll,
-        WaitForRetractedPoll,
-        RecoveryReconnect
+        None,                    ///< 当前没有业务阶段等待。
+        WaitForStartPoll,        ///< 再次检查是否出现充电输出。
+        MonitoringPoll,          ///< 充电期间下一轮状态监控。
+        WaitForNoOutputPoll,     ///< 停止后再次确认无输出。
+        WaitForRetractedPoll,    ///< 缩回后再次确认机械位置。
+        RecoveryReconnect        ///< 通信恢复退避结束后重新建连。
     };
 
     /** 只读通信失败后从最近一个已唯一确认的写命令里程碑继续。 */
     enum class RecoveryAction {
-        None,
-        BeginSafeStop,
-        ResumeWaitingForNoOutput,
-        ReleaseRetractAndFail,
-        RetryFinalSafetyQuery
+        None,                     ///< 没有待恢复动作。
+        BeginSafeStop,            ///< 最近唯一里程碑之前，保守地从停止阶段开始。
+        ResumeWaitingForNoOutput, ///< Stop 已确认，只恢复无输出轮询。
+        ReleaseRetractAndFail,    ///< 缩回 ON 已确认，必须优先释放线圈后再失败。
+        RetryFinalSafetyQuery     ///< 复位或缩回 OFF 已确认，只重做最终只读查询。
     };
 
+    /// 把读保持/输入寄存器请求加入唯一 FIFO，并绑定成功解析回调。
     void enqueueRead(quint8 function, quint16 address, quint16 count,
                      std::function<void(const QByteArray &response)> onSuccess);
+    /// 输入寄存器读取的语义化包装，禁止调用方自行拼功能码。
     void enqueueInputRead(quint16 address, quint16 count,
                           std::function<void(const QByteArray &response)> onSuccess);
+    /// 加入写单寄存器请求；写入结果未确认时会记录稳定命令身份。
     void enqueueWriteRegister(quint16 address, quint16 value,
                               std::function<void()> onSuccess = {});
+    /// 加入写单线圈请求；onSuccess 只在回显地址和值均正确时执行。
     void enqueueWriteCoil(quint16 address, bool on,
                           std::function<void()> onSuccess = {});
+    /// 固定顺序读取电压电流、输入、输出、事件和故障，完成后一次性发布快照。
     void enqueueSnapshotReads(State state, const QString &text,
                               std::function<void()> onComplete);
+    /// 当前无 pending/in-flight 时从 FIFO 取出下一条请求。
     void beginNextRequest();
+    /// 按相邻帧最小间隔决定立即发送或由 actionPollTimer 延后发送。
     void scheduleCurrentRequest();
+    /// 建立 in-flight 身份后调用唯一写出口，并启动响应超时。
     void sendCurrentRequest();
+    /// TCP 建连成功后停止连接超时并恢复当前 pending 请求。
     void handleConnected();
+    /// 累积拆包/粘包数据，只把校验完整的期望响应交给当前请求。
     void handleReadyRead();
+    /// 将套接字故障路由到只读恢复或写入不确定终态。
     void handleSocketError(QAbstractSocket::SocketError socketError);
+    /// 区分建连超时和单请求响应超时，并保留写命令身份。
     void handleResponseTimeout();
+    /// 相邻 RTU 帧节流结束后发送当前 pending 请求。
     void handleActionTimer();
+    /// 根据 DeferredPhase 恢复相应业务轮询或通信重连。
     void handlePhaseTimer();
+    /// 更新唯一阶段并同步发布界面文本与日志。
     void setState(State state, const QString &text);
+    /// 清理当前传输并以 Fault/Unknown 结束；写结果不确定时必须进入 Unknown。
     void failOperation(const QString &reason, bool commandResultUnknown = false);
+    /// 根据只读快照发布 SafeComplete、Idle 或 Unknown，并结束 Query 所有权。
     void finishQuery();
+    /// 对每个 sessionId 只发布一次会话终态，并保留必要恢复上下文。
     void finishChargeSession(bool safe, const QString &message);
+    /// 按启用项写入电压、电流、可选截止电流和可选桩端时长。
     void beginParameterWrites();
+    /// 回读所有已写参数，任何不一致都进入安全失败。
     void beginParameterReadback();
+    /// 写参数后重新读取完整状态，防止写入期间现场条件变化。
     void beginSecondPrecheck();
+    /// 只发送现场 Python 已验证的正常启动线圈，不使用强制启动。
     void sendStartCommand();
+    /// 等待启动输出并处理 E11 受控观察窗口。
     void pollWaitingForStart();
+    /// 活动充电期间检查故障、电量停止意图和监控超时。
     void pollMonitoring();
+    /// 将任意停止原因汇入 Stop→无输出→缩回→复位的唯一序列。
     void beginSafeShutdown();
+    /// Stop 确认后反复读取，明确无输出前绝不允许缩枪。
     void pollWaitingForNoOutput();
+    /// 发送缩回 ON，并在后续缩到位后负责发送相反 OFF 命令。
     void sendRetractCommand();
+    /// 等待缩到位；超时或故障时仍优先尝试释放缩回线圈。
     void pollWaitingForRetracted();
+    /// 在缩回线圈已释放后发送复位，再进入最终完整安全查询。
     void sendResetAndFinalCheck();
+    /// 只读确认无输出、缩到位和恢复上下文均已解除。
     void beginFinalSafetyQuery();
     bool beginConservativeRecovery(SessionOrigin origin, StopReason reason,
                                    bool notifyApplication, QString *error);
     void beginConservativeRecoveryAfterSnapshot();
+    /// 保守恢复无法证明安全时统一形成不安全会话终态。
     void finishConservativeRecoveryUnsafe(const QString &reason);
+    /// 仅在权威安全快照充分覆盖全部写入里程碑后清除恢复责任。
     void clearSafetyRecoveryContext();
+    /// 判断最新安全快照是否足以解除缩回线圈等不确定写入上下文。
     bool safeSnapshotResolvesRecoveryContext() const;
+    /// 同一应用关闭代次只发布一次结果，防止窗口重复消费。
     void emitApplicationShutdownFinishedOnce(bool safe,
                                              const QString &message);
+    /// 只读请求失败时根据已确认写入里程碑选择安全恢复动作。
     void handleReadFailure(const QString &reason);
+    /// 清理旧传输并锁存恢复动作，随后按有限次数重新建连。
     void beginCommunicationRecovery(RecoveryAction action, const QString &reason);
+    /// 执行一次恢复建连尝试，超过上限后按不确定终态失败。
     void startRecoveryConnection();
+    /// 重连成功后从锁存的 RecoveryAction 继续，而不是重放未知写命令。
     void resumeAfterRecovery();
+    /// 缩回 ON 已确认后的失败路径必须先尝试 OFF，再发布最终失败。
     void releaseRetractAfterFailure(const QString &reason);
+    /// 用单次定时器保存下一业务阶段，禁止并行轮询。
     void schedulePhase(DeferredPhase phase, int delayMs);
     /**
      * @brief 按轮询间隔与当前有限阶段剩余时间的较小值安排下一轮。
@@ -351,9 +400,13 @@ private:
      */
     void schedulePhaseBeforeDeadline(DeferredPhase phase, int deadlineMs);
     bool snapshotHasBlockingFault(quint16 ignoredMask) const;
+    /// 无输出要求工作位和继电器均关闭，且实时电流不超过安全阈值。
     bool snapshotHasNoOutput() const;
+    /// 启动前要求无阻断故障、无输出且机械位置不存在矛盾。
     bool validatePrestartSnapshot(QString *reason) const;
+    /// 设置完整采样时间并向上层发布不可修改的快照副本。
     void publishSnapshot();
+    /// 停止定时器、断开连接并清除 FIFO/pending/in-flight 传输状态。
     void clearTransportWork();
     static int stopReasonPriority(StopReason reason);
     static QString stopReasonText(StopReason reason);
@@ -363,11 +416,11 @@ private:
                                            const ChargeSettings &next);
     static quint16 responseWord(const QByteArray &frame, int offset);
 
-    ChargeSettings m_settings = ChargeSettings::defaults();
-    ChargePileSnapshot m_snapshot;
-    State m_state = State::Idle;
-    QTcpSocket m_socket;
-    QTimer m_responseTimer;
+    ChargeSettings m_settings = ChargeSettings::defaults(); ///< 当前唯一生效参数快照。
+    ChargePileSnapshot m_snapshot; ///< 最近一轮完整或部分更新的设备状态。
+    State m_state = State::Idle;   ///< 对外发布的唯一控制器阶段。
+    QTcpSocket m_socket;           ///< 唯一 RTU-over-TCP 连接，不跨线程共享。
+    QTimer m_responseTimer;        ///< 连接或单条在途请求的响应上限。
     /**
      * 动作轮询定时器在任务三中承担连续 RTU 帧的最小间隔节流；后续有机械动作时
      * 可在同一串行出口上扩展为动作轮询，仍不会产生第二个并发发送器。
@@ -375,8 +428,8 @@ private:
     QTimer m_actionPollTimer;
     /** 机械动作与监控的轮询定时器；与 RTU 发送节流定时器完全分离。 */
     QTimer m_phaseTimer;
-    QByteArray m_receiveBuffer;
-    QQueue<Request> m_requestQueue;
+    QByteArray m_receiveBuffer; ///< TCP 拆包/粘包缓存，只由当前 in-flight 消费。
+    QQueue<Request> m_requestQueue; ///< 同一流程尚未发送的串行请求 FIFO。
     /**
      * 已从队列取出但仍受 50ms 节流限制、尚未调用 QTcpSocket::write() 的请求。
      * 此阶段任何收到字节都不是本请求的合法响应，必须保守地中断查询。
@@ -388,30 +441,30 @@ private:
      * 若 write() 短写或失败，该对象还负责向故障路径提供准确的写命令身份。
      */
     std::optional<Request> m_inFlightRequest;
-    QElapsedTimer m_lastSendTimer;
-    QElapsedTimer m_phaseElapsedTimer;
-    bool m_queryInProgress = false;
-    FlowMode m_flowMode = FlowMode::None;
-    std::function<void()> m_onQueueDrained;
-    DeferredPhase m_deferredPhase = DeferredPhase::None;
+    QElapsedTimer m_lastSendTimer; ///< 从上一帧完整响应起计算 RTU 节流间隔。
+    QElapsedTimer m_phaseElapsedTimer; ///< 当前有限业务阶段的总耗时基准。
+    bool m_queryInProgress = false; ///< Query/Charge 共用的串行所有权门禁。
+    FlowMode m_flowMode = FlowMode::None; ///< 当前请求队列的业务来源。
+    std::function<void()> m_onQueueDrained; ///< 当前批次全部成功后的单次续接。
+    DeferredPhase m_deferredPhase = DeferredPhase::None; ///< phaseTimer 的续接目标。
 
     /** 以下字段只属于当前充电会话，每次 startCharge() 接受请求时完整重置。 */
-    quint64 m_sessionId = 0;
-    SessionOrigin m_sessionOrigin = SessionOrigin::Manual;
-    StopReason m_stopReason = StopReason::Manual;
-    bool m_seenChargingOutput = false;
-    bool m_safeStopRequested = false;
-    bool m_safeShutdownStarted = false;
-    bool m_applicationShutdownRequested = false;
-    bool m_applicationShutdownFinishedEmitted = false;
-    bool m_sessionFinishedEmitted = false;
+    quint64 m_sessionId = 0; ///< 单调递增会话号，用于区分现场日志代次。
+    SessionOrigin m_sessionOrigin = SessionOrigin::Manual; ///< 当前会话所有权来源。
+    StopReason m_stopReason = StopReason::Manual; ///< 可被更高优先级原因单向升级。
+    bool m_seenChargingOutput = false; ///< 是否曾观察到工作/继电器/检测电流任一证据。
+    bool m_safeStopRequested = false; ///< 已收到停止意图，当前阶段结束后必须收尾。
+    bool m_safeShutdownStarted = false; ///< 防止重复建立 Stop/缩回/复位序列。
+    bool m_applicationShutdownRequested = false; ///< 当前会话是否被应用关闭接管。
+    bool m_applicationShutdownFinishedEmitted = false; ///< 应用关闭结果防重。
+    bool m_sessionFinishedEmitted = false; ///< 普通会话结果防重。
     /** 启动命令后首次观察到E11时相对启动阶段计时器的毫秒值。 */
     std::optional<qint64> m_startupE11FirstSeenElapsedMs;
-    bool m_startCommandConfirmed = false;
-    bool m_stopCommandConfirmed = false;
-    bool m_retractOnConfirmed = false;
-    bool m_retractOffConfirmed = false;
-    bool m_resetCommandConfirmed = false;
+    bool m_startCommandConfirmed = false; ///< Start 回显已严格匹配。
+    bool m_stopCommandConfirmed = false; ///< Stop 回显已严格匹配。
+    bool m_retractOnConfirmed = false;   ///< 缩回 ON 回显已确认，后续必须负责释放。
+    bool m_retractOffConfirmed = false;  ///< 缩回 OFF 回显已确认。
+    bool m_resetCommandConfirmed = false; ///< Reset 回显已确认，仍需最终只读证明。
     /**
      * 安全恢复上下文从正常充电会话开始持续到最终完整快照确认安全。
      * 一次恢复通信失败不会清空它，下一次恢复必须从已确认的最远里程碑继续。
@@ -419,16 +472,16 @@ private:
     bool m_safetyRecoveryContextValid = false;
     /** 当前活动 Charge 流是否为“先完整只读、再按上下文恢复”的保守恢复。 */
     bool m_conservativeRecoveryActive = false;
-    bool m_unknownGate = false;
-    RecoveryAction m_recoveryAction = RecoveryAction::None;
-    int m_recoveryAttempts = 0;
-    QString m_recoveryReason;
-    QString m_terminalFailureAfterRetractOff;
-    std::optional<ChargePileWriteIdentity> m_uncertainWrite;
-    quint16 m_expectedVoltageRaw = 0;
-    quint16 m_expectedCurrentRaw = 0;
-    std::optional<quint16> m_expectedCutoffRaw;
-    std::optional<quint16> m_expectedMaxSecondsRaw;
+    bool m_unknownGate = false; ///< 未经权威查询解除前禁止发布 SafeComplete。
+    RecoveryAction m_recoveryAction = RecoveryAction::None; ///< 重连后唯一允许续接的动作。
+    int m_recoveryAttempts = 0; ///< 当前通信恢复已使用的建连次数。
+    QString m_recoveryReason;  ///< 首次触发恢复的现场上下文。
+    QString m_terminalFailureAfterRetractOff; ///< 释放缩回线圈后需要发布的原失败原因。
+    std::optional<ChargePileWriteIdentity> m_uncertainWrite; ///< 结果无法证明的写命令。
+    quint16 m_expectedVoltageRaw = 0; ///< 本会话用于回读比较的 0.1V 原始值。
+    quint16 m_expectedCurrentRaw = 0; ///< 本会话用于回读比较的 0.1A 原始值。
+    std::optional<quint16> m_expectedCutoffRaw; ///< 启用时用于回读的截止电流原始值。
+    std::optional<quint16> m_expectedMaxSecondsRaw; ///< 启用时用于回读的最大秒数。
 };
 
 Q_DECLARE_METATYPE(ChargePileController::State)

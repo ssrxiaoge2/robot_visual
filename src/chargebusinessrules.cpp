@@ -1,5 +1,7 @@
 #include "chargebusinessrules.h"
 
+// 手动充电入口的纯业务校验：这里只判断当前快照是否允许发起实时预检，
+// 不访问设备，也不把旧快照当成充电桩最终安全证明。
 QString manualChargeStartRejectionReason(
     const ManualChargeStartContext &context)
 {
@@ -30,6 +32,8 @@ QString manualChargeStartRejectionReason(
     return {};
 }
 
+// 自动授权开启前的纯业务校验。授权关闭不经过本函数，保证操作员始终可以
+// 撤销自动策略，并由已有会话继续走统一的安全收尾。
 QString automaticChargeEnableRejectionReason(
     const AutomaticChargeEnableContext &context)
 {
@@ -51,6 +55,8 @@ QString automaticChargeEnableRejectionReason(
     return {};
 }
 
+// 一键预检开始前允许控制器带有 shutdownRequired；该标志必须由紧随其后的
+// 实时查询重新确认，而不能在查询发起前直接拒绝并要求操作员另点“查询状态”。
 QString manualChargePreflightRejectionReason(
     const ManualChargeStartContext &context)
 {
@@ -59,6 +65,8 @@ QString manualChargePreflightRejectionReason(
     return manualChargeStartRejectionReason(queryContext);
 }
 
+// 与手动入口相同，开启自动授权时先允许一次只读查询，再以查询结果决定
+// 是否真正授予自动充电权限。
 QString automaticChargeEnablePreflightRejectionReason(
     const AutomaticChargeEnableContext &context)
 {
@@ -67,6 +75,8 @@ QString automaticChargeEnablePreflightRejectionReason(
     return automaticChargeEnableRejectionReason(queryContext);
 }
 
+// 将异步查询结果归一为三类：业务条件变化属于正常取消，设备状态不安全
+// 属于安全故障，只有实时查询成功且控制器明确安全时才允许继续后续动作。
 ChargePreflightOutcome classifyChargePreflightOutcome(
     const bool queryOk,
     const ChargePileController::State controllerState,

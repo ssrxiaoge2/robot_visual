@@ -55,6 +55,8 @@ QString exceptionReason(quint8 code)
 
 quint16 crc16(QByteArrayView bytes)
 {
+    // 初值、右移方向和多项式均按 Modbus RTU CRC-16/A001；返回数值在帧中仍需
+    // 由 appendCrc() 按低字节在前写入，不能直接追加主机字节序。
     quint16 crc = 0xFFFF;
     for (const char byte : bytes) {
         crc ^= static_cast<quint8>(byte);
@@ -107,6 +109,8 @@ QByteArray buildWriteCoilRequest(quint8 slaveId, quint16 address, bool on)
 
 FrameExtractResult takeResponseFrame(QByteArray *buffer, quint8 expectedSlave, quint8 expectedFunction)
 {
+    // 解析器只查看缓存头部，不扫描后续字节寻找“看起来合法”的帧。头部出现
+    // 站号/功能码/CRC 冲突意味着当前请求响应不可证明，交由控制器统一恢复。
     if (buffer == nullptr)
         return {FrameExtractStatus::Invalid, {}, 0, QStringLiteral("接收缓存为空")};
     if (buffer->size() < 2)

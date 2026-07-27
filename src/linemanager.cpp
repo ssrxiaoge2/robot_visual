@@ -195,6 +195,8 @@ void LineManager::resetError()
 
 void LineManager::setChargeDispatchHold(const bool hold, const QString &reason)
 {
+    // 这是自动充电与主调度之间的最小耦合点：只冻结新任务派发，
+    // 不改变 FIFO 队列内容，也不接管正在执行的任务。
     updateChargeDispatchHold(hold, reason, true);
 }
 
@@ -236,6 +238,8 @@ void LineManager::updateChargeDispatchHold(
 
 void LineManager::requestChargeReturnHome()
 {
+    // 仅在派单锁已经实际建立且当前任务执行器空闲时复用原返航逻辑，
+    // 确保任务中的低电请求先完成当次任务，再返回 LM1。
     if (!m_chargeDispatchHold) {
         emit logMessage(QStringLiteral("[LineManager] 忽略未建立派单保持的充电返航请求"));
         return;

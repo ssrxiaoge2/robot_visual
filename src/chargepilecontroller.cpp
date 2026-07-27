@@ -26,6 +26,8 @@ constexpr quint16 kRetractIgnoredErrors = (1u << 7);
 bool snapshotConfirmsSafe(const ChargePileSnapshot &snapshot,
                           const ChargeSettings &settings)
 {
+    // 安全终态采用“全部条件同时成立”的正向证明；任何缺失、矛盾或超限字段
+    // 都只能得到不安全，而不能用“未观察到故障”反推现场已经安全。
     return snapshot.retracted
            && !snapshot.extended
            && !snapshot.working
@@ -122,6 +124,8 @@ ChargePileController::ChargePileController(QObject *parent)
 bool ChargePileController::canApplySettings(const ChargeSettings &settings,
                                             QString *error) const
 {
+    // 参数门禁同时保护通信目标和恢复时序：只要旧会话仍负有安全恢复责任，
+    // 即使当前没有套接字请求，也不能让新设置改变对旧现场状态的解释方式。
     if (error)
         error->clear();
 
@@ -183,6 +187,8 @@ bool ChargePileController::applySettings(const ChargeSettings &settings,
 
 void ChargePileController::queryStatus()
 {
+    // 普通查询只建立 FlowMode::Query；它可更新安全快照和解除已被快照充分覆盖的
+    // 恢复上下文，但绝不会排队参数、Start、Stop、机械动作或 Reset 写命令。
     if (m_queryInProgress) {
         const QString reason = QStringLiteral("状态查询正在进行或充电会话正在执行，拒绝并发查询。");
         emit logMessage(reason);
@@ -217,6 +223,8 @@ void ChargePileController::queryStatus()
 
 bool ChargePileController::startCharge(const SessionOrigin origin, QString *error)
 {
+    // 接受新会话时一次性重置全部里程碑。后续任何停止请求都只升级此会话的
+    // StopReason 并汇入同一状态机，不允许旁路建立第二套收尾流程。
     if (error)
         error->clear();
     if (m_queryInProgress) {
@@ -303,6 +311,8 @@ bool ChargePileController::startCharge(const SessionOrigin origin, QString *erro
 
 void ChargePileController::requestSafeStop(const StopReason reason)
 {
+    // 该入口可能在连接、预检、写参或监控任一阶段到达；能立即停止时直接收尾，
+    // 存在 in-flight 写命令时则先等待其唯一结果，避免把迟到回显交给 Stop。
     if (m_flowMode != FlowMode::Charge || !m_queryInProgress)
         return;
 
@@ -352,6 +362,8 @@ bool ChargePileController::beginConservativeRecovery(
     const SessionOrigin origin, const StopReason reason,
     const bool notifyApplication, QString *error)
 {
+    // 保守恢复创建新的 Charge 流所有权，但继承上一轮安全里程碑；第一步永远是
+    // 完整只读查询，随后只补做尚未得到唯一确认的停止/缩回/复位动作。
     if (error)
         error->clear();
     if (m_queryInProgress) {
@@ -426,6 +438,8 @@ bool ChargePileController::beginConservativeRecovery(
 
 void ChargePileController::requestApplicationShutdown()
 {
+    // 应用关闭不另建控制器：活动会话只升级停止原因；无活动流但仍不安全时，
+    // 以 notifyApplication=true 的保守恢复产生窗口能够唯一消费的最终结果。
     // 同一个关闭请求只允许发布一个最终结果；重复调用只升级当前安全流程，
     // 不能重新打开通知边沿或建立第二条停止链。
     if (!m_applicationShutdownRequested) {
@@ -557,6 +571,8 @@ void ChargePileController::enqueueWriteCoil(
 void ChargePileController::enqueueSnapshotReads(
     const State state, const QString &text, std::function<void()> onComplete)
 {
+    // 五组读取属于一个不可分割的业务快照。中途失败不更新时间戳，也不会调用
+    // onComplete，防止上层把新旧寄存器混合值当作同一时刻的安全证据。
     setState(state, text);
     enqueueInputRead(ChargePileProtocol::kRegOutVoltage, 2,
                      [this](const QByteArray &response) {
@@ -596,6 +612,8 @@ void ChargePileController::enqueueSnapshotReads(
 
 void ChargePileController::beginNextRequest()
 {
+    // pending 表示已取得发送所有权但仍在节流等待；in-flight 表示已经调用写出口。
+    // 两者任一存在时都不得从 FIFO 再取请求。
     if (!m_queryInProgress || m_inFlightRequest.has_value()
         || m_pendingRequest.has_value()) {
         return;
@@ -690,6 +708,8 @@ void ChargePileController::handleConnected()
 
 void ChargePileController::handleReadyRead()
 {
+    // TCP 可以拆帧或粘帧。只有当前 in-flight 的站号、功能码、长度和 CRC 全部
+    // 匹配才推进成功回调；无法归属的完整字节保守地结束当前操作。
     m_receiveBuffer.append(m_socket.readAll());
     if (!m_queryInProgress) {
         emit logMessage(QStringLiteral("收到已结束操作的充电桩响应。"));
@@ -850,6 +870,8 @@ void ChargePileController::setState(const State state, const QString &text)
 void ChargePileController::failOperation(
     const QString &reason, const bool commandResultUnknown)
 {
+    // 写命令结果未知与普通已知失败采用不同终态：前者必须锁存命令身份并进入
+    // Unknown，禁止后续无依据地重发；后者仍按既有里程碑尝试安全恢复。
     if (!m_queryInProgress)
         return;
 
@@ -901,6 +923,8 @@ void ChargePileController::failOperation(
 
 void ChargePileController::finishQuery()
 {
+    // queryFinished(ok=true) 仅表示协议读取完整。是否安全由 State 和
+    // shutdownRequired() 共同表达，因此“不安全但读取成功”不能发布 SafeComplete。
     if (m_flowMode != FlowMode::Query)
         return;
     m_queryInProgress = false;
@@ -1011,6 +1035,8 @@ void ChargePileController::emitApplicationShutdownFinishedOnce(
 
 void ChargePileController::beginParameterWrites()
 {
+    // 参数顺序与现场 Python 脚本一致；两个 optional 为空时完全不生成对应写请求，
+    // 不是向寄存器写零，从而保留“默认不启用”的现场语义。
     setState(State::WritingParameters,
              QStringLiteral("步骤2/5：写入充电参数。"));
     m_expectedVoltageRaw = quint16(qRound(m_settings.voltageV * 10.0));
@@ -1041,6 +1067,8 @@ void ChargePileController::beginParameterWrites()
 
 void ChargePileController::beginParameterReadback()
 {
+    // 回读使用本会话锁存的原始 16 位期望值比较，避免浮点显示精度掩盖桩端
+    // 未接受设置；全部回读一致后仍要执行第二次完整安全预检。
     setState(State::ReadingBackParameters,
              QStringLiteral("回读并按协议原始整数核对充电参数。"));
     enqueueRead(kReadHoldingRegisters, ChargePileProtocol::kRegSetVoltage, 2,
@@ -1111,6 +1139,8 @@ void ChargePileController::sendStartCommand()
 
 void ChargePileController::pollWaitingForStart()
 {
+    // 此阶段允许 E11 在 30 秒窗口内自行消失，但不重发 Start。只要观察到真实
+    // 输出，后续 E11 就不再视为启动瞬态，必须进入安全停止。
     if (m_safeStopRequested) {
         beginSafeShutdown();
         return;
@@ -1207,6 +1237,8 @@ void ChargePileController::pollWaitingForStart()
 
 void ChargePileController::pollMonitoring()
 {
+    // 监控阶段不自行读取 AGV 电量；上层协调器只通过 requestSafeStop() 注入
+    // 阈值停止原因，控制器继续独立负责桩端故障和输出安全。
     if (m_safeStopRequested) {
         beginSafeShutdown();
         return;
@@ -1244,6 +1276,8 @@ void ChargePileController::pollMonitoring()
 
 void ChargePileController::beginSafeShutdown()
 {
+    // 五阶段收尾的唯一入口。Stop 即使回显失败也不直接缩枪，必须先通过后续
+    // 只读状态证明无工作、继电器断开且电流已降到安全阈值。
     if (!m_queryInProgress || m_flowMode != FlowMode::Charge
         || m_safeShutdownStarted || m_inFlightRequest.has_value()) {
         return;
@@ -1311,6 +1345,8 @@ void ChargePileController::pollWaitingForNoOutput()
 
 void ChargePileController::sendRetractCommand()
 {
+    // 缩回 ON 是需要成对释放的机械命令。一旦回显确认，任何后续失败路径都必须
+    // 优先尝试 OFF；不能因会话准备结束而把线圈遗留在高电平。
     if (m_retractOnConfirmed) {
         setState(State::WaitingForRetracted,
                  QStringLiteral("缩回ON已确认，继续等待到位，不重复发送。"));
@@ -1415,6 +1451,8 @@ void ChargePileController::beginFinalSafetyQuery()
 
 void ChargePileController::beginConservativeRecoveryAfterSnapshot()
 {
+    // 恢复决策只依据最新权威快照、已确认里程碑和不确定写入身份；它不会猜测
+    // 上一条超时写命令是否生效，也不会为了“试试看”重放相同写命令。
     m_safeStopRequested = true;
     // 保守矩阵已经接管安全推进。标记“收尾入口已建立”，防止最后一帧预检
     // 的 handleReadyRead() 在本回调返回后再次调用普通 beginSafeShutdown()，
@@ -1594,6 +1632,8 @@ void ChargePileController::handleReadFailure(const QString &reason)
 void ChargePileController::beginCommunicationRecovery(
     const RecoveryAction action, const QString &reason)
 {
+    // 通信恢复只重做安全的只读阶段或继续已确认里程碑，最多有限次建连；原始
+    // 写命令的执行结果若未知，恢复动作必须选择不会重复该写入的路径。
     m_recoveryAction = action;
     m_recoveryReason = reason;
     clearTransportWork();
@@ -1771,6 +1811,8 @@ void ChargePileController::publishSnapshot()
 
 void ChargePileController::clearTransportWork()
 {
+    // 这里只清理传输层临时对象，不清除安全恢复上下文、写入里程碑或不确定写入。
+    // 因而断开 TCP 不能被误当作已经停止、缩回或复位。
     m_responseTimer.stop();
     m_actionPollTimer.stop();
     m_phaseTimer.stop();

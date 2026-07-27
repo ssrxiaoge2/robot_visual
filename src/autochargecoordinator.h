@@ -17,15 +17,15 @@
  * 手动充电即使让控制器处于忙碌状态，也不得写入该字段。
  */
 struct AutoChargeInputs {
-    bool enabled = false;
-    bool automaticSessionActive = false;
-    LineSystemState lineState = LineSystemState::Idle;
-    bool hasAgvMonitor = false;
-    AgvMonitorData agv;
-    bool currentTaskRunning = false;
-    int pendingCount = 0;
-    bool chargeControllerBusy = false;
-    bool chargeControllerUnknown = false;
+    bool enabled = false;                ///< 本进程自动授权；软件启动时固定为 false。
+    bool automaticSessionActive = false; ///< 已被业务层接受且尚未安全结束的自动会话。
+    LineSystemState lineState = LineSystemState::Idle; ///< 主调度生命周期快照。
+    bool hasAgvMonitor = false;          ///< agv 是否来自仍在新鲜期内的完整轮询。
+    AgvMonitorData agv;                  ///< 同一轮电量、站点与导航状态快照。
+    bool currentTaskRunning = false;     ///< 当前是否仍有必须先完成的送料任务。
+    int pendingCount = 0;                ///< FIFO 中尚未执行的任务数量。
+    bool chargeControllerBusy = false;   ///< 控制器处于查询或充电通信阶段。
+    bool chargeControllerUnknown = false; ///< 控制器处于 Unknown/Fault 安全不确定态。
 };
 /**
  * @brief 无副作用策略函数输出的可组合动作集合。
@@ -34,14 +34,14 @@ struct AutoChargeInputs {
  * statusText 用于界面解释当前决策；errorText 用于严重电量报警或系统故障详情。
  */
 struct AutoChargeDecision {
-    bool holdDispatch = false;
-    bool requestReturnHome = false;
-    bool requestStartCharge = false;
-    bool requestSafeStop = false;
-    bool releaseDispatch = false;
-    bool raiseLineError = false;
-    QString statusText;
-    QString errorText;
+    bool holdDispatch = false;      ///< 禁止 LineManager 从 FIFO 取下一单。
+    bool requestReturnHome = false; ///< 使用主调度唯一导航入口返回 LM1。
+    bool requestStartCharge = false; ///< 在 LM1 且导航空闲时提交自动开始意图。
+    bool requestSafeStop = false;   ///< 将活动会话汇入控制器安全收尾。
+    bool releaseDispatch = false;   ///< 安全结束且满足接单电量后允许恢复派单。
+    bool raiseLineError = false;    ///< 设备状态无法安全解释时升级主调度 Error。
+    QString statusText;             ///< 面板显示的当前策略原因。
+    QString errorText;              ///< Error 或临界电量报警的详细上下文。
 };
 
 /**
@@ -142,8 +142,11 @@ signals:
     void logMessage(const QString &message);
 
 private:
+    /// 汇总最新输入并只在动作电平或一次性意图发生变化时发布信号。
     void evaluate();
+    /// 根据关闭授权、任务到达阈值、正常目标或故障选择控制器停止原因。
     ChargePileController::StopReason currentStopReason() const;
+    /// 将控制器阶段归并成策略层的“通信/会话忙碌”布尔量。
     static bool isControllerBusyState(ChargePileController::State state);
 
     ChargeSettings m_settings = ChargeSettings::defaults(); ///< 当前已生效阈值快照。

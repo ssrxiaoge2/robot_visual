@@ -200,10 +200,10 @@ private:
      * 状态机。None 也确保普通“查询状态”和启动 DO0 恢复查询不会误触发启动。
      */
     enum class ChargePreflightIntent {
-        None,
-        ManualStart,
-        EnableAutomatic,
-        AutomaticStart
+        None,            ///< 普通查询或当前没有一键预检。
+        ManualStart,     ///< 面板“开始充电”触发的新鲜安全查询。
+        EnableAutomatic, ///< 自动授权生效前的只读基线查询。
+        AutomaticStart   ///< 主调度实际置高 DO0 前的即时安全查询。
     };
 
     /**
@@ -213,31 +213,45 @@ private:
      * 安全收尾后共用 Closing；StartupChecking 仅用于连接恢复时清理遗留高电平。
      */
     enum class ChargeDo0Phase {
-        Idle,
-        Opening,
-        Active,
-        Closing,
-        StartupChecking
+        Idle,            ///< 没有 DO0 操作或充电会话所有权。
+        Opening,         ///< 等待 DO0 高电平确认，尚未启动充电桩。
+        Active,          ///< 充电桩会话活动，30 秒周期复核 DO0。
+        Closing,         ///< 充电桩已安全，正在轻量尝试关闭 DO0。
+        StartupChecking  ///< 软件重连后检查并处理遗留高电平。
     };
 
     bool tcpPing(const QString &ip, int port, int timeoutMs = 2000);
     void loadStationMap();
     void saveStationMap() const;
+    /// 手动和自动开始共用入口：先确认 DO0 高，再把同一来源交给充电桩控制器。
     bool requestChargeStartWithDo0(
         ChargePileController::SessionOrigin origin, QString *error);
+    /// 串行锁存三种业务意图并发起一轮无写操作的充电桩完整查询。
     bool beginChargePreflight(ChargePreflightIntent intent, QString *error);
+    /// 消费当前预检结果，重新校验业务条件后续接授权、DO0 或主调度 Error。
     void handleChargePreflightFinished(bool queryOk, const QString &message);
+    /// 主动关闭、Stop 或应用退出时撤销意图；自动开始必须释放协调器 pending。
     void cancelChargePreflight(const QString &reason);
+    /// 采集手动开始上下文，并允许初始 Idle 进入只读预检但不允许直接启动。
     QString manualChargePreflightRejection() const;
+    /// 采集自动授权上下文，并允许初始 Idle 建立安全基线。
     QString automaticEnablePreflightRejection() const;
+    /// 自动查询结束前复核授权、调度生命周期、LM1 和导航空闲条件。
     QString automaticStartContinuationRejection() const;
+    /// DO0 高电平确认期间只标记取消，待异步确认返回后统一安全结束。
     void cancelPendingChargeStart(const QString &reason);
+    /// 路由 DO0 高/低确认：高确认后启动桩，低确认后只完成轻量关闭。
     void handleDo0EnsureFinished(bool targetHigh, bool confirmed,
                                  bool actualHigh, const QString &message);
+    /// 处理启动恢复或活动监控的 DO0 只读结果，两种阶段采用不同安全语义。
     void handleDo0StateRead(bool ok, bool high, const QString &message);
+    /// 充电桩安全完成后尝试关闭车辆许可；失败只记录，不推翻桩端安全结果。
     void beginDo0CloseBestEffort(const QString &context);
+    /// 活动会话中 DO0 变低或连续读失败时只提交一次桩端安全停止。
     void requestDo0SafetyStop(const QString &reason);
+    /// AGV 连接后检查遗留 DO0；高电平时必须先确认充电桩无输出。
     void beginStartupDo0Check();
+    /// 应用关闭已等待 DO0 轻量关闭时，发布桩端既有安全结论。
     void finishPendingApplicationShutdownAfterDo0();
 
     AgvController    *m_agvCtrl     = nullptr;       ///< QObject 子对象，唯一 AGV 通信实例。

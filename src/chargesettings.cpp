@@ -95,6 +95,8 @@ bool thresholdGroupIsValid(const ChargeSettings &settings)
 
 ChargeSettings ChargeSettings::defaults()
 {
+    // 58.4V/50A 来自已通过真实充电桩验证的 Python 流程；可选截止电流和桩端
+    // 最大时长保持 nullopt，默认保存与启动流程均不会写入对应寄存器。
     ChargeSettings settings;
     settings.host = QStringLiteral("192.168.115.108");
     return settings;
@@ -102,6 +104,8 @@ ChargeSettings ChargeSettings::defaults()
 
 ChargeSettingsValidation validateChargeSettings(const ChargeSettings &settings)
 {
+    // 集中校验同时服务设置窗口、磁盘保存和控制器应用入口，避免三个入口各自
+    // 放宽不同边界。所有错误一次收集，便于现场一次修正完整候选。
     ChargeSettingsValidation result;
     appendError(result, !settings.host.trimmed().isEmpty(), QStringLiteral("充电设备地址不能为空。"));
     appendError(result, settings.port != 0, QStringLiteral("充电设备端口必须大于零。"));
@@ -154,6 +158,8 @@ ChargeSettingsValidation validateChargeSettings(const ChargeSettings &settings)
 
 ChargeSettingsLoadResult loadChargeSettings(const QString &iniPath)
 {
+    // 加载采用“逐字段降级、相关组整体校验”：单个网络或电气字段损坏不丢弃
+    // 其他有效值，但超时组和三级阈值这类相互依赖字段必须作为一组恢复默认。
     ChargeSettingsLoadResult result;
     result.settings = ChargeSettings::defaults();
     if (iniPath.isEmpty() || !QFileInfo::exists(iniPath))
@@ -262,6 +268,8 @@ ChargeSettingsLoadResult loadChargeSettings(const QString &iniPath)
 
 bool saveChargeSettings(const QString &iniPath, const ChargeSettings &settings, QString *error)
 {
+    // 保存前重新执行完整校验，禁止把 UI 尚未捕获的非法快照写盘；文件替换采用
+    // 原子提交，进程崩溃或磁盘错误时旧配置仍可继续使用。
     if (error)
         error->clear();
     const ChargeSettingsValidation validation = validateChargeSettings(settings);

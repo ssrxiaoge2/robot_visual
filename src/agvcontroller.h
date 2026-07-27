@@ -134,13 +134,20 @@ private:
     /// 文档地址位（1 基）→ Modbus PDU 地址（0 基）
     static constexpr int pdu(int docAddr) { return docAddr - 1; }
 
+    /// 周期读取两段输入寄存器，只有两段均成功才发布字段一致的完整快照。
     void pollMonitor();
+    /// ensureDO0 的统一只读阶段：写前避免重复写，写后验证真实电平。
     void readDo0ForEnsure();
+    /// 每轮 ensureDO0 最多发送一次置高或置低命令，随后只允许读取确认。
     void sendDo0Write();
+    /// 在有限确认次数之间等待固定间隔，避免对 AGV 连续叠发读取。
     void scheduleDo0Confirmation();
+    /// 清理 ensureDO0 所有权并发布一次最终确认结果。
     void finishDo0Ensure(bool confirmed, bool actualHigh,
                          const QString &message);
+    /// 清理独立只读所有权并发布结果，不改变 DO0 电平。
     void finishDo0Query(bool ok, bool high, const QString &message);
+    /// 断线或析构时结束当前 DO0 操作；不尝试补发任何写命令。
     void cancelDo0Operation(const QString &reason);
 
     QModbusTcpClient *m_client         = nullptr; ///< QObject 子对象，Modbus TCP 主站。

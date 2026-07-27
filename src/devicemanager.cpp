@@ -652,6 +652,8 @@ bool DeviceManager::applyChargeSettingsCandidate(
 bool DeviceManager::requestChargeStartWithDo0(
     const ChargePileController::SessionOrigin origin, QString *error)
 {
+    // 手动与自动入口共用这一条车辆允许信号链：先确认 DO0 高电平，
+    // 成功回调中才允许调用充电桩 startCharge，杜绝两套并发控制时序。
     if (error)
         error->clear();
     if (m_chargeDo0Phase != ChargeDo0Phase::Idle) {
@@ -681,6 +683,8 @@ bool DeviceManager::requestChargeStartWithDo0(
 
 QString DeviceManager::manualChargePreflightRejection() const
 {
+    // 使用新鲜度守卫提供的 AGV 快照构造纯业务上下文；本函数不查询设备，
+    // 真正开始仍必须经过 beginChargePreflight 的充电桩实时只读确认。
     if (!m_lineManager || !m_chargePileController || !m_autoChargeCoordinator)
         return QStringLiteral("充电业务对象尚未初始化");
 
@@ -715,6 +719,8 @@ QString DeviceManager::automaticEnablePreflightRejection() const
 
 QString DeviceManager::automaticStartContinuationRejection() const
 {
+    // 自动返回 LM1 到预检完成之间可能出现 Stop、Error、授权关闭或位置变化，
+    // 因此在异步查询结束后必须重新验证全部继续条件。
     if (!m_lineManager || !m_chargePileController || !m_autoChargeCoordinator)
         return QStringLiteral("自动充电业务对象尚未初始化");
     if (!m_autoChargeCoordinator->isEnabled())
@@ -866,6 +872,8 @@ void DeviceManager::handleChargePreflightFinished(
     }
 
     if (outcome == ChargePreflightOutcome::DeviceSafetyFailure) {
+        // 自动启动已经锁住派单；设备安全预检失败时进入主调度 Error，
+        // 不置高 DO0、不发送 Start、也不自动重试，等待人工检查与复位。
         const QString failure =
             QStringLiteral("充电桩实时安全预检失败：%1").arg(message);
         emit logMessage(QStringLiteral("[充电预检] %1").arg(failure));
@@ -928,6 +936,8 @@ void DeviceManager::handleDo0EnsureFinished(
     const bool actualHigh,
     const QString &message)
 {
+    // Opening 和 Closing 共用 AGV 层的确认信号，但安全等级不同：
+    // 置高未确认必须禁止启动；置低未确认只记录，不推翻充电桩安全终态。
     Q_UNUSED(actualHigh)
 
     if (m_chargeDo0Phase == ChargeDo0Phase::Closing) {
@@ -1007,6 +1017,8 @@ void DeviceManager::handleDo0EnsureFinished(
 void DeviceManager::handleDo0StateRead(
     const bool ok, const bool high, const QString &message)
 {
+    // StartupChecking 用于轻量处理程序启动时的遗留电平；Active 则是
+    // 充电期间低频监控，两者必须按当前阶段消费，不能互相推进状态。
     if (m_chargeDo0Phase == ChargeDo0Phase::StartupChecking) {
         if (!ok) {
             m_chargeDo0Phase = ChargeDo0Phase::Idle;
@@ -1055,6 +1067,8 @@ void DeviceManager::handleDo0StateRead(
 
 void DeviceManager::beginDo0CloseBestEffort(const QString &context)
 {
+    // 充电桩已安全结束后尝试关闭车辆 DO0。该普通 IO 的关闭失败仅记录，
+    // 不阻断派单恢复或应用退出，也不会重新开启充电桩收尾。
     m_chargeDo0MonitorTimer->stop();
     m_chargeDo0Phase = ChargeDo0Phase::Closing;
     QString error;
@@ -1070,6 +1084,8 @@ void DeviceManager::beginDo0CloseBestEffort(const QString &context)
 
 void DeviceManager::requestDo0SafetyStop(const QString &reason)
 {
+    // 充电期间 DO0 变低或连续不可读时，只向唯一充电桩控制器发一次
+    // Fault 安全停止请求，避免监控定时器重复触发并发收尾。
     if (m_do0SafeStopRequested)
         return;
     m_do0SafeStopRequested = true;
@@ -1083,6 +1099,8 @@ void DeviceManager::requestDo0SafetyStop(const QString &reason)
 
 void DeviceManager::beginStartupDo0Check()
 {
+    // 启动恢复只在充电链完全空闲时查询一次 DO0；没有现场证据表明充电桩
+    // 仍工作时绝不直接拉低，后续由充电桩只读快照决定是否尝试关闭。
     if (!m_chargePileController
         || m_chargeDo0Phase != ChargeDo0Phase::Idle
         || m_pendingChargeOrigin.has_value()
@@ -1114,6 +1132,8 @@ void DeviceManager::finishPendingApplicationShutdownAfterDo0()
 
 bool DeviceManager::startManualCharge(QString *error)
 {
+    // “开始充电”按钮是一键入口：本地条件通过后自动查询充电桩，
+    // 查询安全才继续 DO0 与 Start，操作员无需预先点击“查询状态”。
     if (error)
         error->clear();
     const auto reject = [this, error](const QString &reason) {
@@ -1169,6 +1189,8 @@ bool DeviceManager::queryChargePileStatus(QString *error)
 
 bool DeviceManager::stopChargePile(QString *error)
 {
+    // 停止入口按当前阶段取消预检、取消待启动、停止活动会话或恢复不安全终态，
+    // 所有充电桩报文仍由同一个 ChargePileController 串行发送。
     if (error)
         error->clear();
     if (!m_chargePileController) {
@@ -1248,6 +1270,8 @@ void DeviceManager::requestApplicationShutdown()
 
 bool DeviceManager::setAutoChargeEnabled(const bool enabled, QString *error)
 {
+    // 开启授权必须完成一次实时安全预检；关闭授权立即生效，但若自动会话
+    // 已经建立，协调器仍保留会话所有权直至控制器安全收尾。
     if (error)
         error->clear();
     if (!m_autoChargeCoordinator || !m_chargePileController) {
