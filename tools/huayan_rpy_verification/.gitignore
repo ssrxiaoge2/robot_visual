@@ -1,0 +1,2 @@
+# 忽略本目录脚本在 Linux 上生成的无扩展名可执行文件。
+/verify_hans_rpy
