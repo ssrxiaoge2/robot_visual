@@ -513,7 +513,7 @@ void MainWindow::closeEvent(QCloseEvent *event)
     ChargePileController *controller =
         m_devMgr ? m_devMgr->chargePileController() : nullptr;
     const bool shutdownRequired =
-        !m_devMgr || m_devMgr->chargePileShutdownRequired();
+        !m_devMgr || m_devMgr->chargePileCloseInterceptionRequired();
     const bool controllerBusy = controller && controller->isBusy();
     const ChargeShutdownPolicy::CloseAction action =
         m_chargeShutdownPolicy.onCloseRequested(
@@ -522,6 +522,8 @@ void MainWindow::closeEvent(QCloseEvent *event)
     // 每次关闭都实时读取 shutdownRequired；历史 safe 结果不能绕过后来出现的
     // 新会话、未知写命令或不安全快照。
     if (action == ChargeShutdownPolicy::CloseAction::AcceptClose) {
+        if (m_devMgr)
+            m_devMgr->prepareChargePileCloseWithoutInterception();
         event->accept();
         QMainWindow::closeEvent(event);
         return;
@@ -1694,7 +1696,7 @@ void MainWindow::initChargePanel(QVBoxLayout *leftPanel)
     connect(m_devMgr, &DeviceManager::applicationShutdownFinished,
             this, [this](const bool safe, const QString &message) {
         const bool shutdownRequired =
-            m_devMgr->chargePileShutdownRequired();
+            m_devMgr->chargePileCloseInterceptionRequired();
         // 只有当前 ApplicationShutdownPending 代次能够消费结果；迟到或重复
         // 信号不会改变后来恢复操作的代次和强退资格。
         if (!m_chargeShutdownPolicy.onApplicationShutdownFinished(
@@ -1713,7 +1715,7 @@ void MainWindow::initChargePanel(QVBoxLayout *leftPanel)
             // 绑定窗口生命周期，并在真正执行前再次读取实时 shutdownRequired。
             QTimer::singleShot(0, this, [this] {
                 const bool realtimeShutdownRequired =
-                    m_devMgr->chargePileShutdownRequired();
+                    m_devMgr->chargePileCloseInterceptionRequired();
                 if (m_chargeShutdownPolicy.canRunQueuedClose(
                         realtimeShutdownRequired)) {
                     close();

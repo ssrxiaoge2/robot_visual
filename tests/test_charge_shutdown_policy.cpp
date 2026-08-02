@@ -7,6 +7,53 @@ class ChargeShutdownPolicyTest : public QObject
     Q_OBJECT
 
 private slots:
+    void closeInterceptionAllowsMissingBaselineWithoutChargeResponsibility()
+    {
+        ChargeCloseInterceptionContext context;
+        context.controllerShutdownRequired = true;
+
+        QVERIFY(!chargeCloseInterceptionRequired(context));
+
+        context.automaticPolicyParticipatingInLine = true;
+        QVERIFY(chargeCloseInterceptionRequired(context));
+    }
+
+    void closeInterceptionBlocksRealChargeResponsibilityAndUnsafeTerminal()
+    {
+        ChargeCloseInterceptionContext context;
+
+        context.chargeSessionActive = true;
+        QVERIFY(chargeCloseInterceptionRequired(context));
+
+        context = ChargeCloseInterceptionContext{};
+        context.automaticSessionActive = true;
+        QVERIFY(chargeCloseInterceptionRequired(context));
+
+        context = ChargeCloseInterceptionContext{};
+        context.do0OpeningOrActive = true;
+        QVERIFY(chargeCloseInterceptionRequired(context));
+
+        context = ChargeCloseInterceptionContext{};
+        context.applicationShutdownInProgress = true;
+        QVERIFY(chargeCloseInterceptionRequired(context));
+
+        context = ChargeCloseInterceptionContext{};
+        context.controllerUnsafeTerminal = true;
+        QVERIFY(chargeCloseInterceptionRequired(context));
+
+        context = ChargeCloseInterceptionContext{};
+        context.controllerUnsafeEvidence = true;
+        QVERIFY(chargeCloseInterceptionRequired(context));
+    }
+
+    void closeInterceptionBlocksMissingDeviceManager()
+    {
+        ChargeCloseInterceptionContext context;
+        context.deviceManagerAvailable = false;
+
+        QVERIFY(chargeCloseInterceptionRequired(context));
+    }
+
     void applicationGateFailureUnfreezesButSuccessStaysFrozen()
     {
         ChargeApplicationShutdownGate gate;

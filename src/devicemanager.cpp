@@ -1249,6 +1249,61 @@ bool DeviceManager::chargePileShutdownRequired() const
            || m_chargePileController->shutdownRequired();
 }
 
+bool DeviceManager::chargePileCloseInterceptionRequired() const
+{
+    ChargeCloseInterceptionContext context;
+    if (!m_chargePileController) {
+        context.deviceManagerAvailable = false;
+        return chargeCloseInterceptionRequired(context);
+    }
+
+    context.controllerShutdownRequired =
+        m_chargePileController->shutdownRequired();
+    context.controllerUnsafeTerminal =
+        m_chargePileState == ChargePileController::State::Fault
+        || m_chargePileState == ChargePileController::State::Unknown;
+    const ChargePileSnapshot snapshot = m_chargePileController->snapshot();
+    const bool unsafeSnapshot =
+        snapshot.sampledAt.isValid()
+        && (!snapshot.retracted
+            || snapshot.extended
+            || snapshot.working
+            || snapshot.relayOn
+            || snapshot.outputCurrentA > m_chargeSettings.safeCurrentA);
+    context.controllerUnsafeEvidence =
+        unsafeSnapshot
+        || m_chargePileController->uncertainWriteIdentity().has_value();
+    context.chargeSessionActive =
+        m_chargePileController->hasActiveChargeSession();
+    context.automaticSessionActive =
+        m_autoChargeCoordinator
+        && m_autoChargeCoordinator->automaticSessionActive();
+    // Opening 已经把 DO0 置高意图交给 AGV，Active 则代表车辆充电许可保持中；
+    // Closing 和 StartupChecking 只做轻量查询/关闭，不单独构成关闭拦截责任。
+    context.do0OpeningOrActive =
+        m_chargeDo0Phase == ChargeDo0Phase::Opening
+        || m_chargeDo0Phase == ChargeDo0Phase::Active;
+    context.applicationShutdownInProgress =
+        m_chargeApplicationShutdownGate.blocksNewActions();
+
+    if (m_autoChargeCoordinator && m_autoChargeCoordinator->isEnabled()
+        && m_lineManager) {
+        const LineSystemState lineState = m_lineManager->state();
+        context.automaticPolicyParticipatingInLine =
+            lineState != LineSystemState::Idle
+            && lineState != LineSystemState::Error;
+    }
+
+    return chargeCloseInterceptionRequired(context);
+}
+
+void DeviceManager::prepareChargePileCloseWithoutInterception()
+{
+    // 只有尚未进入 DO0 的预检意图会在这里被取消；Opening/Active 已经由
+    // chargePileCloseInterceptionRequired() 判定为真实充电责任并进入安全收尾。
+    cancelChargePreflight(QStringLiteral("关闭窗口不需要充电安全拦截"));
+}
+
 void DeviceManager::requestApplicationShutdown()
 {
     // 冻结必须发生在任何协调器或控制器调用之前，避免同步信号重入接受新动作。

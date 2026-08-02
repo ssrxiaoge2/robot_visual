@@ -167,6 +167,31 @@ int main(int argc, char *argv[])
                         QStringLiteral("void requestApplicationShutdown();"),
                         QStringLiteral("DeviceManager 必须提供关闭收尾入口"));
         requireContains(deviceHeader,
+                        QStringLiteral("bool chargePileCloseInterceptionRequired() const;"),
+                        QStringLiteral("DeviceManager 必须提供关闭窗口专用充电拦截判断"));
+        requireContains(deviceSource,
+                        QStringLiteral("ChargeCloseInterceptionContext"),
+                        QStringLiteral("DeviceManager 必须汇总关闭窗口充电拦截上下文"));
+        requireContains(deviceSource,
+                        QStringLiteral("chargeCloseInterceptionRequired(context)"),
+                        QStringLiteral("DeviceManager 必须复用关闭窗口专用纯规则"));
+        requireContains(mainSource,
+                        QStringLiteral("m_devMgr->chargePileCloseInterceptionRequired()"),
+                        QStringLiteral("MainWindow 关闭流程必须调用关闭窗口专用判断"));
+        requireContains(deviceHeader,
+                        QStringLiteral("void prepareChargePileCloseWithoutInterception();"),
+                        QStringLiteral("DeviceManager 必须提供不拦截关闭时的预检取消入口"));
+        requireContains(mainSource,
+                        QStringLiteral("m_devMgr->prepareChargePileCloseWithoutInterception();"),
+                        QStringLiteral("关闭窗口不拦截时必须取消尚未进入 DO0 的预检意图"));
+        requireContains(deviceSource,
+                        QStringLiteral("关闭窗口不需要充电安全拦截"),
+                        QStringLiteral("不拦截关闭时必须留下预检取消原因"));
+        requireBefore(deviceSource,
+                      QStringLiteral("if (intent == ChargePreflightIntent::None)\n        return;"),
+                      QStringLiteral("requestChargeStartWithDo0"),
+                      QStringLiteral("取消后的预检迟到结果必须在任何 DO0/启动动作前返回"));
+        requireContains(deviceHeader,
                         QStringLiteral("chargeApplicationShutdownInProgress()"),
                         QStringLiteral("DeviceManager 必须公开只读关闭冻结状态"));
         requireContains(deviceHeader,

@@ -26,6 +26,35 @@ private:
 };
 
 /**
+ * @brief 关闭窗口时判断充电安全拦截所需的一次业务快照。
+ *
+ * controllerShutdownRequired 仍沿用 ChargePileController 的保守判断；其它字段
+ * 用来说明是否已经存在真实充电责任，避免“仅缺少安全基线”被误当作必须收尾。
+ */
+struct ChargeCloseInterceptionContext
+{
+    bool deviceManagerAvailable = true; ///< DeviceManager/控制器边界是否可用于证明安全。
+    bool controllerShutdownRequired = false; ///< 控制器通用停机判断是否仍保守要求收尾。
+    bool controllerUnsafeTerminal = false; ///< 控制器是否已明确处于 Fault 或 Unknown。
+    bool controllerUnsafeEvidence = false; ///< 只读快照或未知写命令是否已经证明不安全。
+    bool chargeSessionActive = false; ///< 控制器是否持有手动/自动充电或恢复会话。
+    bool automaticSessionActive = false; ///< 自动协调器是否仍拥有未安全释放的自动会话。
+    bool do0OpeningOrActive = false; ///< DO0 是否正在置高或已作为充电许可保持。
+    bool applicationShutdownInProgress = false; ///< 应用关闭收尾是否已经接管控制器。
+    bool automaticPolicyParticipatingInLine = false; ///< 自动策略是否已参与主调度生命周期。
+};
+
+/**
+ * @brief 判断关闭窗口是否必须因充电安全被拦截。
+ *
+ * 规则只放宽“没有真实充电责任、仅缺少安全基线”的窗口关闭场景；Fault、
+ * Unknown、已知不安全快照、DO0 打开、活动会话和已参与主调度的自动策略
+ * 仍按安全事实拦截。
+ */
+bool chargeCloseInterceptionRequired(
+    const ChargeCloseInterceptionContext &context);
+
+/**
  * @brief 主窗口关闭代次和强退资格的纯状态策略。
  *
  * 强退资格只由某一代已经结束且失败的应用关闭请求产生。任何后续控制器操作

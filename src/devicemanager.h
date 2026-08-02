@@ -115,6 +115,10 @@ public:
     bool stopChargePile(QString *error = nullptr);
     /// 返回唯一控制器是否仍有输出、机构或未知写命令等关闭风险。
     bool chargePileShutdownRequired() const;
+    /// 返回关闭窗口是否需要因真实充电责任或明确不安全终态被拦截。
+    bool chargePileCloseInterceptionRequired() const;
+    /// 窗口无需拦截即可关闭时，取消尚未进入 DO0 的充电预检意图。
+    void prepareChargePileCloseWithoutInterception();
     /// 应用关闭收尾开始后冻结所有新充电动作；失败结果到达后解除供人工补救。
     bool chargeApplicationShutdownInProgress() const {
         return m_chargeApplicationShutdownGate.blocksNewActions();

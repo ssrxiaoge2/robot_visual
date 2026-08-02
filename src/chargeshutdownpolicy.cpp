@@ -1,5 +1,29 @@
 #include "chargeshutdownpolicy.h"
 
+bool chargeCloseInterceptionRequired(
+    const ChargeCloseInterceptionContext &context)
+{
+    if (!context.deviceManagerAvailable)
+        return true;
+
+    const bool realChargeResponsibility =
+        context.chargeSessionActive
+        || context.automaticSessionActive
+        || context.do0OpeningOrActive
+        || context.applicationShutdownInProgress;
+    if (realChargeResponsibility)
+        return true;
+
+    if (context.controllerUnsafeTerminal)
+        return true;
+
+    if (context.controllerUnsafeEvidence)
+        return true;
+
+    return context.controllerShutdownRequired
+           && context.automaticPolicyParticipatingInLine;
+}
+
 // 把窗口关闭请求转换为明确动作；策略对象本身不操作设备，只负责防止
 // 历史收尾结果被后续控制器操作错误复用。
 ChargeShutdownPolicy::CloseAction ChargeShutdownPolicy::onCloseRequested(
