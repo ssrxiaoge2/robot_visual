@@ -52,7 +52,12 @@ Linux环境可能运行在8GB内存虚拟机中，不确认机器资源时不得
 
 ## 4. Windows固定工具路径
 
-党欢Windows电脑使用Qt 6.8.3和MSVC 2022 64位，同时保留Ninja与JOM两套构建方式。
+党欢Windows电脑同时保留以下两套Qt环境：
+
+- Qt 6.8.3 + MSVC 2022 64位，用于当前版本开发和Qt 6兼容验证。
+- Qt 5.12.8 + MSVC 2017 64位，用于工控机版本兼容验证。
+
+Qt 6.8.3环境保留Ninja与JOM两套构建方式；Qt 5.12.8环境使用VS2017附带的Ninja。
 
 ```text
 源码目录：
@@ -75,6 +80,21 @@ D:\Tool\AInstall\VS2022\Microsoft Visual Studio\18\Community\Common7\IDE\CommonE
 
 JOM：
 D:\Tool\AInstall\Qt\Tools\QtCreator\bin\jom\jom.exe
+
+Qt 5.12.8：
+D:\Tool\AInstall\Qt5.12.8\5.12.8\msvc2017_64
+
+Qt 5.12.8 CMake目录：
+D:\Tool\AInstall\Qt5.12.8\5.12.8\msvc2017_64\lib\cmake\Qt5
+
+Visual Studio 2017环境脚本：
+D:\Tool\AInstall\VS2017\Community\VC\Auxiliary\Build\vcvars64.bat
+
+MSVC 2017编译器：
+D:\Tool\AInstall\VS2017\Community\VC\Tools\MSVC\14.16.27023\bin\HostX64\x64\cl.exe
+
+Visual Studio 2017附带的Ninja：
+D:\Tool\AInstall\VS2017\Community\Common7\IDE\CommonExtensions\Microsoft\CMake\Ninja\ninja.exe
 ```
 
 以下命令均在 `cmd.exe` 中执行。
@@ -158,9 +178,62 @@ D:\Tool\AInstall\CMake\bin\ctest.exe ^
 
 Ninja和JOM必须使用不同构建目录，不得在已有缓存中切换生成器。
 
-## 7. 使用原则
+## 7. Windows工控机兼容环境：Qt 5.12.8、MSVC 2017与Ninja
+
+Qt Creator当前已经验证通过的构建目录为：
+
+```text
+D:\project\CompositeRobot\code\C++\build-robot_visual-Desktop_Qt_5_12_8_MSVC2017_64bit-Debug
+```
+
+该目录已使用Qt 5.12.8、MSVC 2017和Ninja生成。目录内存在有效的
+`CMakeCache.txt` 时，不要重新配置，直接执行：
+
+```bat
+call "D:\Tool\AInstall\VS2017\Community\VC\Auxiliary\Build\vcvars64.bat"
+
+set PATH=D:\Tool\AInstall\Qt5.12.8\5.12.8\msvc2017_64\bin;D:\project\CompositeRobot\code\C++\robot_visual\3rd\HuaYansdk\HuayanRobotLibrary-C++-V1.0.15.0\MSVC;%PATH%
+
+D:\Tool\AInstall\CMake\bin\cmake.exe ^
+  --build D:/project/CompositeRobot/code/C++/build-robot_visual-Desktop_Qt_5_12_8_MSVC2017_64bit-Debug ^
+  --config Debug
+```
+
+需要新建Qt 5.12.8构建目录时，使用独立目录并执行：
+
+```bat
+call "D:\Tool\AInstall\VS2017\Community\VC\Auxiliary\Build\vcvars64.bat"
+
+D:\Tool\AInstall\CMake\bin\cmake.exe ^
+  -S D:/project/CompositeRobot/code/C++/robot_visual ^
+  -B D:/project/CompositeRobot/code/C++/build-robot_visual-Desktop_Qt_5_12_8_MSVC2017_64bit-Debug ^
+  -G Ninja ^
+  -DCMAKE_MAKE_PROGRAM="D:/Tool/AInstall/VS2017/Community/Common7/IDE/CommonExtensions/Microsoft/CMake/Ninja/ninja.exe" ^
+  -DCMAKE_PREFIX_PATH=D:/Tool/AInstall/Qt5.12.8/5.12.8/msvc2017_64 ^
+  -DCMAKE_BUILD_TYPE=Debug ^
+  -DBUILD_TESTING=ON
+```
+
+运行测试：
+
+```bat
+set PATH=D:\Tool\AInstall\Qt5.12.8\5.12.8\msvc2017_64\bin;D:\project\CompositeRobot\code\C++\robot_visual\3rd\HuaYansdk\HuayanRobotLibrary-C++-V1.0.15.0\MSVC;%PATH%
+set QT_QPA_PLATFORM=offscreen
+
+D:\Tool\AInstall\CMake\bin\ctest.exe ^
+  --test-dir D:/project/CompositeRobot/code/C++/build-robot_visual-Desktop_Qt_5_12_8_MSVC2017_64bit-Debug ^
+  --output-on-failure ^
+  -C Debug
+```
+
+Qt 5.12.8、Qt 6.8.3以及Ninja、JOM必须分别使用各自的构建目录。
+出现生成器或缓存目录不匹配错误时，应删除对应的失效构建目录后重新配置，
+不得复制或改写其他构建目录中的`CMakeCache.txt`。
+
+## 8. 使用原则
 
 - 具体构建目录包含有效 `CMakeCache.txt` 时直接构建，不重复配置。
+- 构建Qt 5.12.8时必须先加载VS2017环境；构建Qt 6.8.3时必须先加载VS2022环境，不得混用编译器。
 - CTest必须在包含 `CTestTestfile.cmake` 的实际构建目录运行。
 - Windows测试找不到Qt或华沿SDK运行时DLL时，先检查本文测试命令中的 `PATH`。
 - 测试被操作系统策略或外部依赖阻止时，应报告为“未运行”，不得报告为“测试失败”或“测试通过”。

@@ -257,7 +257,10 @@ int main()
                     && requestBody.contains(QStringLiteral("emitOperationError"))
                     && requestBody.contains(QStringLiteral("emit surveyReady();")),
                 "统一窗口轮询必须限定联合验证状态，并在8秒硬上限停止而不是继续等待");
-    requireTrue(visionSource.contains(QStringLiteral("req.setTransferTimeout(5000)")),
+    requireTrue(visionSource.contains(QStringLiteral(
+                    "setNetworkTransferTimeout(req, 5000)"))
+                    && visionSource.contains(QStringLiteral(
+                        "attachNetworkTransferTimeout(reply, 5000)")),
                 "视觉 HTTP 单次推理必须保留 5 秒网络超时，不能让某一帧无限阻塞");
 
     const QString stopBody = requireBracedScopeAfter(

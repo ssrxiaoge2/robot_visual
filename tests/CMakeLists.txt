@@ -143,6 +143,14 @@ target_link_libraries(charge_pile_settings_dialog_tests PRIVATE
 add_test(NAME charge_pile_settings_dialog_tests
          COMMAND charge_pile_settings_dialog_tests)
 
+if(WIN32 AND QT_VERSION VERSION_LESS 6.0)
+    # Qt 5.12 的 offscreen/minimal 插件在创建 QMessageBox 时会崩溃；
+    # 该测试仅在 Windows Qt5 下使用原生平台插件，不改变产品行为。
+    set_tests_properties(charge_pile_settings_dialog_tests PROPERTIES
+        ENVIRONMENT "QT_QPA_PLATFORM=windows"
+    )
+endif()
+
 add_executable(charge_ui_and_shutdown_contract_tests
     test_charge_ui_and_shutdown_contract.cpp
 )

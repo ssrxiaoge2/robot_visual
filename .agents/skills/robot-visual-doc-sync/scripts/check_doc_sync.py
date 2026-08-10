@@ -74,6 +74,14 @@ IMPACT_RULES: tuple[tuple[re.Pattern[str], tuple[str, ...]], ...] = (
         ),
     ),
     (
+        re.compile(r"^src/networkcompat\.h$"),
+        (
+            "项目认知入口.md",
+            "系统架构与模块职责.md",
+            "代码符号测试索引与维护规则.md",
+        ),
+    ),
+    (
         re.compile(r"^tests/"),
         ("代码符号测试索引与维护规则.md",),
     ),

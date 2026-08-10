@@ -47,6 +47,16 @@ class ImpactMappingTest(unittest.TestCase):
 
         self.assertIn("代码符号测试索引与维护规则.md", impacts)
 
+    def test_network_compat_routes_to_supporting_documents(self) -> None:
+        """公共Qt网络兼容层应进入入口、架构和符号索引。"""
+
+        impacts = MODULE.impacted_documents(["src/networkcompat.h"])
+
+        self.assertIn("项目认知入口.md", impacts)
+        self.assertIn("系统架构与模块职责.md", impacts)
+        self.assertIn("代码符号测试索引与维护规则.md", impacts)
+        self.assertNotIn("关键业务不变量与现场约束.md", impacts)
+
     def test_unknown_new_source_routes_to_generic_project_documents(self) -> None:
         """未来新增的源码模块即使尚未登记名称，也不能绕过文档同步。"""
 

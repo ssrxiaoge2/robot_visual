@@ -1,4 +1,5 @@
 #include "customSysScheduler.h"
+#include "networkcompat.h"
 
 #include <QJsonArray>
 #include <QJsonDocument>
@@ -7,8 +8,6 @@
 #include <QJsonValue>
 #include <QNetworkReply>
 #include <QNetworkRequest>
-#include <QTimer>
-#include <QVariant>
 
 namespace {
 constexpr int kRequestTimeoutMs = 5000;
@@ -19,33 +18,17 @@ bool isHttpOk(int status)
     return status >= 200 && status < 300;
 }
 
-void setRequestTransferTimeout(QNetworkRequest &request, int timeoutMs)
+qint64 jsonInteger(const QJsonValue &value)
 {
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    request.setTransferTimeout(timeoutMs);
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
+    return value.toInteger();
 #else
-    Q_UNUSED(request)
-    Q_UNUSED(timeoutMs)
+    // Qt 5.12 缺少 QJsonValue::toInteger()。先校验 JSON 类型，避免
+    // QVariant 把字符串或布尔值额外转换为整数。
+    return value.isDouble() ? static_cast<qint64>(value.toDouble()) : 0;
 #endif
 }
 
-void attachReplyTransferTimeout(QNetworkReply *reply, int timeoutMs)
-{
-#if QT_VERSION < QT_VERSION_CHECK(5, 15, 0)
-    QTimer *timer = new QTimer(reply);
-    timer->setSingleShot(true);
-    QObject::connect(timer, &QTimer::timeout, reply, [reply]() {
-        if (reply->isRunning()) {
-            reply->abort();
-        }
-    });
-    QObject::connect(reply, &QNetworkReply::finished, timer, &QObject::deleteLater);
-    timer->start(timeoutMs);
-#else
-    Q_UNUSED(reply)
-    Q_UNUSED(timeoutMs)
-#endif
-}
 }
 
 CustomSysScheduler::CustomSysScheduler(QObject *parent)
@@ -91,14 +74,14 @@ void CustomSysScheduler::sendGet(Operation operation)
     QNetworkRequest request(m_endpoint);
     request.setHeader(QNetworkRequest::UserAgentHeader,
                       QStringLiteral("wh-robot-visual/custom-system-test"));
-    setRequestTransferTimeout(request, kRequestTimeoutMs);
+    setNetworkTransferTimeout(request, kRequestTimeoutMs);
 
     emit requestStarted(opText);
     emit logMessage(QStringLiteral("[客户系统] %1：GET %2")
                         .arg(opText, m_endpoint.toString()));
 
     QNetworkReply *reply = m_nam->get(request);
-    attachReplyTransferTimeout(reply, kRequestTimeoutMs);
+    attachNetworkTransferTimeout(reply, kRequestTimeoutMs);
     connect(reply, &QNetworkReply::finished, this, [this, reply, operation]() {
         handleReply(reply, operation);
         reply->deleteLater();
@@ -181,7 +164,7 @@ CustomSysScheduler::ParseResult CustomSysScheduler::parseDayReply(const QByteArr
 
     const QJsonObject obj = array.first().toObject();
     DayRecord record;
-    record.id = obj.value(QStringLiteral("id")).toVariant().toLongLong();
+    record.id = jsonInteger(obj.value(QStringLiteral("id")));
     record.statDate = QDateTime::fromString(
         obj.value(QStringLiteral("statDate")).toString(), Qt::ISODate);
     record.lineId = obj.value(QStringLiteral("lineId")).toString();

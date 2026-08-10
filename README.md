@@ -4,7 +4,7 @@
 > [`docs/project-knowledge/项目认知入口.md`](docs/project-knowledge/项目认知入口.md)
 > 开始阅读。历史设计与实施计划用于追溯原因，不代表当前代码事实。
 
-基于 **Qt 6 + C++17** 开发的工业仓储自动化上位机软件，运行于 Windows / Linux 工控机。机械臂通过 **华沿 SDK** 控制，AGV 通过 **Modbus TCP** 控制，视觉服务通过 **HTTP** 通信，扫码枪通过 **N-ScanHub SDK / TCP** 主动触发读取。
+基于 **Qt 5.12.8 / Qt 6.8 + C++17** 开发的工业仓储自动化上位机软件，运行于 Windows / Linux 工控机。机械臂通过 **华沿 SDK** 控制，AGV 通过 **Modbus TCP** 控制，视觉服务通过 **HTTP** 通信，扫码枪通过 **N-ScanHub SDK / TCP** 主动触发读取。
 
 当前主流程由 `LineManager + TaskExecutor` 驱动：现场 12 个工位发生缺料后进入 FIFO 队列，系统依次完成 AGV 前往取料位、机械臂视觉取料、夹紧前扫码、AGV 前往倒料位、机械臂倒料、AGV 前往码垛位、机械臂放置空箱，队列为空时 AGV 回到 LM1 待机。
 
@@ -30,12 +30,12 @@
 
 | 环境 | 要求 |
 |------|------|
-| Qt | 6.8+ |
+| Qt | 5.12.8或6.8+ |
 | Qt 模块 | `Widgets` `Network` `SerialBus`（Modbus） |
 | C++ | C++17 |
 | CMake | 3.16+ |
-| 编译器（开发）| MinGW 64-bit 或 MSVC 2022（Windows） |
-| 编译器（部署）| GCC 9+（Linux） |
+| 编译器（Windows）| MSVC 2017 64位（Qt 5.12.8）或MSVC 2022 64位（Qt 6.8+） |
+| 编译器（Linux）| 与目标Qt及SDK架构匹配的GCC，支持x86_64与aarch64 |
 | 华沿 SDK | `3rd/HuaYansdk/HuayanRobotLibrary-C++-V1.0.15.0`（随仓库提供） |
 | Orbbec SDK | 仅 Linux 部署链接（`if(UNIX)` 条件编译） |
 | Python（相机）| 3.8+，pyorbbecsdk，Flask，ultralytics，sam2 |
@@ -59,6 +59,7 @@ wh-robot-visual/
 │   ├── huayanScheduler.{h,cpp}     # 华沿机械臂 SDK 调度（取料/收姿态/倒料阶段机）
 │   ├── agvcontroller.{h,cpp}       # 仙工 AGV Modbus TCP（监控轮询 + 派单）
 │   ├── visionclient.{h,cpp}        # 视觉 HTTP + 手眼坐标转换 + 多目标择优
+│   ├── networkcompat.h             # Qt5/Qt6网络空闲超时兼容层
 │   ├── devicemanager.{h,cpp}       # 设备生命周期管理 + 工位→站点映射
 │   ├── nscanscheduler.{h,cpp}      # N-ScanHub 网络扫码 SDK 同步封装
 │   ├── palletscheduler.{h,cpp}     # 空箱码垛点位规划与已放数量缓存
@@ -98,7 +99,7 @@ cd robot_visual/wh-robot-visual
 
 ### 2. 编译（Windows 开发）
 
-用 Qt Creator 打开 `CMakeLists.txt`，选择 Qt 6.8+ MinGW/MSVC kit，直接 Build。
+用 Qt Creator 打开 `CMakeLists.txt`，选择Qt 5.12.8 + MSVC 2017或Qt 6.8+ + MSVC 2022套件后直接构建。不同Qt版本和CMake生成器必须使用不同构建目录，固定环境路径和命令见[`docs/development/Qt构建与测试环境.md`](docs/development/Qt构建与测试环境.md)。
 
 > 运行时需把 `3rd/HuaYansdk/.../MinGW`（含 `libHR_Pro.dll`）加入 PATH，否则启动报缺少 DLL。
 > Linux 专属功能（Orbbec SDK、GPIO 补光灯）在 Windows 编译时自动跳过。

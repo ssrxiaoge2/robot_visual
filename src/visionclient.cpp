@@ -22,48 +22,16 @@
  */
 
 #include "visionclient.h"
+#include "networkcompat.h"
 
 #include <QNetworkRequest>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QJsonArray>
 #include <QStringList>
-#include <QTimer>
 #include <QtMath>
 
 #include <cmath>
-
-namespace {
-
-void setNetworkRequestTransferTimeout(QNetworkRequest &request, int timeoutMs)
-{
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    request.setTransferTimeout(timeoutMs);
-#else
-    Q_UNUSED(request)
-    Q_UNUSED(timeoutMs)
-#endif
-}
-
-void attachReplyTransferTimeout(QNetworkReply *reply, int timeoutMs)
-{
-#if QT_VERSION < QT_VERSION_CHECK(5, 15, 0)
-    QTimer *timer = new QTimer(reply);
-    timer->setSingleShot(true);
-    QObject::connect(timer, &QTimer::timeout, reply, [reply]() {
-        if (reply->isRunning()) {
-            reply->abort();
-        }
-    });
-    QObject::connect(reply, &QNetworkReply::finished, timer, &QObject::deleteLater);
-    timer->start(timeoutMs);
-#else
-    Q_UNUSED(reply)
-    Q_UNUSED(timeoutMs)
-#endif
-}
-
-}
 
 // ── 默认手眼变换矩阵（T_tool_cam，行主序）──────────────────────
 //
@@ -165,13 +133,13 @@ void VisionHttpClient::fetchInference()
 
     QNetworkRequest req(QUrl(
         QString("http://%1:%2/inference").arg(m_ip).arg(m_port)));
-    setNetworkRequestTransferTimeout(req, 5000); // 5s 超时，防止阻塞工作流
+    setNetworkTransferTimeout(req, 5000); // 5s 超时，防止阻塞工作流
 
     const quint64 requestGeneration = m_inferenceGeneration;
     const TargetSelectionContext requestContext = m_targetSelectionContext;
     QNetworkReply *reply = m_nam->get(req);
     reply->setParent(this);
-    attachReplyTransferTimeout(reply, 5000);
+    attachNetworkTransferTimeout(reply, 5000);
     m_pendingInferenceReplies.insert(reply);
     connect(reply, &QNetworkReply::finished, this,
             [this, reply, requestGeneration, requestContext]() {
@@ -196,11 +164,11 @@ void VisionHttpClient::fetchAnnotatedFrame()
 
     QNetworkRequest req(QUrl(
         QString("http://%1:%2/frame/annotated").arg(m_ip).arg(m_port)));
-    setNetworkRequestTransferTimeout(req, 3000); // 3s 超时（帧获取允许更短超时）
+    setNetworkTransferTimeout(req, 3000); // 3s 超时（帧获取允许更短超时）
 
     QNetworkReply *reply = m_nam->get(req);
     reply->setParent(this);
-    attachReplyTransferTimeout(reply, 3000);
+    attachNetworkTransferTimeout(reply, 3000);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         if (reply->error() == QNetworkReply::NoError) {
             QImage img;
@@ -226,11 +194,11 @@ void VisionHttpClient::checkStatus()
 
     QNetworkRequest req(QUrl(
         QString("http://%1:%2/status").arg(m_ip).arg(m_port)));
-    setNetworkRequestTransferTimeout(req, 5000);
+    setNetworkTransferTimeout(req, 5000);
 
     QNetworkReply *reply = m_nam->get(req);
     reply->setParent(this);
-    attachReplyTransferTimeout(reply, 5000);
+    attachNetworkTransferTimeout(reply, 5000);
     connect(reply, &QNetworkReply::finished, this, [this, reply]() {
         if (reply->error() == QNetworkReply::NoError) {
             const QJsonDocument doc = QJsonDocument::fromJson(reply->readAll());

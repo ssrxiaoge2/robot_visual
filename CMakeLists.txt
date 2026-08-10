@@ -48,6 +48,7 @@ set(PROJECT_SOURCES
         src/agvcontroller.h
         src/visionclient.cpp
         src/visionclient.h
+        src/networkcompat.h
         src/visionalignmentdecision.cpp
         src/visionalignmentdecision.h
         src/runtimesettings.cpp
@@ -141,25 +142,35 @@ set(NSCAN_SDK_ROOT "${CMAKE_SOURCE_DIR}/3rd/NScanHubSdk")
 if(UNIX AND NOT APPLE)
     set(NSCAN_PLATFORM_ROOT "${NSCAN_SDK_ROOT}/N-ScanHubForLinux_v1.0.05")
     set(NSCAN_ARCH "" CACHE STRING "N-ScanHub Linux SDK architecture directory")
-    set(NSCAN_ARCH_CANDIDATES)
-
-    if(NSCAN_ARCH)
-        list(APPEND NSCAN_ARCH_CANDIDATES "${NSCAN_ARCH}")
-    endif()
+    set(NSCAN_DETECTED_ARCH_CANDIDATES)
 
     string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" NSCAN_SYSTEM_PROCESSOR)
     if(NSCAN_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-        list(APPEND NSCAN_ARCH_CANDIDATES aarch64 arm64)
+        list(APPEND NSCAN_DETECTED_ARCH_CANDIDATES aarch64 arm64)
     elseif(NSCAN_SYSTEM_PROCESSOR MATCHES "^(arm|armv7|armv7l|armhf)$")
-        list(APPEND NSCAN_ARCH_CANDIDATES arm armhf)
+        list(APPEND NSCAN_DETECTED_ARCH_CANDIDATES arm armhf)
     elseif(NSCAN_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
-        list(APPEND NSCAN_ARCH_CANDIDATES x64 x86_64)
+        list(APPEND NSCAN_DETECTED_ARCH_CANDIDATES x64 x86_64)
     elseif(NSCAN_SYSTEM_PROCESSOR MATCHES "^(i386|i686|x86)$")
-        list(APPEND NSCAN_ARCH_CANDIDATES x32 x86)
+        list(APPEND NSCAN_DETECTED_ARCH_CANDIDATES x32 x86)
     elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
-        list(APPEND NSCAN_ARCH_CANDIDATES x64 aarch64 arm64)
+        list(APPEND NSCAN_DETECTED_ARCH_CANDIDATES x64 aarch64 arm64)
     else()
-        list(APPEND NSCAN_ARCH_CANDIDATES x32 arm armhf)
+        list(APPEND NSCAN_DETECTED_ARCH_CANDIDATES x32 arm armhf)
+    endif()
+
+    if(NSCAN_ARCH)
+        list(FIND NSCAN_DETECTED_ARCH_CANDIDATES "${NSCAN_ARCH}"
+             NSCAN_ARCH_MATCH_INDEX)
+        if(NSCAN_ARCH_MATCH_INDEX EQUAL -1)
+            message(FATAL_ERROR
+                "N-ScanHub cached architecture ${NSCAN_ARCH} conflicts with "
+                "processor ${CMAKE_SYSTEM_PROCESSOR}; allowed: "
+                "${NSCAN_DETECTED_ARCH_CANDIDATES}")
+        endif()
+        set(NSCAN_ARCH_CANDIDATES "${NSCAN_ARCH}")
+    else()
+        set(NSCAN_ARCH_CANDIDATES ${NSCAN_DETECTED_ARCH_CANDIDATES})
     endif()
 
     set(NSCAN_LIBRARY_SOURCE "")
@@ -276,19 +287,29 @@ target_include_directories(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/include")
 
 if(UNIX)
     set(HUAYAN_ARCH "" CACHE STRING "HuaYan Linux SDK architecture directory")
-    set(HUAYAN_ARCH_CANDIDATES)
-
-    if(HUAYAN_ARCH)
-        list(APPEND HUAYAN_ARCH_CANDIDATES "${HUAYAN_ARCH}")
-    endif()
+    set(HUAYAN_DETECTED_ARCH_CANDIDATES)
 
     string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" HUAYAN_SYSTEM_PROCESSOR)
     if(HUAYAN_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
-        list(APPEND HUAYAN_ARCH_CANDIDATES aarch64 arm64)
+        list(APPEND HUAYAN_DETECTED_ARCH_CANDIDATES aarch64 arm64)
     elseif(HUAYAN_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
-        list(APPEND HUAYAN_ARCH_CANDIDATES x86_64 x64)
+        list(APPEND HUAYAN_DETECTED_ARCH_CANDIDATES x86_64 x64)
     elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
-        list(APPEND HUAYAN_ARCH_CANDIDATES x86_64 aarch64 arm64)
+        list(APPEND HUAYAN_DETECTED_ARCH_CANDIDATES x86_64 aarch64 arm64)
+    endif()
+
+    if(HUAYAN_ARCH)
+        list(FIND HUAYAN_DETECTED_ARCH_CANDIDATES "${HUAYAN_ARCH}"
+             HUAYAN_ARCH_MATCH_INDEX)
+        if(HUAYAN_ARCH_MATCH_INDEX EQUAL -1)
+            message(FATAL_ERROR
+                "HuaYan cached architecture ${HUAYAN_ARCH} conflicts with "
+                "processor ${CMAKE_SYSTEM_PROCESSOR}; allowed: "
+                "${HUAYAN_DETECTED_ARCH_CANDIDATES}")
+        endif()
+        set(HUAYAN_ARCH_CANDIDATES "${HUAYAN_ARCH}")
+    else()
+        set(HUAYAN_ARCH_CANDIDATES ${HUAYAN_DETECTED_ARCH_CANDIDATES})
     endif()
 
     set(HUAYAN_LIBRARY "")

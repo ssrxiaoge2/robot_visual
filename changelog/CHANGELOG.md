@@ -5,6 +5,38 @@
 
 ---
 
+## 2026-08-10 | 未发布 | Qt双版本与Linux双架构兼容
+
+### 兼容
+- 支持Qt 5.12.8与Qt 6.8，Windows分别使用MSVC 2017和MSVC 2022构建。
+- Linux第三方SDK按目标处理器选择x86_64或aarch64目录，并检查缓存架构与当前处理器是否冲突。
+- 为Qt 5.12补充字符串、文本流、JSON整数和网络空闲超时兼容处理，不改变原有业务超时值和状态机。
+
+### 验证
+- Windows Qt 5.12.8与Qt 6.8.3完整构建通过；两套环境的常规CTest均为`31/31`通过。
+- Linux aarch64目标机完整编译通过。
+- `charge_pile_controller_tests`包含真实等待时序，本轮未纳入常规CTest统计。
+
+### 文档
+- 补充本机Qt 5.12.8、VS2017、Ninja的固定路径、构建目录、配置和测试命令。
+- 更新项目入口、系统架构及符号索引，登记Qt网络兼容层。
+
+### 文件
+- `CMakeLists.txt`
+- `src/qtcompat.h`
+- `src/networkcompat.h`
+- `src/visionclient.cpp`
+- `src/camerawindow.cpp`
+- `src/customSysScheduler.cpp`
+- `tests/`
+- `docs/development/Qt构建与测试环境.md`
+- `docs/project-knowledge/`
+- `.agents/skills/robot-visual-doc-sync/`
+- `README.md`
+- `changelog/CHANGELOG.md`
+
+---
+
 ## 2026-07-26 | 未发布 | 4D 视觉联合对准与现场复测
 
 ### 变更

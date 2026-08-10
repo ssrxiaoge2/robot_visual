@@ -32,7 +32,7 @@ inline auto qtSkipEmptyParts()
 
 #if defined(_MSC_VER) && QT_VERSION < QT_VERSION_CHECK(6, 0, 0)
 #undef QStringLiteral
-// Qt 5.12 + MSVC 2017 can encode u"" literals with the local code page.
-// Decode ordinary literals as UTF-8 so UTF-8 source text is shown correctly.
+// Qt 5.12 + MSVC 2017 的 u"" 字面量会按本地代码页解码源文件。
+// 项目源码统一为 UTF-8，因此在该组合下显式按 UTF-8 构造字符串。
 #define QStringLiteral(str) QString::fromUtf8(str)
 #endif
