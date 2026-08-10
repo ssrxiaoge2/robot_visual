@@ -11,6 +11,7 @@
 #include "lineorchestrator.h"
 #include "nscanscheduler.h"
 #include "palletscheduler.h"
+#include "qtcompat.h"
 #include "settingsmanager.h"
 #include "visionclient.h"
 
@@ -1643,7 +1644,7 @@ void DeviceManager::loadStationMap()
     m_stationMap.clear();
     QSettings settings(kSettingsOrg, kSettingsApp);
     const QString raw = settings.value(kStationMapKey).toString();
-    for (const QString &entry : raw.split(',', Qt::SkipEmptyParts)) {
+    for (const QString &entry : raw.split(',', qtSkipEmptyParts())) {
         const QStringList kv = entry.split(':');
         if (kv.size() != 2) continue;
         bool okW = false, okS = false;

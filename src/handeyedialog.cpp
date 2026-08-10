@@ -1,4 +1,5 @@
 #include "handeyedialog.h"
+#include "qtcompat.h"
 
 #include <QFile>
 #include <QFileDialog>
@@ -222,7 +223,7 @@ bool HandEyeDialog::parseFile(const QString &path)
         const QString line = in.readLine().trimmed();
         if (line.isEmpty() || line.startsWith('#'))
             continue;
-        const QStringList parts = line.split(' ', Qt::SkipEmptyParts);
+        const QStringList parts = line.split(' ', qtSkipEmptyParts());
         for (const QString &p : parts) {
             bool ok = false;
             const float v = p.toFloat(&ok);

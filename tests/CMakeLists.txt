@@ -1,4 +1,5 @@
-find_package(Qt6 REQUIRED COMPONENTS Core Test Network Gui)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Core Test Network Gui Widgets SerialBus)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Core Test Network Gui Widgets SerialBus)
 
 add_executable(agv_do0_tests
     test_agv_do0.cpp
@@ -10,10 +11,10 @@ target_include_directories(agv_do0_tests PRIVATE
 )
 
 target_link_libraries(agv_do0_tests PRIVATE
-    Qt6::Core
-    Qt6::Network
-    Qt6::SerialBus
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::SerialBus
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME agv_do0_tests
@@ -36,10 +37,10 @@ target_include_directories(auto_charge_coordinator_tests PRIVATE
 )
 
 target_link_libraries(auto_charge_coordinator_tests PRIVATE
-    Qt6::Core
-    Qt6::Network
-    Qt6::SerialBus
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::SerialBus
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME auto_charge_coordinator_tests
@@ -57,9 +58,9 @@ target_include_directories(charge_pile_controller_tests PRIVATE
 )
 
 target_link_libraries(charge_pile_controller_tests PRIVATE
-    Qt6::Core
-    Qt6::Network
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME charge_pile_controller_tests
@@ -75,8 +76,8 @@ target_include_directories(charge_pile_protocol_tests PRIVATE
 )
 
 target_link_libraries(charge_pile_protocol_tests PRIVATE
-    Qt6::Core
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME charge_pile_protocol_tests
@@ -92,8 +93,8 @@ target_include_directories(charge_settings_tests PRIVATE
 )
 
 target_link_libraries(charge_settings_tests PRIVATE
-    Qt6::Core
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME charge_settings_tests
@@ -113,10 +114,10 @@ target_include_directories(charge_settings_transaction_tests PRIVATE
 )
 
 target_link_libraries(charge_settings_transaction_tests PRIVATE
-    Qt6::Core
-    Qt6::Network
-    Qt6::SerialBus
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::SerialBus
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME charge_settings_transaction_tests
@@ -133,10 +134,10 @@ target_include_directories(charge_pile_settings_dialog_tests PRIVATE
 )
 
 target_link_libraries(charge_pile_settings_dialog_tests PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Widgets
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Widgets
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME charge_pile_settings_dialog_tests
@@ -150,8 +151,12 @@ target_compile_definitions(charge_ui_and_shutdown_contract_tests PRIVATE
     PROJECT_SOURCE_DIR="${CMAKE_SOURCE_DIR}"
 )
 
+target_include_directories(charge_ui_and_shutdown_contract_tests PRIVATE
+    "${CMAKE_SOURCE_DIR}/src"
+)
+
 target_link_libraries(charge_ui_and_shutdown_contract_tests PRIVATE
-    Qt6::Core
+    Qt${QT_VERSION_MAJOR}::Core
 )
 
 add_test(NAME charge_ui_and_shutdown_contract_tests
@@ -167,9 +172,9 @@ target_include_directories(charge_shutdown_policy_tests PRIVATE
 )
 
 target_link_libraries(charge_shutdown_policy_tests PRIVATE
-    Qt6::Core
-    Qt6::Network
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME charge_shutdown_policy_tests
@@ -185,8 +190,8 @@ target_include_directories(vision_alignment_decision_tests PRIVATE
 )
 
 target_link_libraries(vision_alignment_decision_tests PRIVATE
-    Qt6::Core
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME vision_alignment_decision_tests
@@ -202,10 +207,10 @@ target_include_directories(vision_alignment_safety_tests PRIVATE
 )
 
 target_link_libraries(vision_alignment_safety_tests PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Network
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME vision_alignment_safety_tests
@@ -222,10 +227,10 @@ target_include_directories(visionclient_generation_tests PRIVATE
 )
 
 target_link_libraries(visionclient_generation_tests PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Network
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME visionclient_generation_tests
@@ -249,11 +254,11 @@ target_include_directories(vision_failure_signal_integration_tests PRIVATE
 )
 
 target_link_libraries(vision_failure_signal_integration_tests PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Network
-    Qt6::SerialBus
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::SerialBus
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 # 集成测试会真正装载 HuayanScheduler 目标文件，因此 Windows 启动测试进程时
@@ -285,10 +290,10 @@ elseif(WIN32 AND MINGW)
     )
 elseif(UNIX)
     target_link_libraries(vision_failure_signal_integration_tests PRIVATE
-        "${HUAYAN_TEST_SDK_ROOT}/Linux/libHR_Pro.so"
+        "${HUAYAN_LIBRARY}"
     )
     set_property(TARGET vision_failure_signal_integration_tests APPEND PROPERTY
-        BUILD_RPATH "${HUAYAN_TEST_SDK_ROOT}/Linux"
+        BUILD_RPATH "${HUAYAN_SDK_ROOT}/Linux/${HUAYAN_ARCH}"
     )
 endif()
 
@@ -305,8 +310,8 @@ target_include_directories(runtime_settings_tests PRIVATE
 )
 
 target_link_libraries(runtime_settings_tests PRIVATE
-    Qt6::Core
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME runtime_settings_tests
@@ -323,8 +328,8 @@ target_include_directories(settings_manager_tests PRIVATE
 )
 
 target_link_libraries(settings_manager_tests PRIVATE
-    Qt6::Core
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME settings_manager_tests
@@ -339,9 +344,9 @@ target_include_directories(station_pickup_config_tests PRIVATE
 )
 
 target_link_libraries(station_pickup_config_tests PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Network
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Network
 )
 
 add_test(NAME station_pickup_config_tests
@@ -358,8 +363,8 @@ target_include_directories(pallet_place_sequence_tests PRIVATE
 )
 
 target_link_libraries(pallet_place_sequence_tests PRIVATE
-    Qt6::Core
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME pallet_place_sequence_tests
@@ -375,8 +380,8 @@ target_include_directories(pallet_scheduler_tests PRIVATE
 )
 
 target_link_libraries(pallet_scheduler_tests PRIVATE
-    Qt6::Core
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME pallet_scheduler_tests
@@ -391,7 +396,7 @@ target_include_directories(pallet_occupancy_removal_contract_tests PRIVATE
 )
 
 target_link_libraries(pallet_occupancy_removal_contract_tests PRIVATE
-    Qt6::Core
+    Qt${QT_VERSION_MAJOR}::Core
 )
 
 add_test(NAME pallet_occupancy_removal_contract_tests
@@ -406,10 +411,10 @@ target_include_directories(huayan_scheduler_contract_tests PRIVATE
 )
 
 target_link_libraries(huayan_scheduler_contract_tests PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Network
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME huayan_scheduler_contract_tests
@@ -424,7 +429,7 @@ target_include_directories(vision_joint_motion_contract_tests PRIVATE
 )
 
 target_link_libraries(vision_joint_motion_contract_tests PRIVATE
-    Qt6::Core
+    Qt${QT_VERSION_MAJOR}::Core
 )
 
 add_test(NAME vision_joint_motion_contract_tests
@@ -439,7 +444,7 @@ target_include_directories(task_executor_pallet_commit_semantics_tests PRIVATE
 )
 
 target_link_libraries(task_executor_pallet_commit_semantics_tests PRIVATE
-    Qt6::Core
+    Qt${QT_VERSION_MAJOR}::Core
 )
 
 add_test(NAME task_executor_pallet_commit_semantics_tests
@@ -454,7 +459,7 @@ target_include_directories(pallet_param_dialog_contract_tests PRIVATE
 )
 
 target_link_libraries(pallet_param_dialog_contract_tests PRIVATE
-    Qt6::Core
+    Qt${QT_VERSION_MAJOR}::Core
 )
 
 add_test(NAME pallet_param_dialog_contract_tests
@@ -471,9 +476,9 @@ target_include_directories(vision_target_selection_tests PRIVATE
 )
 
 target_link_libraries(vision_target_selection_tests PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Network
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Network
 )
 
 add_test(NAME vision_target_selection_tests
@@ -490,9 +495,9 @@ target_include_directories(anchor_target_selection_tests PRIVATE
 )
 
 target_link_libraries(anchor_target_selection_tests PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Network
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Network
 )
 
 add_test(NAME anchor_target_selection_tests
@@ -509,9 +514,9 @@ target_include_directories(locked_target_selection_tests PRIVATE
 )
 
 target_link_libraries(locked_target_selection_tests PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Network
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Network
 )
 
 add_test(NAME locked_target_selection_tests
@@ -526,7 +531,7 @@ target_include_directories(standalone_pickup_contract_tests PRIVATE
 )
 
 target_link_libraries(standalone_pickup_contract_tests PRIVATE
-    Qt6::Core
+    Qt${QT_VERSION_MAJOR}::Core
 )
 
 add_test(NAME standalone_pickup_contract_tests
@@ -541,7 +546,7 @@ target_include_directories(navigation_timeout_contract_tests PRIVATE
 )
 
 target_link_libraries(navigation_timeout_contract_tests PRIVATE
-    Qt6::Core
+    Qt${QT_VERSION_MAJOR}::Core
 )
 
 add_test(NAME navigation_timeout_contract_tests
@@ -569,11 +574,11 @@ target_include_directories(line_manager_charge_hold_contract_tests PRIVATE
 )
 
 target_link_libraries(line_manager_charge_hold_contract_tests PRIVATE
-    Qt6::Core
-    Qt6::Gui
-    Qt6::Network
-    Qt6::SerialBus
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Gui
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::SerialBus
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME line_manager_charge_hold_contract_tests
@@ -592,7 +597,7 @@ target_compile_definitions(depth_descent_contract_tests PRIVATE
 )
 
 target_link_libraries(depth_descent_contract_tests PRIVATE
-    Qt6::Core
+    Qt${QT_VERSION_MAJOR}::Core
 )
 
 add_test(NAME depth_descent_contract_tests
@@ -611,7 +616,7 @@ target_compile_definitions(stable_z_validation_contract_tests PRIVATE
 )
 
 target_link_libraries(stable_z_validation_contract_tests PRIVATE
-    Qt6::Core
+    Qt${QT_VERSION_MAJOR}::Core
 )
 
 add_test(NAME stable_z_validation_contract_tests
@@ -628,9 +633,9 @@ target_include_directories(settings_dialog_tests PRIVATE
 )
 
 target_link_libraries(settings_dialog_tests PRIVATE
-    Qt6::Core
-    Qt6::Widgets
-    Qt6::Test
+    Qt${QT_VERSION_MAJOR}::Core
+    Qt${QT_VERSION_MAJOR}::Widgets
+    Qt${QT_VERSION_MAJOR}::Test
 )
 
 add_test(NAME settings_dialog_tests

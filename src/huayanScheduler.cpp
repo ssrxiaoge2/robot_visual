@@ -1723,6 +1723,15 @@ bool HuayanScheduler::ensureConnected()
 }
 
 bool HuayanScheduler::executeMoveJ(double x, double y, double z,
+                                  double rx, double ry, double rz)
+{
+    // Qt5 的 QStringLiteral 默认实参会在部分 GCC/assembler 组合下生成重复局部符号。
+    // 默认命令号和坐标系放在实现文件中转发，避免头文件默认参数参与每个翻译单元展开。
+    return executeMoveJ(x, y, z, rx, ry, rz,
+                        QStringLiteral("0"), QStringLiteral("Base"));
+}
+
+bool HuayanScheduler::executeMoveJ(double x, double y, double z,
                                   double rx, double ry, double rz,
                                   const QString &cmdId,
                                   const QString &ucsName)

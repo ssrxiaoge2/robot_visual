@@ -111,8 +111,17 @@ ChargePileController::ChargePileController(QObject *parent)
             this, &ChargePileController::handleConnected);
     connect(&m_socket, &QTcpSocket::readyRead,
             this, &ChargePileController::handleReadyRead);
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
     connect(&m_socket, &QTcpSocket::errorOccurred,
             this, &ChargePileController::handleSocketError);
+#else
+    // 工控机 Qt 5.12.8 仍使用 error 信号；Qt 5.15/Qt6 才提供
+    // errorOccurred。两个信号语义一致，统一接入现有错误处理入口。
+    connect(&m_socket,
+            static_cast<void (QTcpSocket::*)(QAbstractSocket::SocketError)>(
+                &QTcpSocket::error),
+            this, &ChargePileController::handleSocketError);
+#endif
     connect(&m_responseTimer, &QTimer::timeout,
             this, &ChargePileController::handleResponseTimeout);
     connect(&m_actionPollTimer, &QTimer::timeout,

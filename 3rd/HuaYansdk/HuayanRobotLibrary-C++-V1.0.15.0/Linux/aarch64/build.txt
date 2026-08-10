@@ -1,0 +1,5 @@
+CMake 版本: cmake version 3.10.2
+CMake suite maintained and supported by Kitware (kitware.com/cmake).
+ARM-GCC 版本: aarch64-linux-gnu-gcc (Ubuntu/Linaro 7.5.0-3ubuntu1~18.04) 7.5.0
+ARM-G++ 版本: aarch64-linux-gnu-g++ (Ubuntu/Linaro 7.5.0-3ubuntu1~18.04) 7.5.0
+Make 工具版本: GNU Make 4.1

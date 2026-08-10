@@ -8,6 +8,7 @@
 #include <QUuid>
 
 #include <cmath>
+#include <type_traits>
 
 namespace {
 
@@ -64,6 +65,16 @@ bool readDouble(const QSettings &ini, const char *key, double *value)
     if (ok && isFinite(converted))
         *value = converted;
     return ok && isFinite(converted);
+}
+
+bool readSettingValue(const QSettings &ini, const char *key, int *value)
+{
+    return readInt(ini, key, value);
+}
+
+bool readSettingValue(const QSettings &ini, const char *key, double *value)
+{
+    return readDouble(ini, key, value);
 }
 
 void appendWarning(QStringList &warnings, const char *key)
@@ -173,16 +184,11 @@ ChargeSettingsLoadResult loadChargeSettings(const QString &iniPath)
 
     const ChargeSettings defaults = ChargeSettings::defaults();
     auto readAndValidate = [&result, &ini](const char *key, auto &field, const auto &defaultValue, auto validator) {
-        using ValueType = std::decay_t<decltype(field)>;
+        using ValueType = typename std::decay<decltype(field)>::type;
         if (!ini.contains(QLatin1String(key)))
             return;
         ValueType value{};
-        const bool converted = [&]() {
-            if constexpr (std::is_same_v<ValueType, double>)
-                return readDouble(ini, key, &value);
-            else
-                return readInt(ini, key, &value);
-        }();
+        const bool converted = readSettingValue(ini, key, &value);
         if (!converted || !validator(value)) {
             field = defaultValue;
             appendWarning(result.warnings, key);

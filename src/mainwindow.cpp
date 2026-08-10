@@ -27,6 +27,7 @@
 #include "autochargecoordinator.h"
 #include "chargepilesettingsdialog.h"
 #include "customSysScheduler.h"
+#include "qtcompat.h"
 #include "settingsdialog.h"
 
 #include <QAbstractItemView>
@@ -333,7 +334,7 @@ MainWindow::MainWindow(QWidget *parent)
                        << m_logFile->errorString();
         } else {
             m_logStream = new QTextStream(m_logFile);
-            m_logStream->setEncoding(QStringConverter::Utf8);
+            setTextStreamUtf8(*m_logStream);
         }
     }
 

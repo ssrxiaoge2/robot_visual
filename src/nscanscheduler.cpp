@@ -11,7 +11,11 @@
 
 #include <QMutex>
 #include <QMutexLocker>
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
 #include <QStringDecoder>
+#else
+#include <QTextCodec>
+#endif
 
 #include <array>
 #include <chrono>
@@ -230,7 +234,14 @@ QString NScanScheduler::decodeBarcode(const QByteArray &rawData)
         normalized.chop(1);
     }
 
+#if QT_VERSION >= QT_VERSION_CHECK(6, 0, 0)
     QStringDecoder utf8Decoder(QStringDecoder::Utf8);
     const QString utf8 = utf8Decoder.decode(normalized);
     return utf8Decoder.hasError() ? QString::fromLatin1(normalized) : utf8;
+#else
+    QTextCodec::ConverterState state;
+    QTextCodec *utf8Codec = QTextCodec::codecForName("UTF-8");
+    const QString utf8 = utf8Codec->toUnicode(normalized.constData(), normalized.size(), &state);
+    return state.invalidChars > 0 ? QString::fromLatin1(normalized) : utf8;
+#endif
 }

@@ -1,9 +1,9 @@
 #pragma once
 
 #include "chargesettings.h"
+#include "qtcompat.h"
 
 #include <QDateTime>
-#include <QByteArrayView>
 #include <QElapsedTimer>
 #include <QMetaType>
 #include <QObject>

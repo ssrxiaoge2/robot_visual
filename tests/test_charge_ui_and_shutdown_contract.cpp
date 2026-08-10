@@ -1,4 +1,7 @@
+#include "../src/qtcompat.h"
+
 #include <QCoreApplication>
+#include <QDebug>
 #include <QDir>
 #include <QFile>
 #include <QString>
@@ -17,7 +20,7 @@ QString readUtf8File(const QString &path)
             QStringLiteral("无法读取契约文件：%1").arg(path).toStdString());
     }
     QTextStream stream(&file);
-    stream.setEncoding(QStringConverter::Utf8);
+    setTextStreamUtf8(stream);
     return stream.readAll();
 }
 

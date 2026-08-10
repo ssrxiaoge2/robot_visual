@@ -472,9 +472,11 @@ private:
 
     bool ensureConnected();
     bool executeMoveJ(double x, double y, double z,
+                      double rx, double ry, double rz);
+    bool executeMoveJ(double x, double y, double z,
                       double rx, double ry, double rz,
-                      const QString &cmdId   = QStringLiteral("0"),
-                      const QString &ucsName = QStringLiteral("Base"));
+                      const QString &cmdId,
+                      const QString &ucsName);
     bool setGripper(bool open);
 
     /// 待下发的 SDK 运动命令类型。

@@ -1,7 +1,8 @@
 #pragma once
 
+#include "qtcompat.h"
+
 #include <QByteArray>
-#include <QByteArrayView>
 #include <QString>
 #include <QtGlobal>
 

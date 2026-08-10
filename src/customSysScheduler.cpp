@@ -7,6 +7,7 @@
 #include <QJsonValue>
 #include <QNetworkReply>
 #include <QNetworkRequest>
+#include <QTimer>
 #include <QVariant>
 
 namespace {
@@ -16,6 +17,34 @@ const char *kDefaultEndpoint = "http://192.168.115.229:5084/api/MesData/day";
 bool isHttpOk(int status)
 {
     return status >= 200 && status < 300;
+}
+
+void setRequestTransferTimeout(QNetworkRequest &request, int timeoutMs)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(timeoutMs);
+#else
+    Q_UNUSED(request)
+    Q_UNUSED(timeoutMs)
+#endif
+}
+
+void attachReplyTransferTimeout(QNetworkReply *reply, int timeoutMs)
+{
+#if QT_VERSION < QT_VERSION_CHECK(5, 15, 0)
+    QTimer *timer = new QTimer(reply);
+    timer->setSingleShot(true);
+    QObject::connect(timer, &QTimer::timeout, reply, [reply]() {
+        if (reply->isRunning()) {
+            reply->abort();
+        }
+    });
+    QObject::connect(reply, &QNetworkReply::finished, timer, &QObject::deleteLater);
+    timer->start(timeoutMs);
+#else
+    Q_UNUSED(reply)
+    Q_UNUSED(timeoutMs)
+#endif
 }
 }
 
@@ -62,15 +91,14 @@ void CustomSysScheduler::sendGet(Operation operation)
     QNetworkRequest request(m_endpoint);
     request.setHeader(QNetworkRequest::UserAgentHeader,
                       QStringLiteral("wh-robot-visual/custom-system-test"));
-#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
-    request.setTransferTimeout(kRequestTimeoutMs);
-#endif
+    setRequestTransferTimeout(request, kRequestTimeoutMs);
 
     emit requestStarted(opText);
     emit logMessage(QStringLiteral("[客户系统] %1：GET %2")
                         .arg(opText, m_endpoint.toString()));
 
     QNetworkReply *reply = m_nam->get(request);
+    attachReplyTransferTimeout(reply, kRequestTimeoutMs);
     connect(reply, &QNetworkReply::finished, this, [this, reply, operation]() {
         handleReply(reply, operation);
         reply->deleteLater();
@@ -153,7 +181,7 @@ CustomSysScheduler::ParseResult CustomSysScheduler::parseDayReply(const QByteArr
 
     const QJsonObject obj = array.first().toObject();
     DayRecord record;
-    record.id = obj.value(QStringLiteral("id")).toInteger();
+    record.id = obj.value(QStringLiteral("id")).toVariant().toLongLong();
     record.statDate = QDateTime::fromString(
         obj.value(QStringLiteral("statDate")).toString(), Qt::ISODate);
     record.lineId = obj.value(QStringLiteral("lineId")).toString();

@@ -19,6 +19,40 @@
 
 #include "camerawindow.h"
 
+#include <QNetworkRequest>
+
+namespace {
+
+void setCameraRequestTransferTimeout(QNetworkRequest &request, int timeoutMs)
+{
+#if QT_VERSION >= QT_VERSION_CHECK(5, 15, 0)
+    request.setTransferTimeout(timeoutMs);
+#else
+    Q_UNUSED(request)
+    Q_UNUSED(timeoutMs)
+#endif
+}
+
+void attachCameraReplyTransferTimeout(QNetworkReply *reply, int timeoutMs)
+{
+#if QT_VERSION < QT_VERSION_CHECK(5, 15, 0)
+    QTimer *timer = new QTimer(reply);
+    timer->setSingleShot(true);
+    QObject::connect(timer, &QTimer::timeout, reply, [reply]() {
+        if (reply->isRunning()) {
+            reply->abort();
+        }
+    });
+    QObject::connect(reply, &QNetworkReply::finished, timer, &QObject::deleteLater);
+    timer->start(timeoutMs);
+#else
+    Q_UNUSED(reply)
+    Q_UNUSED(timeoutMs)
+#endif
+}
+
+}
+
 #include <QVBoxLayout>
 #include <QStatusBar>
 #include <QNetworkRequest>
@@ -87,8 +121,9 @@ void CameraWindow::onTimerTick()
     if (m_pending) return; // 上一帧还未返回，跳过本次
 
     QNetworkRequest req(m_url);
-    req.setTransferTimeout(3000); // 3s 超时，防止单帧卡住所有后续帧
+    setCameraRequestTransferTimeout(req, 3000); // 3s 超时，防止单帧卡住所有后续帧
     m_pending = m_nam->get(req);
+    attachCameraReplyTransferTimeout(m_pending, 3000);
 }
 
 /**

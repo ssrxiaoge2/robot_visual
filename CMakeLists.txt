@@ -9,6 +9,10 @@ set(CMAKE_AUTORCC ON)
 set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 
+if(MSVC)
+    add_compile_options(/utf-8)
+endif()
+
 add_compile_definitions(PROJECT_SOURCE_DIR="${CMAKE_CURRENT_SOURCE_DIR}")
 
 string(TIMESTAMP APP_BUILD_DATE "%Y-%m-%d")
@@ -18,13 +22,12 @@ add_compile_definitions(
     APP_BUILD_DATE="${APP_BUILD_DATE}"
 )
 
-find_package(Qt6 REQUIRED COMPONENTS Widgets Network SerialBus)
+find_package(QT NAMES Qt6 Qt5 REQUIRED COMPONENTS Widgets Network SerialBus)
+find_package(Qt${QT_VERSION_MAJOR} REQUIRED COMPONENTS Widgets Network SerialBus)
 include(GNUInstallDirs)
 
-# ── 自动化测试（与 src 业务代码分离，Qt Creator 中显示为独立 tests 目录）──
-include(CTest)
-if(BUILD_TESTING)
-    add_subdirectory(tests)
+if(MSVC AND QT_VERSION_MAJOR EQUAL 5)
+    add_compile_options("/FI${CMAKE_CURRENT_SOURCE_DIR}/src/qtcompat.h")
 endif()
 
 # 调度文件职责：lineconfig/taskqueue 定义模型，taskexecutor 执行单任务，
@@ -99,16 +102,27 @@ set(PROJECT_SOURCES
         src/palletparamdialog.h
 )
 
-qt_add_executable(wh-robot-visual
-    MANUAL_FINALIZATION
-    ${PROJECT_SOURCES}
-)
+if(QT_VERSION_MAJOR EQUAL 6)
+    qt_add_executable(wh-robot-visual
+        MANUAL_FINALIZATION
+        ${PROJECT_SOURCES}
+    )
+else()
+    add_executable(wh-robot-visual
+        ${PROJECT_SOURCES}
+    )
+endif()
 
-target_link_libraries(wh-robot-visual PRIVATE Qt6::Widgets Qt6::Network Qt6::SerialBus)
+target_link_libraries(wh-robot-visual PRIVATE
+    Qt${QT_VERSION_MAJOR}::Widgets
+    Qt${QT_VERSION_MAJOR}::Network
+    Qt${QT_VERSION_MAJOR}::SerialBus
+)
 target_include_directories(wh-robot-visual PRIVATE src/)
 
 # ── 奥比中光 SDK（仅 Linux 部署时链接，Windows 开发环境跳过）──
-if(UNIX)
+option(ENABLE_ORBBEC_SDK "Link Orbbec SDK directly on Linux" OFF)
+if(UNIX AND ENABLE_ORBBEC_SDK)
     set(ORBBEC_SDK_ROOT "${CMAKE_SOURCE_DIR}/3rd/OrbbecSdk")
     target_include_directories(wh-robot-visual PRIVATE "${ORBBEC_SDK_ROOT}/include")
     target_link_directories(wh-robot-visual PRIVATE "${ORBBEC_SDK_ROOT}/lib")
@@ -126,19 +140,62 @@ set(NSCAN_SDK_ROOT "${CMAKE_SOURCE_DIR}/3rd/NScanHubSdk")
 
 if(UNIX AND NOT APPLE)
     set(NSCAN_PLATFORM_ROOT "${NSCAN_SDK_ROOT}/N-ScanHubForLinux_v1.0.05")
-    if(CMAKE_SIZEOF_VOID_P EQUAL 8)
-        set(NSCAN_ARCH x64)
-    else()
-        set(NSCAN_ARCH x32)
+    set(NSCAN_ARCH "" CACHE STRING "N-ScanHub Linux SDK architecture directory")
+    set(NSCAN_ARCH_CANDIDATES)
+
+    if(NSCAN_ARCH)
+        list(APPEND NSCAN_ARCH_CANDIDATES "${NSCAN_ARCH}")
     endif()
 
-    set(NSCAN_LIBRARY_SOURCE "${NSCAN_PLATFORM_ROOT}/lib/${NSCAN_ARCH}/N-ScanHub.so")
-    set(NSCAN_LIBUSB_SOURCE "${NSCAN_PLATFORM_ROOT}/libusb/${NSCAN_ARCH}/libusb-1.0.so")
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" NSCAN_SYSTEM_PROCESSOR)
+    if(NSCAN_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        list(APPEND NSCAN_ARCH_CANDIDATES aarch64 arm64)
+    elseif(NSCAN_SYSTEM_PROCESSOR MATCHES "^(arm|armv7|armv7l|armhf)$")
+        list(APPEND NSCAN_ARCH_CANDIDATES arm armhf)
+    elseif(NSCAN_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
+        list(APPEND NSCAN_ARCH_CANDIDATES x64 x86_64)
+    elseif(NSCAN_SYSTEM_PROCESSOR MATCHES "^(i386|i686|x86)$")
+        list(APPEND NSCAN_ARCH_CANDIDATES x32 x86)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        list(APPEND NSCAN_ARCH_CANDIDATES x64 aarch64 arm64)
+    else()
+        list(APPEND NSCAN_ARCH_CANDIDATES x32 arm armhf)
+    endif()
+
+    set(NSCAN_LIBRARY_SOURCE "")
+    set(NSCAN_LIBUSB_SOURCE "")
+    foreach(NSCAN_ARCH_CANDIDATE IN LISTS NSCAN_ARCH_CANDIDATES)
+        set(NSCAN_CANDIDATE_LIBRARY "${NSCAN_PLATFORM_ROOT}/lib/${NSCAN_ARCH_CANDIDATE}/N-ScanHub.so")
+        set(NSCAN_CANDIDATE_LIBUSB "${NSCAN_PLATFORM_ROOT}/libusb/${NSCAN_ARCH_CANDIDATE}/libusb-1.0.so")
+        if(EXISTS "${NSCAN_CANDIDATE_LIBRARY}" AND EXISTS "${NSCAN_CANDIDATE_LIBUSB}")
+            set(NSCAN_ARCH "${NSCAN_ARCH_CANDIDATE}")
+            set(NSCAN_LIBRARY_SOURCE "${NSCAN_CANDIDATE_LIBRARY}")
+            set(NSCAN_LIBUSB_SOURCE "${NSCAN_CANDIDATE_LIBUSB}")
+            break()
+        endif()
+    endforeach()
+
     set(NSCAN_RUNTIME_DIR "${CMAKE_CURRENT_BINARY_DIR}/nscan-runtime")
 
-    if(NOT EXISTS "${NSCAN_LIBRARY_SOURCE}" OR NOT EXISTS "${NSCAN_LIBUSB_SOURCE}")
-        message(FATAL_ERROR "N-ScanHub Linux ${NSCAN_ARCH} SDK files are incomplete")
+    if(NOT NSCAN_LIBRARY_SOURCE OR NOT NSCAN_LIBUSB_SOURCE)
+        message(FATAL_ERROR
+            "N-ScanHub Linux SDK files are incomplete for processor "
+            "${CMAKE_SYSTEM_PROCESSOR}; checked: ${NSCAN_ARCH_CANDIDATES}")
     endif()
+
+    message(STATUS "N-ScanHub Linux SDK architecture: ${NSCAN_ARCH}")
+
+    set(NSCAN_EXTRA_LIBRARY_SOURCES)
+    foreach(NSCAN_DEPENDENCY_DIR
+            "${NSCAN_PLATFORM_ROOT}/lib/${NSCAN_ARCH}"
+            "${NSCAN_PLATFORM_ROOT}/libusb/${NSCAN_ARCH}")
+        file(GLOB NSCAN_DEPENDENCY_LIBRARIES "${NSCAN_DEPENDENCY_DIR}/*.so")
+        list(APPEND NSCAN_EXTRA_LIBRARY_SOURCES ${NSCAN_DEPENDENCY_LIBRARIES})
+    endforeach()
+    list(REMOVE_ITEM NSCAN_EXTRA_LIBRARY_SOURCES
+        "${NSCAN_LIBRARY_SOURCE}"
+        "${NSCAN_LIBUSB_SOURCE}"
+    )
 
     # SDK 依赖的 SONAME 是 libusb-1.0.so.0，但厂商包文件名缺少末尾 .0；
     # 在构建目录暂存正确名称，避免修改 3rd 下的原始 SDK 文件。
@@ -147,12 +204,26 @@ if(UNIX AND NOT APPLE)
                    "${NSCAN_RUNTIME_DIR}/libN-ScanHub.so" COPYONLY)
     configure_file("${NSCAN_LIBUSB_SOURCE}"
                    "${NSCAN_RUNTIME_DIR}/libusb-1.0.so.0" COPYONLY)
-
-    target_include_directories(wh-robot-visual PRIVATE "${NSCAN_PLATFORM_ROOT}/include")
-    target_link_libraries(wh-robot-visual PRIVATE
-        "-Wl,--no-as-needed"
+    set(NSCAN_RUNTIME_LIBRARIES
         "${NSCAN_RUNTIME_DIR}/libN-ScanHub.so"
         "${NSCAN_RUNTIME_DIR}/libusb-1.0.so.0"
+    )
+
+    foreach(NSCAN_EXTRA_LIBRARY_SOURCE IN LISTS NSCAN_EXTRA_LIBRARY_SOURCES)
+        get_filename_component(NSCAN_EXTRA_LIBRARY_NAME
+            "${NSCAN_EXTRA_LIBRARY_SOURCE}" NAME)
+        set(NSCAN_EXTRA_RUNTIME_LIBRARY
+            "${NSCAN_RUNTIME_DIR}/${NSCAN_EXTRA_LIBRARY_NAME}")
+        configure_file("${NSCAN_EXTRA_LIBRARY_SOURCE}"
+                       "${NSCAN_EXTRA_RUNTIME_LIBRARY}" COPYONLY)
+        list(APPEND NSCAN_RUNTIME_LIBRARIES "${NSCAN_EXTRA_RUNTIME_LIBRARY}")
+    endforeach()
+
+    target_include_directories(wh-robot-visual PRIVATE "${NSCAN_PLATFORM_ROOT}/include")
+    target_link_options(wh-robot-visual PRIVATE "-Wl,-rpath-link,${NSCAN_RUNTIME_DIR}")
+    target_link_libraries(wh-robot-visual PRIVATE
+        "-Wl,--no-as-needed"
+        ${NSCAN_RUNTIME_LIBRARIES}
         "-Wl,--as-needed"
     )
     target_compile_definitions(wh-robot-visual PRIVATE NSCAN_SDK_AVAILABLE=1)
@@ -165,11 +236,7 @@ if(UNIX AND NOT APPLE)
         "$ORIGIN/../${CMAKE_INSTALL_LIBDIR}"
     )
 
-    install(FILES
-        "${NSCAN_RUNTIME_DIR}/libN-ScanHub.so"
-        "${NSCAN_RUNTIME_DIR}/libusb-1.0.so.0"
-        DESTINATION "${CMAKE_INSTALL_LIBDIR}"
-    )
+    install(FILES ${NSCAN_RUNTIME_LIBRARIES} DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 elseif(WIN32 AND MSVC)
     set(NSCAN_PLATFORM_ROOT
         "${NSCAN_SDK_ROOT}/N-ScanHubForWindows_v1.0.05/N-ScanHubForWindows")
@@ -208,15 +275,66 @@ set(HUAYAN_SDK_ROOT "${CMAKE_SOURCE_DIR}/3rd/HuaYansdk/HuayanRobotLibrary-C++-V1
 target_include_directories(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/include")
 
 if(UNIX)
-    target_link_directories(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/Linux")
-    target_link_libraries(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/Linux/libHR_Pro.so")
+    set(HUAYAN_ARCH "" CACHE STRING "HuaYan Linux SDK architecture directory")
+    set(HUAYAN_ARCH_CANDIDATES)
+
+    if(HUAYAN_ARCH)
+        list(APPEND HUAYAN_ARCH_CANDIDATES "${HUAYAN_ARCH}")
+    endif()
+
+    string(TOLOWER "${CMAKE_SYSTEM_PROCESSOR}" HUAYAN_SYSTEM_PROCESSOR)
+    if(HUAYAN_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+        list(APPEND HUAYAN_ARCH_CANDIDATES aarch64 arm64)
+    elseif(HUAYAN_SYSTEM_PROCESSOR MATCHES "^(x86_64|amd64)$")
+        list(APPEND HUAYAN_ARCH_CANDIDATES x86_64 x64)
+    elseif(CMAKE_SIZEOF_VOID_P EQUAL 8)
+        list(APPEND HUAYAN_ARCH_CANDIDATES x86_64 aarch64 arm64)
+    endif()
+
+    set(HUAYAN_LIBRARY "")
+    foreach(HUAYAN_ARCH_CANDIDATE IN LISTS HUAYAN_ARCH_CANDIDATES)
+        set(HUAYAN_CANDIDATE_LIBRARY
+            "${HUAYAN_SDK_ROOT}/Linux/${HUAYAN_ARCH_CANDIDATE}/libHR_Pro.so")
+        if(EXISTS "${HUAYAN_CANDIDATE_LIBRARY}")
+            set(HUAYAN_ARCH "${HUAYAN_ARCH_CANDIDATE}")
+            set(HUAYAN_LIBRARY "${HUAYAN_CANDIDATE_LIBRARY}")
+            break()
+        endif()
+    endforeach()
+
+    if(NOT HUAYAN_LIBRARY)
+        message(FATAL_ERROR
+            "HuaYan Linux SDK files are incomplete for processor "
+            "${CMAKE_SYSTEM_PROCESSOR}; checked: ${HUAYAN_ARCH_CANDIDATES}")
+    endif()
+
+    message(STATUS "HuaYan Linux SDK architecture: ${HUAYAN_ARCH}")
+
+    target_link_directories(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/Linux/${HUAYAN_ARCH}")
+    target_link_libraries(wh-robot-visual PRIVATE "${HUAYAN_LIBRARY}")
+    set_property(TARGET wh-robot-visual APPEND PROPERTY BUILD_RPATH
+        "${HUAYAN_SDK_ROOT}/Linux/${HUAYAN_ARCH}"
+    )
+    install(FILES "${HUAYAN_LIBRARY}" DESTINATION "${CMAKE_INSTALL_LIBDIR}")
 elseif(WIN32)
     if(MSVC)
         target_link_directories(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/MSVC")
         target_link_libraries(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/MSVC/HR_Pro.lib")
+        add_custom_command(TARGET wh-robot-visual POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${HUAYAN_SDK_ROOT}/MSVC/HR_Pro.dll"
+                    "$<TARGET_FILE_DIR:wh-robot-visual>/HR_Pro.dll"
+            COMMENT "Copying HuaYan runtime DLL"
+        )
     elseif(MINGW)
         target_link_directories(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/MinGW")
         target_link_libraries(wh-robot-visual PRIVATE "${HUAYAN_SDK_ROOT}/MinGW/libHR_Pro.dll.a")
+        add_custom_command(TARGET wh-robot-visual POST_BUILD
+            COMMAND ${CMAKE_COMMAND} -E copy_if_different
+                    "${HUAYAN_SDK_ROOT}/MinGW/HR_Pro.dll"
+                    "$<TARGET_FILE_DIR:wh-robot-visual>/HR_Pro.dll"
+            COMMENT "Copying HuaYan runtime DLL"
+        )
     endif()
 endif()
 
@@ -234,10 +352,19 @@ if(APPLE)
     )
 endif()
 
+# 测试目标需要复用上面已经按平台和架构选定的第三方 SDK 路径。
+# 因此必须在 SDK 配置完成后再加载 tests，避免测试目录重复维护一套路径。
+include(CTest)
+if(BUILD_TESTING)
+    add_subdirectory(tests)
+endif()
+
 install(TARGETS wh-robot-visual
     BUNDLE DESTINATION .
     LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
     RUNTIME DESTINATION ${CMAKE_INSTALL_BINDIR}
 )
 
-qt_finalize_executable(wh-robot-visual)
+if(QT_VERSION_MAJOR EQUAL 6)
+    qt_finalize_executable(wh-robot-visual)
+endif()
