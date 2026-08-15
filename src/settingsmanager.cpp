@@ -256,12 +256,12 @@ SettingsLoadResult SettingsManager::load()
         warnFallback(key);
     };
 
-    requirePositiveDouble(QStringLiteral("pickup/largeBasketGrabZClearanceMm"),
-                          &loaded.pickup.largeBasketGrabZClearanceMm,
-                          defaults.pickup.largeBasketGrabZClearanceMm);
-    requirePositiveDouble(QStringLiteral("pickup/purpleBasketGrabZClearanceMm"),
-                          &loaded.pickup.purpleBasketGrabZClearanceMm,
-                          defaults.pickup.purpleBasketGrabZClearanceMm);
+    requireFiniteDouble(QStringLiteral("pickup/largeBasketGrabZClearanceMm"),
+                        &loaded.pickup.largeBasketGrabZClearanceMm,
+                        defaults.pickup.largeBasketGrabZClearanceMm);
+    requireFiniteDouble(QStringLiteral("pickup/purpleBasketGrabZClearanceMm"),
+                        &loaded.pickup.purpleBasketGrabZClearanceMm,
+                        defaults.pickup.purpleBasketGrabZClearanceMm);
     requireFiniteDouble(QStringLiteral("pickup/grabXCompensationMm"),
                         &loaded.pickup.grabXCompensationMm,
                         defaults.pickup.grabXCompensationMm);

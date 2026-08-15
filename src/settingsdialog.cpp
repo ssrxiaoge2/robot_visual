@@ -159,9 +159,9 @@ QWidget *SettingsDialog::createCategoryPage(SettingsCategory category)
     switch (category) {
     case SettingsCategory::Pickup:
         addDouble(page, "largeBasketClearance", QStringLiteral("大篮筐抓取 Z 余量"),
-                  0, 1000, "mm");
+                  -1000, 1000, "mm");
         addDouble(page, "purpleBasketClearance", QStringLiteral("紫筐抓取 Z 余量"),
-                  0, 1000, "mm");
+                  -1000, 1000, "mm");
         addDouble(page, "grabXCompensation", QStringLiteral("抓取 X 补偿"),
                   -500, 500, "mm");
         addDouble(page, "grabYCompensation", QStringLiteral("抓取 Y 补偿"),

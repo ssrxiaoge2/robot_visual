@@ -33,10 +33,10 @@ SettingsValidation validateRuntimeSettings(const RuntimeSettings &settings)
 {
     QStringList errors;
 
-    require(finitePositive(settings.pickup.largeBasketGrabZClearanceMm),
-            QStringLiteral("大篮筐抓取 Z 余量必须为正数"), &errors);
-    require(finitePositive(settings.pickup.purpleBasketGrabZClearanceMm),
-            QStringLiteral("紫筐抓取 Z 余量必须为正数"), &errors);
+    require(std::isfinite(settings.pickup.largeBasketGrabZClearanceMm),
+            QStringLiteral("大篮筐抓取 Z 余量必须为有限数值"), &errors);
+    require(std::isfinite(settings.pickup.purpleBasketGrabZClearanceMm),
+            QStringLiteral("紫筐抓取 Z 余量必须为有限数值"), &errors);
     require(std::isfinite(settings.pickup.grabXCompensationMm),
             QStringLiteral("抓取 X 补偿必须为有限数值"), &errors);
     require(std::isfinite(settings.pickup.grabYCompensationMm),

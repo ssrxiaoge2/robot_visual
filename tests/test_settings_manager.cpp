@@ -119,7 +119,7 @@ private slots:
         QVERIFY(!result.warnings.isEmpty());
     }
 
-    void outOfRangePickupValueFallsBackWithoutLosingOtherValue()
+    void negativePickupValueLoadsWithoutLosingOtherValue()
     {
         QTemporaryDir dir;
         QVERIFY(dir.isValid());
@@ -134,10 +134,9 @@ private slots:
         SettingsManager manager(path);
         const SettingsLoadResult result = manager.load();
 
-        QCOMPARE(result.settings.pickup.largeBasketGrabZClearanceMm, 417.0);
+        QCOMPARE(result.settings.pickup.largeBasketGrabZClearanceMm, -1.0);
         QCOMPARE(result.settings.pickup.purpleBasketGrabZClearanceMm, 390.0);
-        QVERIFY(result.warnings.join('\n').contains(
-            QStringLiteral("pickup/largeBasketGrabZClearanceMm")));
+        QVERIFY(result.warnings.isEmpty());
     }
 
     void stageDoesNotReplaceOfficialFileUntilCommit()

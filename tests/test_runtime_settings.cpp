@@ -51,6 +51,15 @@ private slots:
         QVERIFY(!validateRuntimeSettings(settings).ok);
     }
 
+    void acceptsNegativePickupClearance()
+    {
+        RuntimeSettings settings = RuntimeSettings::defaults();
+        settings.pickup.largeBasketGrabZClearanceMm = -25.0;
+        settings.pickup.purpleBasketGrabZClearanceMm = -30.0;
+
+        QVERIFY(validateRuntimeSettings(settings).ok);
+    }
+
     void validatesFineCorrectionCountRange()
     {
         RuntimeSettings settings = RuntimeSettings::defaults();

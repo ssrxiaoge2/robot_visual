@@ -66,6 +66,23 @@ private slots:
         QCOMPARE(cancelSpy.count(), 0);
     }
 
+    void pickupClearanceAllowsNegativeValues()
+    {
+        SettingsDialog dialog(RuntimeSettings::defaults(), false);
+        auto *large = dialog.findChild<QDoubleSpinBox *>("largeBasketClearanceSpin");
+        auto *purple = dialog.findChild<QDoubleSpinBox *>("purpleBasketClearanceSpin");
+        QVERIFY(large);
+        QVERIFY(purple);
+        QCOMPARE(large->minimum(), -1000.0);
+        QCOMPARE(purple->minimum(), -1000.0);
+
+        large->setValue(-25.0);
+        purple->setValue(-30.0);
+
+        QCOMPARE(dialog.candidate().pickup.largeBasketGrabZClearanceMm, -25.0);
+        QCOMPARE(dialog.candidate().pickup.purpleBasketGrabZClearanceMm, -30.0);
+    }
+
     void safetyChangeRequiresAcknowledgement()
     {
         SettingsDialog dialog(RuntimeSettings::defaults(), false);

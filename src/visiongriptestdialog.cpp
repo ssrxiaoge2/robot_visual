@@ -163,7 +163,6 @@ void VisionGripTestDialog::buildUi()
     m_zClearanceSpin = createOffsetSpin(offsetGroup, QStringLiteral(" mm"));
     m_xCompensationSpin->setValue(0.0);
     m_yCompensationSpin->setValue(0.0);
-    m_zClearanceSpin->setRange(0.0, 2000.0);
     m_zClearanceSpin->setValue(kDefaultBasketZClearanceMm);
     m_zDescendPreviewLabel = new QLabel(offsetGroup);
     m_zDescendPreviewLabel->setMinimumWidth(120);
