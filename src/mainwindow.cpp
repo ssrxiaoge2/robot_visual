@@ -29,6 +29,8 @@
 #include "customSysScheduler.h"
 #include "qtcompat.h"
 #include "settingsdialog.h"
+#include "visionclient.h"
+#include "visiongriptestdialog.h"
 
 #include <QAbstractItemView>
 #include <QCheckBox>
@@ -2029,6 +2031,15 @@ void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
     row3->addWidget(m_huayanSpeedLabel);
     vbox->addLayout(row3);
 
+    // 独立测试页只读取当前 IP 作为初值，窗口内部自建视觉客户端并直连 SDK，
+    // 不复用阶段一调度器，也不会改变任务队列或工位配置。
+    auto *row4 = new QHBoxLayout();
+    m_huayanVisionGripTestBtn = new QPushButton(QStringLiteral("视觉抓取独立测试"));
+    m_huayanVisionGripTestBtn->setFixedHeight(28);
+    row4->addWidget(m_huayanVisionGripTestBtn);
+    row4->addStretch();
+    vbox->addLayout(row4);
+
     connect(m_huayanConnectBtn,    &QPushButton::clicked,
             this, &MainWindow::onHuayanConnect);
     connect(m_huayanDisconnectBtn, &QPushButton::clicked,
@@ -2039,6 +2050,8 @@ void MainWindow::initHuayanPanel(QVBoxLayout *leftPanel)
             this, &MainWindow::onHuayanStop);
     connect(m_huayanReleaseBtn,    &QPushButton::clicked,
             this, &MainWindow::onHuayanRelease);
+    connect(m_huayanVisionGripTestBtn, &QPushButton::clicked,
+            this, &MainWindow::onVisionGripTest);
     connect(m_huayanSpeedSlider,   &QSlider::valueChanged,
             this, &MainWindow::onHuayanSpeedChanged);
 
@@ -2880,6 +2893,37 @@ void MainWindow::onHuayanLog(const QString &msg)
 void MainWindow::onHuayanRelease()
 {
     m_devMgr->huayanScheduler()->releaseGripper();
+}
+
+void MainWindow::onVisionGripTest()
+{
+    if (m_visionGripTestDialog) {
+        m_visionGripTestDialog->raise();
+        m_visionGripTestDialog->activateWindow();
+        return;
+    }
+
+    DeviceManager::Config cfg;
+    buildConfig(cfg);
+    auto *dialog = new VisionGripTestDialog(cfg.cameraIP,
+                                            cfg.cameraPort,
+                                            cfg.huayanIP,
+                                            cfg.huayanPort,
+                                            this);
+    // 独立实例不共享对象生命周期，但必须复制当前已生效矩阵；否则用户在本次运行中
+    // 通过手眼窗口应用的新矩阵只存在于主 VisionHttpClient，测试结果会退回编译时默认值。
+    float handEyeMatrix[16] = {};
+    m_devMgr->visionClient()->copyHandEyeMatrix(handEyeMatrix);
+    dialog->setHandEyeMatrix(handEyeMatrix);
+    m_visionGripTestDialog = dialog;
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    connect(dialog, &VisionGripTestDialog::logMessage,
+            this, &MainWindow::log);
+    connect(dialog, &QObject::destroyed,
+            this, [this] { m_visionGripTestDialog = nullptr; });
+    dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 void MainWindow::onHuayanSpeedChanged(int percent)

@@ -93,6 +93,15 @@ void VisionHttpClient::setHandEyeMatrix(const float m[16])
             m_T[r][c] = m[r * 4 + c];
 }
 
+void VisionHttpClient::copyHandEyeMatrix(float out[16]) const
+{
+    if (!out)
+        return;
+    for (int r = 0; r < 4; ++r)
+        for (int c = 0; c < 4; ++c)
+            out[r * 4 + c] = m_T[r][c];
+}
+
 void VisionHttpClient::setBaseRz(qint32 baseRzReg) { m_baseRzReg = baseRzReg; }
 void VisionHttpClient::setBaseRx(qint32 baseRxReg) { m_baseRxReg = baseRxReg; }
 void VisionHttpClient::setBaseRy(qint32 baseRyReg) { m_baseRyReg = baseRyReg; }

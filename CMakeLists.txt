@@ -48,6 +48,8 @@ set(PROJECT_SOURCES
         src/agvcontroller.h
         src/visionclient.cpp
         src/visionclient.h
+        src/visiongriptestdialog.cpp
+        src/visiongriptestdialog.h
         src/networkcompat.h
         src/visionalignmentdecision.cpp
         src/visionalignmentdecision.h

@@ -202,6 +202,15 @@ public:
     void setHandEyeMatrix(const float m[16]);
 
     /**
+     * @brief 复制当前已经生效的手眼矩阵。
+     * @param out 调用方提供的 16 元素行主序缓冲区。
+     *
+     * 该接口只导出数值快照，不暴露内部数组所有权，供独立诊断窗口复现与主业务
+     * 完全一致的坐标转换配置。
+     */
+    void copyHandEyeMatrix(float out[16]) const;
+
+    /**
      * @brief 设置 Rz 基准寄存器值（angle=0° 时写入 Holding906 的值）
      *
      * 单位与机器人协议一致（例：0.001°/unit 时，180° → 传入 180000）

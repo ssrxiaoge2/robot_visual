@@ -26,6 +26,7 @@ class HuayanScheduler;
 class PalletParamDialog;
 class PalletScheduler;
 class ChargePileSettingsDialog;
+class VisionGripTestDialog;
 class QCheckBox;
 class QCloseEvent;
 class QSpinBox;
@@ -85,6 +86,8 @@ private slots:
     void onHuayanStartStageOne();
     void onHuayanStop();
     void onHuayanRelease();
+    /// 打开不接入任务调度链的视觉抓取独立测试窗口。
+    void onVisionGripTest();
     void onHuayanSpeedChanged(int percent);
     void onHuayanLog(const QString &msg);
     void onHuayanStageStarted(const QString &stageName);
@@ -246,8 +249,10 @@ private:
     QComboBox *m_huayanStationCombo = nullptr; ///< 仅供手工阶段一测试选择 1～12 号工位。
     QPushButton     *m_huayanStopBtn       = nullptr;
     QPushButton     *m_huayanReleaseBtn    = nullptr;
+    QPushButton     *m_huayanVisionGripTestBtn = nullptr;
     QSlider         *m_huayanSpeedSlider   = nullptr;
     QLabel          *m_huayanSpeedLabel    = nullptr;
+    QPointer<VisionGripTestDialog> m_visionGripTestDialog;
 
     // ── AGV 调试面板 ────────────────────────────────────────
     QLineEdit    *m_editWorkstation = nullptr;
